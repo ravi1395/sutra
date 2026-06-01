@@ -1,0 +1,27 @@
+mod fs_cmds;
+mod git;
+mod pty;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        // Suppress Tauri's default native menu so the in-window menu bar is the
+        // single source of truth (see src/menubar.ts).
+        .menu(|handle| tauri::menu::MenuBuilder::new(handle).build())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(pty::PtyState::default())
+        .invoke_handler(tauri::generate_handler![
+            fs_cmds::list_dir,
+            fs_cmds::read_file,
+            fs_cmds::write_file,
+            fs_cmds::file_mtime,
+            git::git_head_content,
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

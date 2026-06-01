@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sutra — Mockup B · Codex</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #0c0d0e;          /* page */
+    --bg-1: #111213;          /* window body */
+    --bg-2: #161718;          /* bars */
+    --bg-3: #1e1f21;          /* raised */
+    --bg-4: #26282b;          /* hover */
+    --line: #232527;
+    --line-2: #1a1c1d;
+    --fg: #e6e7e9;
+    --fg-mid: #a0a3a8;
+    --fg-dim: #6c7075;
+    --fg-faint: #474b50;
+    --em: #34d399;            /* single emerald accent */
+    --em-dim: #1f8a63;
+    --em-wash: rgba(52,211,153,0.10);
+    --amber: #e3b341;         /* added */
+    --blue: #4493f8;          /* modified */
+    --red: #f0716a;           /* deleted */
+    --ui: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--ui);
+    color: var(--fg);
+    background:
+      linear-gradient(180deg, #0e0f10 0%, var(--bg-0) 100%);
+    min-height: 100%;
+    padding: 40px 32px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* hairline grid texture */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 999; opacity: .4;
+    background-image:
+      linear-gradient(rgba(255,255,255,.012) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.012) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .page { max-width: 1180px; margin: 0 auto; position: relative; }
+
+  .masthead { display: flex; align-items: center; gap: 14px; margin: 4px 0 26px; }
+  .masthead .mark {
+    width: 26px; height: 26px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center;
+    background: var(--em-wash); border: 1px solid var(--em-dim); color: var(--em);
+    font-family: var(--mono); font-weight: 600; font-size: 14px;
+  }
+  .masthead h1 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+  .masthead .tag { font-size: 12.5px; color: var(--fg-dim); }
+  .masthead .spacer { flex: 1; }
+  .masthead .variant { font-family: var(--mono); font-size: 11px; color: var(--em); border: 1px solid var(--line); padding: 4px 10px; border-radius: 4px; }
+
+  /* ============ FAUX WINDOW ============ */
+  .window {
+    border-radius: 10px; overflow: hidden; background: var(--bg-1);
+    border: 1px solid var(--line);
+    box-shadow: 0 30px 80px -28px rgba(0,0,0,.85);
+  }
+
+  /* menu bar */
+  .chrome {
+    height: 38px; display: flex; align-items: center; gap: 2px;
+    padding: 0 10px; background: var(--bg-2); border-bottom: 1px solid var(--line);
+    position: relative; user-select: none;
+  }
+  .traffic { display: flex; gap: 8px; margin-right: 12px; }
+  .traffic i { width: 11px; height: 11px; border-radius: 50%; }
+  .traffic i:nth-child(1){ background:#ff5f57; }
+  .traffic i:nth-child(2){ background:#febc2e; }
+  .traffic i:nth-child(3){ background:#28c840; }
+
+  .menu { display: flex; }
+  .menu button {
+    font-family: var(--ui); font-size: 12.5px; color: var(--fg-mid);
+    background: none; border: 0; padding: 6px 8px; border-radius: 4px; cursor: pointer;
+  }
+  .menu button:hover { background: var(--bg-3); color: var(--fg); }
+  .menu button.open { background: var(--em-wash); color: var(--em); }
+
+  .chrome .spacer { flex: 1; }
+
+  /* command-palette affordance (Codex-y) */
+  .cmd {
+    display: inline-flex; align-items: center; gap: 8px; min-width: 200px;
+    background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 10px; color: var(--fg-faint); font-size: 12px; cursor: text; margin-right: 8px;
+  }
+  .cmd:hover { border-color: var(--fg-faint); }
+  .cmd svg { color: var(--fg-dim); }
+  .cmd .kbd { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-dim); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; }
+
+  /* workspace switcher */
+  .ws { display: flex; align-items: center; gap: 3px; margin-right: 6px; }
+  .ws .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--bg-3); border: 1px solid var(--line); color: var(--fg);
+    font-family: var(--mono); font-size: 12px; font-weight: 500;
+    padding: 5px 9px; border-radius: 6px; cursor: pointer;
+  }
+  .ws .pill:hover { border-color: var(--em-dim); }
+  .ws .pill .sig { color: var(--em); }
+  .ws .pill .chev { color: var(--fg-dim); }
+  .ws .add {
+    width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid var(--line); color: var(--fg-dim); cursor: pointer;
+  }
+  .ws .add:hover { color: var(--em); border-color: var(--em-dim); }
+
+  .tools { display: flex; gap: 3px; margin-left: 6px; }
+  .tbtn {
+    width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid transparent; color: var(--fg-dim); cursor: pointer; position: relative;
+  }
+  .tbtn:hover { color: var(--fg); background: var(--bg-3); }
+  .tbtn.on { color: var(--em); background: var(--em-wash); border-color: var(--em-dim); }
+
+  /* folder picker open */
+  .picker {
+    position: absolute; top: 44px; left: 232px; width: 326px; z-index: 40;
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 5px;
+    box-shadow: 0 24px 60px -18px rgba(0,0,0,.85);
+  }
+  .picker .ptitle {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--fg-faint); padding: 8px 9px 6px; display: flex; justify-content: space-between;
+  }
+  .picker .row { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 6px; cursor: pointer; }
+  .picker .row:hover { background: var(--bg-3); }
+  .picker .row.cur { background: var(--em-wash); box-shadow: inset 2px 0 0 var(--em); }
+  .picker .row .ic { color: var(--fg-dim); }
+  .picker .row.cur .ic { color: var(--em); }
+  .picker .row .meta { flex: 1; min-width: 0; }
+  .picker .row .nm { font-size: 13px; }
+  .picker .row .pth { font-family: var(--mono); font-size: 10px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .picker .row .ago { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+  .picker .row.cur .ago { color: var(--em); }
+  .picker .sep { height: 1px; background: var(--line); margin: 5px 7px; }
+  .picker .act { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 6px; cursor: pointer; color: var(--fg-mid); font-size: 12.5px; }
+  .picker .act:hover { background: var(--bg-3); color: var(--fg); }
+  .picker .act svg { color: var(--fg-dim); }
+  .picker .act kbd { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+
+  /* body */
+  .body { display: flex; height: 356px; }
+  .side { flex: 0 0 184px; background: var(--bg-2); border-right: 1px solid var(--line); padding: 6px 0; }
+  .side .shead { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-faint); padding: 6px 12px 8px; }
+  .t { font-family: var(--mono); font-size: 12px; line-height: 1.85; }
+  .t .r { display: flex; align-items: center; gap: 7px; padding: 0 12px; color: var(--fg-mid); white-space: nowrap; }
+  .t .r:hover { background: var(--bg-3); }
+  .t .r.sel { background: var(--bg-4); color: var(--fg); box-shadow: inset 2px 0 0 var(--em); }
+  .t .r .tw { width: 8px; color: var(--fg-faint); }
+  .t .r.ind { padding-left: 26px; }
+  .sq { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .tabs { height: 34px; display: flex; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 0 13px; font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); border-right: 1px solid var(--line); cursor: pointer; }
+  .tab.active { background: var(--bg-1); color: var(--fg); box-shadow: inset 0 -2px 0 var(--em); }
+  .tab .d { width: 6px; height: 6px; border-radius: 50%; background: var(--em); }
+  .tab .x { color: var(--fg-faint); }
+
+  .code { flex: 1; overflow: hidden; background: var(--bg-1); }
+  .code pre { margin: 0; padding: 12px 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.72; }
+  .ln { display: grid; grid-template-columns: 42px 4px 1fr; align-items: center; }
+  .ln .g { text-align: right; padding-right: 12px; color: var(--fg-faint); font-size: 11px; }
+  .ln .gut { width: 2px; height: 100%; margin: 0 auto; }
+  .ln .c { padding-left: 14px; white-space: pre; }
+  .k { color: #ff7b72; } .s { color: #a5d6ff; } .f { color: #d2a8ff; } .ty { color: #ffa657; } .p { color: var(--fg-dim); } .cm { color: var(--fg-faint); font-style: italic; } .fn { color: #79c0ff; }
+
+  .term { height: 116px; background: #0b0c0d; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+  .term .tt { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .term .seg { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); padding: 3px 8px; border-radius: 4px; }
+  .term .seg.on { color: var(--em); background: var(--em-wash); }
+  .term .plus { margin-left: auto; color: var(--fg-dim); }
+  .term .out { flex: 1; padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.65; color: #b5bac1; }
+  .term .out .ok { color: var(--em); } .term .out .pr { color: var(--em); } .term .out .mut { color: var(--fg-dim); }
+
+  /* prominent status bar */
+  .status { height: 26px; background: var(--bg-2); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 0; font-family: var(--mono); font-size: 11px; color: var(--fg-mid); }
+  .status .b { display: flex; align-items: center; gap: 6px; padding: 0 12px; height: 100%; border-right: 1px solid var(--line-2); }
+  .status .b.em { color: var(--em); }
+  .status .b.em .dotp { width: 6px; height: 6px; border-radius: 50%; background: var(--em); box-shadow: 0 0 6px var(--em); }
+  .status .sp { flex: 1; }
+  .status .b.r { border-right: 0; border-left: 1px solid var(--line-2); }
+
+  /* spec strip */
+  .specs { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 14px; margin-top: 22px; }
+  .card { background: var(--bg-1); border: 1px solid var(--line); border-radius: 10px; padding: 15px 15px 17px; }
+  .card h3 { margin: 0 0 3px; font-size: 12px; font-weight: 600; }
+  .card h3 .no { font-family: var(--mono); color: var(--em); margin-right: 6px; }
+  .card .sub { font-size: 11.5px; color: var(--fg-dim); margin-bottom: 13px; line-height: 1.5; }
+
+  .fmenu { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
+  .fmenu .mi { display: flex; align-items: center; gap: 9px; padding: 6px 9px; border-radius: 5px; font-size: 12.5px; color: var(--fg); }
+  .fmenu .mi:hover { background: var(--em-wash); color: var(--em); }
+  .fmenu .mi kbd { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-dim); }
+  .fmenu .mi .arr { margin-left: auto; color: var(--fg-faint); }
+  .fmenu .mi .gi { width: 14px; color: var(--fg-dim); display: inline-flex; }
+  .fmenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+
+  .iconrow { display: flex; flex-direction: column; gap: 13px; }
+  .iconitem { display: flex; align-items: center; gap: 13px; }
+  .iconitem .demo { display: flex; gap: 7px; }
+  .iconitem .chip { width: 32px; height: 32px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); color: var(--fg-dim); background: var(--bg-2); }
+  .iconitem .chip.on { color: var(--em); background: var(--em-wash); border-color: var(--em-dim); }
+  .iconitem .nm { font-size: 12.5px; }
+  .iconitem .ds { font-size: 11px; color: var(--fg-dim); }
+  .legend { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); display: flex; gap: 16px; margin-top: 8px; }
+  .legend b { color: var(--em); font-weight: 500; }
+
+  .anno { font-family: var(--mono); font-size: 10.5px; color: var(--em-dim); margin: 24px 2px 0; display: flex; gap: 8px; align-items: center; }
+  .anno::before { content: ""; width: 18px; height: 1px; background: var(--em-dim); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="masthead">
+    <span class="mark">⊳</span>
+    <h1>Sutra</h1>
+    <span class="tag">redesign direction · graphite / engineered · Codex-leaning</span>
+    <span class="spacer"></span>
+    <span class="variant">MOCKUP B</span>
+  </div>
+
+  <div class="window">
+    <div class="chrome">
+      <div class="traffic"><i></i><i></i><i></i></div>
+      <nav class="menu">
+        <button>Sutra</button>
+        <button class="open">File</button>
+        <button>Edit</button>
+        <button>View</button>
+        <button>Go</button>
+        <button>Run</button>
+        <button>Terminal</button>
+        <button>Help</button>
+      </nav>
+
+      <span class="spacer"></span>
+
+      <div class="cmd">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        Search or run a command
+        <span class="kbd">⌘K</span>
+      </div>
+
+      <div class="ws">
+        <button class="pill">
+          <span class="sig">⊳</span> sutra
+          <svg class="chev" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="add" title="Add folder">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+
+      <div class="tools">
+        <button class="tbtn on" title="Track AI — ON">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h3l2-5 4 10 2-5h3"/>
+          </svg>
+        </button>
+        <button class="tbtn" title="Terminal (⌘J)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 6l5 5-5 5M12 16h7"/>
+          </svg>
+        </button>
+        <button class="tbtn" title="Diff viewer">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 4v10M7 18v2M7 14a3 3 0 0 0 3 3h4"/>
+            <circle cx="7" cy="4" r="0.5"/>
+            <path d="M17 20V10M17 6V4M17 10a3 3 0 0 1-3-3h-4"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- folder picker open -->
+      <div class="picker">
+        <div class="ptitle"><span>Workspaces</span><span>recent</span></div>
+        <div class="row cur">
+          <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">sutra</div><div class="pth">~/Projects/sutra</div></span>
+          <span class="ago">now</span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">kafka-http_spring</div><div class="pth">~/Projects/kafka-http_spring</div></span>
+          <span class="ago">2h</span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">lite-code</div><div class="pth">~/Projects/lite-code</div></span>
+          <span class="ago">1d</span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">agentic-os-lab</div><div class="pth">~/Projects/agentic-os-lab</div></span>
+          <span class="ago">3d</span>
+        </div>
+        <div class="sep"></div>
+        <div class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Open folder…<kbd>⌘O</kbd>
+        </div>
+        <div class="act">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+          Manage workspaces…
+        </div>
+      </div>
+    </div>
+
+    <div class="body">
+      <div class="side">
+        <div class="shead">// explorer</div>
+        <div class="t">
+          <div class="r"><span class="tw">▾</span><span class="sq" style="background:var(--em)"></span>src</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>main.ts</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>editor.ts</div>
+          <div class="r ind sel"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>pty.ts</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:#56b6c2"></span>styles.css</div>
+          <div class="r"><span class="tw">▾</span><span class="sq" style="background:var(--em)"></span>src-tauri</div>
+          <div class="r ind"><span class="tw">▸</span><span class="sq" style="background:var(--em)"></span>src</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--amber)"></span>Cargo.toml</div>
+          <div class="r"><span class="tw"></span><span class="sq" style="background:#9cdcfe"></span>README.md</div>
+          <div class="r"><span class="tw"></span><span class="sq" style="background:var(--fg-dim)"></span>package.json</div>
+        </div>
+      </div>
+
+      <div class="main">
+        <div class="tabs">
+          <div class="tab"><span style="color:var(--blue)">●</span>editor.ts<span class="x">×</span></div>
+          <div class="tab active"><span class="d"></span>pty.ts<span class="x">×</span></div>
+          <div class="tab"><span style="color:var(--amber)">●</span>Cargo.toml<span class="x">×</span></div>
+        </div>
+        <div class="code">
+          <pre>
+<span class="ln"><span class="g">42</span><span class="gut"></span><span class="c"><span class="cm">// spawn pty, stream raw bytes -> base64 event</span></span></span>
+<span class="ln"><span class="g">43</span><span class="gut" style="background:var(--blue)"></span><span class="c"><span class="k">pub fn</span> <span class="fn">spawn</span>(id: <span class="ty">u32</span>, cwd: <span class="ty">String</span>) -&gt; <span class="ty">Result</span>&lt;()&gt; {</span></span>
+<span class="ln"><span class="g">44</span><span class="gut" style="background:var(--blue)"></span><span class="c">    <span class="k">let</span> pair = native_pty_system().<span class="fn">openpty</span>(size)?;</span></span>
+<span class="ln"><span class="g">45</span><span class="gut"></span><span class="c">    <span class="k">let</span> child = pair.slave.<span class="fn">spawn_command</span>(cmd)?;</span></span>
+<span class="ln"><span class="g">46</span><span class="gut"></span><span class="c"></span></span>
+<span class="ln"><span class="g">47</span><span class="gut" style="background:var(--amber)"></span><span class="c">    thread::<span class="fn">spawn</span>(<span class="k">move</span> || {</span></span>
+<span class="ln"><span class="g">48</span><span class="gut" style="background:var(--amber)"></span><span class="c">        <span class="k">let</span> b64 = STANDARD.<span class="fn">encode</span>(&amp;buf[..n]);</span></span>
+<span class="ln"><span class="g">49</span><span class="gut" style="background:var(--amber)"></span><span class="c">        app.<span class="fn">emit</span>(<span class="s">"pty://data"</span>, payload)?;</span></span>
+<span class="ln"><span class="g">50</span><span class="gut"></span><span class="c">    });</span></span>
+<span class="ln"><span class="g">51</span><span class="gut"></span><span class="c">    <span class="k">Ok</span>(())</span></span>
+<span class="ln"><span class="g">52</span><span class="gut"></span><span class="c">}</span></span>
+          </pre>
+        </div>
+
+        <div class="term">
+          <div class="tt">
+            <span class="seg on">zsh · 1</span>
+            <span class="seg">cargo · 2</span>
+            <span class="plus"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
+          </div>
+          <div class="out">
+<span class="pr">sutra ❯</span> cargo build --release<br/>
+<span class="mut">   Compiling portable-pty v0.8.1</span><br/>
+<span class="ok">    Finished</span> release [optimized] target(s) in 41.2s
+          </div>
+        </div>
+
+        <div class="status">
+          <span class="b"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/></svg> main</span>
+          <span class="b em"><span class="dotp"></span> Track AI</span>
+          <span class="b">⟂ 2 ↑ 0</span>
+          <span class="sp"></span>
+          <span class="b r">Ln 44, Col 18</span>
+          <span class="b r">Rust</span>
+          <span class="b r">UTF-8</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="anno">folder switcher + ⌘K palette · File menu owns New/Save · emerald-only view icons</div>
+
+  <div class="specs">
+    <div class="card">
+      <h3><span class="no">01</span>Workspace switcher</h3>
+      <p class="sub">Mono pill + recents with last-opened timestamps. <b style="color:var(--em)">＋</b> adds a folder; "Manage workspaces…" for the full list.</p>
+      <div class="fmenu">
+        <div class="mi" style="color:var(--em);background:var(--em-wash)"><span class="gi">✓</span> sutra <span style="margin-left:auto;font-family:var(--mono);font-size:10px">now</span></div>
+        <div class="mi"><span class="gi"></span> kafka-http_spring <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--fg-dim)">2h</span></div>
+        <div class="mi"><span class="gi"></span> agentic-os-lab <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--fg-dim)">3d</span></div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi">＋</span> Open folder… <kbd>⌘O</kbd></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="no">02</span>File menu</h3>
+      <p class="sub">New / Save move off the bar into the menu, plus the standard set.</p>
+      <div class="fmenu">
+        <div class="mi"><span class="gi"></span>New File <kbd>⌘N</kbd></div>
+        <div class="mi"><span class="gi"></span>New Terminal <kbd>⌃⇧`</kbd></div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi"></span>Open Folder… <kbd>⌘O</kbd></div>
+        <div class="mi"><span class="gi"></span>Open Recent <span class="arr">▸</span></div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi"></span>Save <kbd>⌘S</kbd></div>
+        <div class="mi"><span class="gi"></span>Save As… <kbd>⇧⌘S</kbd></div>
+        <div class="mi"><span class="gi"></span>Save All <kbd>⌥⌘S</kbd></div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi"></span>Revert File</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="no">03</span>View-toggle icons</h3>
+      <p class="sub">Single-stroke, emerald-only. No fills, no second color — idle is dim, active glows.</p>
+      <div class="iconrow">
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h3l2-5 4 10 2-5h3"/></svg></span>
+            <span class="chip on"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h3l2-5 4 10 2-5h3"/></svg></span>
+          </div>
+          <div><div class="nm">Track AI</div><div class="ds">live pulse / heartbeat = watching edits land</div></div>
+        </div>
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 5-5 5M12 16h7"/></svg></span>
+            <span class="chip on"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 5-5 5M12 16h7"/></svg></span>
+          </div>
+          <div><div class="nm">Terminal</div><div class="ds">bare prompt chevron + cursor (no frame)</div></div>
+        </div>
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v10a3 3 0 0 0 3 3h4M17 20V10a3 3 0 0 0-3-3h-4"/></svg></span>
+            <span class="chip on"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v10a3 3 0 0 0 3 3h4M17 20V10a3 3 0 0 0-3-3h-4"/></svg></span>
+          </div>
+          <div><div class="nm">Diff viewer</div><div class="ds">git-branch fork = two versions compared</div></div>
+        </div>
+      </div>
+      <div class="legend"><span><b>idle</b> · dim outline</span><span><b>active</b> · emerald glow</span></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

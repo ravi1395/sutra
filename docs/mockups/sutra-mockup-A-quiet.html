@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sutra — Mockup A · Quiet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #131519;          /* page atmosphere */
+    --bg-1: #181b21;          /* window body */
+    --bg-2: #1c2027;          /* bars / sidebar */
+    --bg-3: #21262e;          /* raised / hover */
+    --line: #282d36;          /* hairline */
+    --line-soft: #20242b;
+    --fg: #d4d8e0;
+    --fg-mid: #9ba3af;
+    --fg-dim: #6b7280;
+    --fg-faint: #4b525c;
+    --iris: #9aa2ff;          /* single restrained accent */
+    --iris-dim: #6f76c4;
+    --iris-wash: rgba(154,162,255,0.12);
+    --amber: #e2b65a;         /* added (kept from sutra) */
+    --blue: #5b9bff;          /* modified */
+    --red: #e07a6f;           /* deleted */
+    --green: #79c08a;
+    --ui: "Hanken Grotesk", system-ui, sans-serif;
+    --mono: "Spline Sans Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--ui);
+    color: var(--fg);
+    background:
+      radial-gradient(1200px 600px at 12% -10%, #1d2230 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 110%, #1a1f2b 0%, transparent 55%),
+      var(--bg-0);
+    min-height: 100%;
+    padding: 40px 32px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* faint grain */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none; opacity: 0.025; z-index: 999;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .page { max-width: 1180px; margin: 0 auto; }
+
+  .masthead { display: flex; align-items: baseline; gap: 16px; margin: 4px 0 26px; }
+  .masthead h1 {
+    font-size: 15px; font-weight: 600; letter-spacing: .04em; color: var(--fg);
+    margin: 0; text-transform: uppercase;
+  }
+  .masthead .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--iris); box-shadow: 0 0 12px var(--iris); }
+  .masthead .tag { font-size: 12.5px; color: var(--fg-dim); }
+  .masthead .spacer { flex: 1; }
+  .masthead .variant { font-family: var(--mono); font-size: 11px; color: var(--iris); border: 1px solid var(--line); padding: 4px 10px; border-radius: 999px; letter-spacing: .02em; }
+
+  /* ============ FAUX WINDOW ============ */
+  .window {
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    box-shadow: 0 40px 90px -30px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset;
+  }
+
+  /* --- top chrome: menu bar --- */
+  .chrome {
+    height: 40px; display: flex; align-items: center; gap: 2px;
+    padding: 0 12px; background: var(--bg-2);
+    border-bottom: 1px solid var(--line); position: relative; user-select: none;
+  }
+  .traffic { display: flex; gap: 8px; margin-right: 14px; }
+  .traffic i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .traffic i:nth-child(1){ background:#ff5f57; }
+  .traffic i:nth-child(2){ background:#febc2e; }
+  .traffic i:nth-child(3){ background:#28c840; }
+
+  .menu { display: flex; align-items: center; gap: 1px; }
+  .menu button {
+    font-family: var(--ui); font-size: 12.5px; color: var(--fg-mid, #9ba3af);
+    background: none; border: 0; padding: 6px 9px; border-radius: 6px; cursor: pointer;
+    letter-spacing: .01em;
+  }
+  .menu button:hover { background: var(--bg-3); color: var(--fg); }
+  .menu button.open { background: var(--iris-wash); color: #cfd3ff; }
+
+  .chrome .spacer { flex: 1; }
+
+  /* workspace switcher pill (folder picker trigger) */
+  .ws {
+    display: flex; align-items: center; gap: 2px; margin: 0 6px;
+  }
+  .ws .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--bg-3); border: 1px solid var(--line);
+    color: var(--fg); font-size: 12.5px; font-weight: 500;
+    padding: 5px 10px 5px 9px; border-radius: 8px; cursor: pointer;
+  }
+  .ws .pill:hover { border-color: var(--iris-dim); }
+  .ws .pill svg { color: var(--iris); }
+  .ws .pill .chev { color: var(--fg-dim); margin-left: 1px; }
+  .ws .add {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 8px; cursor: pointer;
+    background: transparent; border: 1px solid var(--line); color: var(--fg-dim);
+  }
+  .ws .add:hover { color: var(--fg); border-color: var(--iris-dim); background: var(--bg-3); }
+
+  /* right-side icon toggles */
+  .tools { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .tbtn {
+    width: 30px; height: 30px; border-radius: 8px; display: inline-flex;
+    align-items: center; justify-content: center; cursor: pointer;
+    background: transparent; border: 1px solid transparent; color: var(--fg-dim);
+    position: relative;
+  }
+  .tbtn:hover { color: var(--fg); background: var(--bg-3); }
+  .tbtn.on { color: #cfd3ff; background: var(--iris-wash); border-color: rgba(154,162,255,.28); }
+  .tbtn.on::after {
+    content: ""; position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%);
+    width: 4px; height: 4px; border-radius: 50%; background: var(--iris); box-shadow: 0 0 6px var(--iris);
+  }
+
+  /* ====== folder picker dropdown (OPEN) ====== */
+  .picker {
+    position: absolute; top: 46px; left: 250px; width: 320px; z-index: 40;
+    background: #1b1f27; border: 1px solid var(--line);
+    border-radius: 12px; padding: 6px;
+    box-shadow: 0 24px 60px -18px rgba(0,0,0,.75);
+  }
+  .picker .ptitle {
+    font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--fg-faint); padding: 8px 10px 6px;
+  }
+  .picker .row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  }
+  .picker .row:hover { background: var(--bg-3); }
+  .picker .row.cur { background: var(--iris-wash); }
+  .picker .row .ic { color: var(--iris); flex: 0 0 auto; }
+  .picker .row .meta { min-width: 0; flex: 1; }
+  .picker .row .nm { font-size: 13px; color: var(--fg); }
+  .picker .row.cur .nm { color: #cfd3ff; }
+  .picker .row .pth { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .picker .row .ck { color: var(--iris); }
+  .picker .sep { height: 1px; background: var(--line-soft); margin: 6px 8px; }
+  .picker .act { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--fg-mid,#9ba3af); font-size: 12.5px; }
+  .picker .act:hover { background: var(--bg-3); color: var(--fg); }
+  .picker .act svg { color: var(--fg-dim); }
+  .picker .act kbd { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-faint); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+
+  /* --- editor body --- */
+  .body { display: flex; height: 360px; }
+  .side {
+    flex: 0 0 188px; background: var(--bg-2); border-right: 1px solid var(--line);
+    padding: 8px 0; overflow: hidden;
+  }
+  .side .shead { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-faint); padding: 4px 14px 8px; }
+  .t { font-family: var(--mono); font-size: 12px; line-height: 1.9; }
+  .t .r { display: flex; align-items: center; gap: 7px; padding: 0 14px; color: var(--fg-mid,#9ba3af); white-space: nowrap; cursor: default; }
+  .t .r:hover { background: var(--bg-3); }
+  .t .r.sel { background: var(--iris-wash); color: #cfd3ff; }
+  .t .r .tw { width: 8px; color: var(--fg-faint); }
+  .t .r.ind { padding-left: 28px; }
+  .t .r.ind2 { padding-left: 42px; }
+  .sq { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .tabs { height: 36px; display: flex; align-items: stretch; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 0 14px; font-size: 12px; color: var(--fg-dim); border-right: 1px solid var(--line); cursor: pointer; font-family: var(--mono); }
+  .tab.active { background: var(--bg-1); color: var(--fg); }
+  .tab .d { width: 7px; height: 7px; border-radius: 50%; background: var(--iris); }
+  .tab .x { color: var(--fg-faint); margin-left: 2px; }
+
+  .code { flex: 1; position: relative; overflow: hidden; background: var(--bg-1); }
+  .code pre { margin: 0; padding: 12px 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.75; }
+  .ln { display: grid; grid-template-columns: 44px 5px 1fr; align-items: center; }
+  .ln .g { text-align: right; padding-right: 14px; color: var(--fg-faint); font-size: 11px; user-select: none; }
+  .ln .gut { width: 3px; height: 100%; margin: 0 auto; border-radius: 2px; }
+  .ln .c { padding-left: 14px; white-space: pre; }
+  .k { color: #c792ea; } .s { color: #c3e88d; } .f { color: #82aaff; } .n { color: #f78c6c; } .p { color: var(--fg-dim); } .cm { color: var(--fg-faint); font-style: italic; } .ty { color: #ffcb6b; }
+
+  .term { height: 122px; background: #14171c; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+  .term .tt { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .term .tt .tlab { font-size: 11px; color: var(--fg); font-family: var(--mono); }
+  .term .tt .tlab.dim { color: var(--fg-dim); }
+  .term .tt .plus { margin-left: auto; color: var(--fg-dim); font-size: 14px; }
+  .term .out { flex: 1; padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: #aeb4be; overflow: hidden; }
+  .term .out .ok { color: var(--green); } .term .out .pr { color: var(--iris); } .term .out .mut { color: var(--fg-dim); }
+
+  .status { height: 24px; background: var(--bg-2); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 14px; font-size: 11px; color: var(--fg-dim); }
+  .status .b { display: flex; align-items: center; gap: 6px; }
+  .status .b svg { color: var(--fg-faint); }
+  .status .sp { flex: 1; }
+
+  /* ============ SPEC STRIP ============ */
+  .specs { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 16px; margin-top: 24px; }
+  .card { background: var(--bg-1); border: 1px solid var(--line); border-radius: 12px; padding: 16px 16px 18px; }
+  .card h3 { margin: 0 0 3px; font-size: 12px; font-weight: 600; letter-spacing: .03em; color: var(--fg); }
+  .card .sub { font-size: 11.5px; color: var(--fg-dim); margin-bottom: 14px; line-height: 1.5; }
+
+  /* File menu preview */
+  .fmenu { background: #1b1f27; border: 1px solid var(--line); border-radius: 10px; padding: 5px; box-shadow: 0 16px 40px -16px rgba(0,0,0,.6); }
+  .fmenu .mi { display: flex; align-items: center; gap: 10px; padding: 6px 9px; border-radius: 7px; font-size: 12.5px; color: var(--fg); cursor: default; }
+  .fmenu .mi:hover { background: var(--iris-wash); color: #cfd3ff; }
+  .fmenu .mi .arr { margin-left: auto; color: var(--fg-faint); }
+  .fmenu .mi kbd { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-dim); }
+  .fmenu .mi.has-kbd { justify-content: flex-start; }
+  .fmenu .sep { height: 1px; background: var(--line-soft); margin: 5px 6px; }
+  .fmenu .mi .gi { color: var(--fg-dim); display: inline-flex; width: 15px; }
+
+  /* icon showcase */
+  .iconrow { display: flex; flex-direction: column; gap: 14px; }
+  .iconitem { display: flex; align-items: center; gap: 14px; }
+  .iconitem .demo { display: flex; gap: 8px; }
+  .iconitem .chip { width: 34px; height: 34px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); color: var(--fg-dim); background: var(--bg-2); }
+  .iconitem .chip.on { color: #cfd3ff; background: var(--iris-wash); border-color: rgba(154,162,255,.3); }
+  .iconitem .lab { min-width: 0; }
+  .iconitem .lab .nm { font-size: 12.5px; color: var(--fg); }
+  .iconitem .lab .ds { font-size: 11px; color: var(--fg-dim); }
+  .legend { font-size: 10.5px; color: var(--fg-faint); display: flex; gap: 14px; margin-top: 4px; }
+  .legend span b { color: var(--fg-dim); font-weight: 500; }
+
+  .anno { font-family: var(--mono); font-size: 10.5px; color: var(--iris-dim); margin: 26px 2px 0; display: flex; gap: 8px; align-items: center; }
+  .anno::before { content: ""; width: 18px; height: 1px; background: var(--iris-dim); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="masthead">
+    <span class="dot"></span>
+    <h1>Sutra</h1>
+    <span class="tag">redesign direction · soft / quiet · Cursor-leaning</span>
+    <span class="spacer"></span>
+    <span class="variant">MOCKUP A</span>
+  </div>
+
+  <div class="window">
+    <!-- menu bar -->
+    <div class="chrome">
+      <div class="traffic"><i></i><i></i><i></i></div>
+      <nav class="menu">
+        <button>Sutra</button>
+        <button class="open">File</button>
+        <button>Edit</button>
+        <button>Selection</button>
+        <button>View</button>
+        <button>Go</button>
+        <button>Terminal</button>
+        <button>Help</button>
+      </nav>
+
+      <span class="spacer"></span>
+
+      <!-- workspace switcher = folder picker trigger -->
+      <div class="ws">
+        <button class="pill" title="Switch workspace">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          sutra
+          <svg class="chev" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="add" title="Add folder to workspace">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+        </button>
+      </div>
+
+      <!-- view toggles: AI / Terminal / Diff -->
+      <div class="tools">
+        <!-- Track AI (on) -->
+        <button class="tbtn on" title="Track AI edits — ON">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/>
+            <circle cx="18.5" cy="17.5" r="2.4"/>
+          </svg>
+        </button>
+        <!-- Terminal -->
+        <button class="tbtn" title="Toggle terminal (⌘J)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+            <path d="M7 9l3 3-3 3M13 15h4"/>
+          </svg>
+        </button>
+        <!-- Diff -->
+        <button class="tbtn" title="Toggle diff viewer">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+            <path d="M12 4v16"/>
+            <path d="M6 9.5h3M7.5 8v3"/>
+            <path d="M15 14.5h3"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- OPEN folder picker -->
+      <div class="picker">
+        <div class="ptitle">Recent workspaces</div>
+        <div class="row cur">
+          <span class="ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">sutra</div><div class="pth">~/Projects/sutra</div></span>
+          <span class="ck"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg></span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">lite-code</div><div class="pth">~/Projects/lite-code</div></span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">kafka-http_spring</div><div class="pth">~/Projects/kafka-http_spring</div></span>
+        </div>
+        <div class="row">
+          <span class="ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+          <span class="meta"><div class="nm">notify-hub</div><div class="pth">~/Projects/notify-hub</div></span>
+        </div>
+        <div class="sep"></div>
+        <div class="act">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+          Open folder…
+          <kbd>⌘O</kbd>
+        </div>
+        <div class="act">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          Browse more…
+        </div>
+      </div>
+    </div>
+
+    <!-- editor body -->
+    <div class="body">
+      <div class="side">
+        <div class="shead">Explorer · sutra</div>
+        <div class="t">
+          <div class="r"><span class="tw">▾</span><span class="sq" style="background:var(--iris)"></span>src</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>main.ts</div>
+          <div class="r ind sel"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>editor.ts</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:#56b6c2"></span>styles.css</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>terminal.ts</div>
+          <div class="r ind"><span class="tw"></span><span class="sq" style="background:var(--blue)"></span>tree.ts</div>
+          <div class="r"><span class="tw">▾</span><span class="sq" style="background:var(--iris)"></span>src-tauri</div>
+          <div class="r ind"><span class="tw">▸</span><span class="sq" style="background:var(--iris)"></span>src</div>
+          <div class="r"><span class="tw"></span><span class="sq" style="background:#9cdcfe"></span>README.md</div>
+          <div class="r"><span class="tw"></span><span class="sq" style="background:var(--fg-dim)"></span>package.json</div>
+        </div>
+      </div>
+
+      <div class="main">
+        <div class="tabs">
+          <div class="tab"><span style="color:var(--blue)">●</span>main.ts<span class="x">×</span></div>
+          <div class="tab active"><span class="d"></span>editor.ts<span class="x">×</span></div>
+          <div class="tab"><span style="color:#56b6c2">●</span>styles.css<span class="x">×</span></div>
+        </div>
+        <div class="code">
+          <pre>
+<span class="ln"><span class="g">14</span><span class="gut"></span><span class="c"><span class="k">import</span> { EditorView } <span class="k">from</span> <span class="s">"@codemirror/view"</span>;</span></span>
+<span class="ln"><span class="g">15</span><span class="gut"></span><span class="c"></span></span>
+<span class="ln"><span class="g">16</span><span class="gut"></span><span class="c"><span class="cm">// diff gutter baseline = git HEAD</span></span></span>
+<span class="ln"><span class="g">17</span><span class="gut" style="background:var(--blue)"></span><span class="c"><span class="k">export class</span> <span class="ty">EditorManager</span> {</span></span>
+<span class="ln"><span class="g">18</span><span class="gut" style="background:var(--blue)"></span><span class="c">  <span class="f">private</span> tabs = <span class="k">new</span> <span class="ty">Map</span>&lt;<span class="ty">string</span>, <span class="ty">Tab</span>&gt;();</span></span>
+<span class="ln"><span class="g">19</span><span class="gut"></span><span class="c"></span></span>
+<span class="ln"><span class="g">20</span><span class="gut" style="background:var(--amber)"></span><span class="c">  <span class="f">open</span>(path: <span class="ty">string</span>, doc: <span class="ty">string</span>) {</span></span>
+<span class="ln"><span class="g">21</span><span class="gut" style="background:var(--amber)"></span><span class="c">    <span class="k">const</span> view = <span class="k">new</span> <span class="ty">EditorView</span>({ doc });</span></span>
+<span class="ln"><span class="g">22</span><span class="gut"></span><span class="c">    <span class="k">this</span>.tabs.<span class="f">set</span>(path, { view });</span></span>
+<span class="ln"><span class="g">23</span><span class="gut"></span><span class="c">  }</span></span>
+<span class="ln"><span class="g">24</span><span class="gut"></span><span class="c">}</span></span>
+          </pre>
+        </div>
+
+        <div class="term">
+          <div class="tt">
+            <span class="tlab">zsh</span>
+            <span class="tlab dim">tauri-dev</span>
+            <span class="plus">+</span>
+          </div>
+          <div class="out">
+<span class="pr">~/Projects/sutra ❯</span> npm run tauri dev<br/>
+<span class="mut">  Compiling git2 v0.18 · portable-pty v0.8 …</span><br/>
+<span class="ok">  ✓ ready</span> in 1.84s  ·  <span class="mut">http://localhost:1420</span>
+          </div>
+        </div>
+
+        <div class="status">
+          <span class="b"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/></svg> main</span>
+          <span class="b" style="color:var(--iris)">●  Track AI</span>
+          <span class="sp"></span>
+          <span class="b">Spaces: 2</span>
+          <span class="b">UTF-8</span>
+          <span class="b">TypeScript</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="anno">three asks, one direction — folder switcher · richer File menu · quiet view-toggle icons</div>
+
+  <!-- spec strip -->
+  <div class="specs">
+    <div class="card">
+      <h3>① Workspace switcher</h3>
+      <p class="sub">Pill replaces "Open Folder". Click → recents with paths, current is checked. <b style="color:var(--fg-mid,#9ba3af)">＋</b> button adds a folder; "Browse more…" loads any path.</p>
+      <div class="fmenu" style="padding:4px">
+        <div class="mi" style="color:#cfd3ff;background:var(--iris-wash)"><span class="gi">✓</span> sutra <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--fg-dim)">current</span></div>
+        <div class="mi"><span class="gi"></span> lite-code</div>
+        <div class="mi"><span class="gi"></span> notify-hub</div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi">＋</span> Open folder… <kbd>⌘O</kbd></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>② File menu</h3>
+      <p class="sub">New / Save leave the toolbar and live here, with the full set you'd expect.</p>
+      <div class="fmenu">
+        <div class="mi has-kbd"><span class="gi"></span>New File <kbd>⌘N</kbd></div>
+        <div class="mi has-kbd"><span class="gi"></span>New Window <kbd>⇧⌘N</kbd></div>
+        <div class="sep"></div>
+        <div class="mi"><span class="gi"></span>Open Folder…<kbd>⌘O</kbd></div>
+        <div class="mi"><span class="gi"></span>Open Recent <span class="arr">▸</span></div>
+        <div class="sep"></div>
+        <div class="mi has-kbd"><span class="gi"></span>Save <kbd>⌘S</kbd></div>
+        <div class="mi has-kbd"><span class="gi"></span>Save As… <kbd>⇧⌘S</kbd></div>
+        <div class="mi has-kbd"><span class="gi"></span>Save All <kbd>⌥⌘S</kbd></div>
+        <div class="sep"></div>
+        <div class="mi has-kbd"><span class="gi"></span>Close Tab <kbd>⌘W</kbd></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>③ View-toggle icons</h3>
+      <p class="sub">Monoline, 1.6px stroke. Idle = dim outline · Active = iris wash + dot.</p>
+      <div class="iconrow">
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><circle cx="18.5" cy="17.5" r="2.4"/></svg></span>
+            <span class="chip on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><circle cx="18.5" cy="17.5" r="2.4"/></svg></span>
+          </div>
+          <div class="lab"><div class="nm">Track AI</div><div class="ds">spark + watch-node = monitoring agent edits</div></div>
+        </div>
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3 3-3 3M13 15h4"/></svg></span>
+            <span class="chip on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3 3-3 3M13 15h4"/></svg></span>
+          </div>
+          <div class="lab"><div class="nm">Terminal</div><div class="ds">prompt chevron + cursor line</div></div>
+        </div>
+        <div class="iconitem">
+          <div class="demo">
+            <span class="chip"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/><path d="M6 9.5h3M7.5 8v3"/><path d="M15 14.5h3"/></svg></span>
+            <span class="chip on"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/><path d="M6 9.5h3M7.5 8v3"/><path d="M15 14.5h3"/></svg></span>
+          </div>
+          <div class="lab"><div class="nm">Diff viewer</div><div class="ds">split panel · + on left, − on right</div></div>
+        </div>
+      </div>
+      <div class="legend"><span><b>idle</b> outline</span><span><b>active</b> iris wash + underdot</span></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

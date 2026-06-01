@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sutra</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="titlebar">
+        <nav id="menubar"></nav>
+        <div class="spacer"></div>
+        <div id="workspace"></div>
+        <div id="view-tools">
+          <button id="btn-track" class="tbtn" title="Track edits made by Claude/Codex" aria-label="Track AI edits"></button>
+          <button id="btn-term" class="tbtn on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
+          <button id="btn-diff" class="tbtn" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
+        </div>
+      </div>
+
+      <div id="body">
+        <div id="sidebar">
+          <div id="tree" class="tree"></div>
+        </div>
+        <div id="vresizer" class="resizer-v" data-target="sidebar"></div>
+
+        <div id="main">
+          <div id="editor-area">
+            <div id="editor-pane">
+              <div id="tabs"></div>
+              <div id="editor-host"></div>
+              <div id="welcome">
+                <h2>Sutra</h2>
+                <p>Open a folder to begin. ⌘S save · ⌘F find · ⌘/ comment · ⌘J terminal · ⌘B sidebar</p>
+              </div>
+            </div>
+            <div id="diff-resizer" class="resizer-v hidden" data-target="diff-pane"></div>
+            <div id="diff-pane" class="hidden">
+              <div id="diff-header">
+                <span id="diff-title">Diff</span>
+                <button id="diff-close" title="Close">×</button>
+              </div>
+              <div id="diff-body"></div>
+            </div>
+          </div>
+
+          <div id="hresizer" class="resizer-h" data-target="terminal-area"></div>
+
+          <div id="terminal-area">
+            <div id="term-tabs">
+              <div id="term-tab-list"></div>
+              <button id="term-add" title="New terminal">+</button>
+            </div>
+            <div id="term-host"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="ai-banner" class="hidden"></div>
+    </div>
+  </body>
+</html>
