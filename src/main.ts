@@ -15,50 +15,22 @@ import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const tree = new FileTree($("tree"));
-const editor = new EditorManager($("editor-host"));
+const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("term-tab-list"));
 const diffViewer = new DiffViewer();
 
-const tabsEl = $("tabs");
 const banner = $("ai-banner");
 let menu: MenuBarHandle; // assigned at boot once toggle handlers exist
 
-// ---- tabs ----
-function renderTabs(): void {
-  tabsEl.innerHTML = "";
-  for (const tab of editor.tabs) {
-    const el = document.createElement("div");
-    el.className = "tab" + (tab === editor.active ? " active" : "");
-
-    const name = document.createElement("span");
-    name.textContent = tab.name + (tab.path ? "" : " *");
-    const dot = document.createElement("span");
-    dot.className = "tab-dirty";
-    dot.textContent = tab.dirty ? "●" : "";
-    const close = document.createElement("button");
-    close.className = "tab-close";
-    close.textContent = "×";
-
-    el.onclick = () => {
-      editor.activate(tab);
-      tree.setActive(tab.path);
-    };
-    close.onclick = (e) => {
-      e.stopPropagation();
-      if (tab.dirty && !confirm(`Discard unsaved changes to ${tab.name}?`)) return;
-      editor.closeTab(tab);
-    };
-    el.append(name, dot, close);
-    tabsEl.append(el);
-  }
-}
-
-editor.onTabsChanged = renderTabs;
+// ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
 editor.onGutterClick = (idx) => {
   setDiff(true);
   diffViewer.highlightHunk(idx);
 };
+editor.onActiveTabChanged = (tab) => tree.setActive(tab?.path ?? null);
+editor.confirmCloseTab = (tab) =>
+  !tab.dirty || confirm(`Discard unsaved changes to ${tab.name}?`);
 diffViewer.onRevert = (h) => editor.revertHunk(h);
 
 tree.onOpenFile = async (path) => {
@@ -264,7 +236,7 @@ function showAiBanner(tab: Tab): void {
       }
       tab.dirty = false;
       editor.recomputeDiff();
-      renderTabs();
+      editor.renderAllTabs();
       hideBanner();
     }),
   );
@@ -345,5 +317,5 @@ menu = mountMenuBar($("titlebar"), {
 menu.setCurrentWorkspace(null);
 
 // ---- boot ----
-renderTabs();
+editor.renderAllTabs();
 setTerminal(true); // panel visible by default → spawns first shell

@@ -341,7 +341,13 @@ button:hover {
   display: flex;
   min-height: 0;
 }
-#editor-pane {
+#panes {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+}
+.pane {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -472,7 +478,7 @@ button:hover {
 }
 
 /* ---- editor tabs ---- */
-#tabs {
+.pane-tabs {
   flex: 0 0 32px;
   display: flex;
   align-items: stretch;
@@ -512,20 +518,20 @@ button:hover {
   opacity: 1;
 }
 
-#editor-host {
+.pane-host {
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
-#editor-host .cm-editor {
+.pane-host .cm-editor {
   height: 100%;
 }
 /* keep code mono even though the chrome (root) font is now sans */
-#editor-host .cm-editor,
-#editor-host .cm-scroller {
+.pane-host .cm-editor,
+.pane-host .cm-scroller {
   font-family: var(--mono);
 }
-#welcome {
+.pane-welcome {
   position: absolute;
   inset: 32px 0 0 0;
   display: flex;
@@ -535,8 +541,33 @@ button:hover {
   color: var(--fg-dim);
   pointer-events: none;
 }
-#welcome.hidden {
+.pane-welcome.hidden {
   display: none;
+}
+/* hidden until a pane enters preview mode (Phase 5) */
+.preview-host {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-1);
+}
+.preview-host.hidden {
+  display: none;
+}
+.preview-host iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+/* markdown render styling lives inside .preview-host (Phase 5 injects content) */
+.pane-splitter {
+  flex: 0 0 4px;
+  cursor: col-resize;
+  background: transparent;
+}
+.pane-splitter:hover {
+  background: var(--accent);
 }
 
 /* ---- diff gutter colors ---- */
