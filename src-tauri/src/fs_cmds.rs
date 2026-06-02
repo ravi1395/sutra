@@ -98,3 +98,41 @@ pub fn file_mtime(path: String) -> Result<u128, String> {
         .map(|d| d.as_millis())
         .map_err(|e| e.to_string())
 }
+
+/// Rename a file or folder within the same directory.
+#[tauri::command]
+pub fn rename_path(path: String, new_name: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    let parent = p.parent().ok_or("No parent directory")?;
+    let new_path = parent.join(&new_name);
+    if new_path.exists() {
+        return Err("Destination already exists".to_string());
+    }
+    std::fs::rename(&path, &new_path).map_err(|e| e.to_string())
+}
+
+/// Move or rename a file/folder to a new path; reject if destination exists.
+#[tauri::command]
+pub fn move_path(from: String, to: String) -> Result<(), String> {
+    if Path::new(&to).exists() {
+        return Err("Destination already exists".to_string());
+    }
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())
+}
+
+/// Delete a file or folder (recursive for directories).
+#[tauri::command]
+pub fn delete_path(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if p.is_dir() {
+        fs::remove_dir_all(&path).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(&path).map_err(|e| e.to_string())
+    }
+}
+
+/// Create a new directory (including parents).
+#[tauri::command]
+pub fn create_dir(path: String) -> Result<(), String> {
+    fs::create_dir_all(&path).map_err(|e| e.to_string())
+}

@@ -2,6 +2,7 @@
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
 import { listDir, gitStatus, type Entry, type GitStatusEntry } from "./ipc";
+import { showContextMenu } from "./contextmenu";
 
 export interface FileTypeMeta {
   icon: string;
@@ -52,6 +53,10 @@ export class FileTree {
   private changedDirs = new Set<string>();
   onOpenFile?: (path: string) => void;
   onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
+  onRename?: (path: string, newName: string) => void;
+  onDelete?: (path: string) => void;
+  onCreate?: (parentDir: string, isDir: boolean) => void;
+  onMove?: (src: string, destDir: string) => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
@@ -173,16 +178,39 @@ export class FileTree {
 
     if (e.path === this.activePath) row.classList.add("active");
 
-    if (!e.isDir) {
-      row.draggable = true;
-      row.addEventListener("dragstart", (ev) => {
-        if (!ev.dataTransfer) return;
-        ev.dataTransfer.effectAllowed = "copy";
-        ev.dataTransfer.setData("application/x-sutra-file", e.path);
-        ev.dataTransfer.setData("text/plain", e.path);
-        row.classList.add("dragging");
+    // Drag source: files and directories can be dragged
+    row.draggable = true;
+    row.addEventListener("dragstart", (ev) => {
+      if (!ev.dataTransfer) return;
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("application/x-sutra-file", e.path);
+      ev.dataTransfer.setData("text/plain", e.path);
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragend", () => row.classList.remove("dragging"));
+
+    // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant)
+    if (e.isDir) {
+      row.addEventListener("dragover", (ev) => {
+        const src = ev.dataTransfer?.getData("application/x-sutra-file");
+        if (!src) return;
+        // Reject drops onto self or a descendant
+        if (src === e.path || src.startsWith(e.path + "/")) return;
+        ev.preventDefault();
+        ev.dataTransfer!.dropEffect = "move";
+        row.classList.add("drop-target");
       });
-      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      row.addEventListener("dragleave", () => {
+        row.classList.remove("drop-target");
+      });
+      row.addEventListener("drop", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        row.classList.remove("drop-target");
+        const src = ev.dataTransfer?.getData("application/x-sutra-file");
+        if (!src || src === e.path || src.startsWith(e.path + "/")) return;
+        this.onMove?.(src, e.path);
+      });
     }
 
     row.onclick = () => {
@@ -194,7 +222,83 @@ export class FileTree {
         this.onOpenFile?.(e.path);
       }
     };
+
+    // Context menu on right-click
+    row.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showContextMenu(
+        ev.clientX,
+        ev.clientY,
+        [
+          {
+            label: "Rename",
+            action: () => this.startInlineEdit(label, e.path, e.name),
+          },
+          {
+            label: "Delete",
+            action: () => this.onDelete?.(e.path),
+            danger: true,
+          },
+          ...(e.isDir
+            ? [
+                {
+                  label: "New File",
+                  action: () => this.onCreate?.(e.path, false),
+                },
+                {
+                  label: "New Folder",
+                  action: () => this.onCreate?.(e.path, true),
+                },
+              ]
+            : []),
+        ],
+        this.el,
+      );
+    };
+
     return row;
+  }
+
+  /** Start inline editing of a tree label; commit on Enter/blur. */
+  private startInlineEdit(
+    labelEl: HTMLElement,
+    path: string,
+    currentName: string,
+  ): void {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tree-edit-input";
+    input.value = currentName;
+    input.style.width = "100%";
+
+    const commit = async () => {
+      input.removeEventListener("blur", commit);
+      input.removeEventListener("keydown", onKeyDown);
+      const newName = input.value.trim();
+      labelEl.textContent = currentName; // restore original
+      if (newName && newName !== currentName) {
+        this.onRename?.(path, newName);
+      }
+    };
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        commit();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        input.removeEventListener("blur", commit);
+        input.removeEventListener("keydown", onKeyDown);
+        labelEl.textContent = currentName;
+      }
+    };
+
+    labelEl.textContent = "";
+    labelEl.appendChild(input);
+    input.focus();
+    input.select();
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", onKeyDown);
   }
 
   /** Re-read the tree from disk (after a new file is saved). */

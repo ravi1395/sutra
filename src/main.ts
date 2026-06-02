@@ -8,7 +8,7 @@ import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { vResizer, hResizer } from "./layout";
-import { writeFile, fileMtime, readFile, gitHeadContent } from "./ipc";
+import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath } from "./ipc";
 import { mountMenuBar, type MenuBarHandle } from "./menubar";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
@@ -54,6 +54,83 @@ tree.onOpenFileInPane = (path, side) => {
     .openFileInSide(path, side)
     .then(() => tree.setActive(path))
     .catch((e) => alert(`Cannot open ${path}: ${e}`));
+};
+
+// Tree context menu actions
+tree.onRename = async (path: string, newName: string) => {
+  try {
+    await renamePath(path, newName);
+    // Update open tabs with renamed path
+    const parent = path.split("/").slice(0, -1).join("/");
+    const newPath = parent ? parent + "/" + newName : newName;
+    for (const tab of editor.tabs) {
+      if (tab.path === path) {
+        editor.markSaved(tab, newPath, newName, null);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Rename failed: ${e}`);
+  }
+};
+
+tree.onDelete = async (path: string) => {
+  if (!confirm(`Delete "${path.split("/").pop()}"?`)) return;
+  try {
+    await deletePath(path);
+    // Close any open tabs for deleted path and its children
+    const pathPrefix = path.endsWith("/") ? path : path + "/";
+    for (const tab of editor.tabs.slice()) {
+      if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
+        editor.closeTab(tab);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Delete failed: ${e}`);
+  }
+};
+
+tree.onCreate = async (parentDir: string, isDir: boolean) => {
+  const type = isDir ? "folder" : "file";
+  const name = prompt(`New ${type} name:`);
+  if (!name) return;
+  try {
+    if (isDir) {
+      const path = parentDir + "/" + name;
+      await createDir(path);
+    } else {
+      const path = parentDir + "/" + name;
+      await writeFile(path, "");
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Create ${type} failed: ${e}`);
+  }
+};
+
+tree.onMove = async (src: string, destDir: string) => {
+  try {
+    // Compute destination path: destDir + "/" + basename(src)
+    const srcBaseName = src.split("/").pop() || src;
+    const destPath = destDir + "/" + srcBaseName;
+    await movePath(src, destPath);
+    // Update open tabs with moved path
+    const srcPrefix = src.endsWith("/") ? src : src + "/";
+    for (const tab of editor.tabs.slice()) {
+      if (tab.path === src) {
+        editor.markSaved(tab, destPath, srcBaseName, null);
+      } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+        // Move children: /old/child -> /new/child
+        const relPath = tab.path.slice(srcPrefix.length);
+        const newPath = destPath + "/" + relPath;
+        editor.markSaved(tab, newPath, tab.name, null);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Move failed: ${e}`);
+  }
 };
 
 // ---- save / save-as ----

@@ -14,6 +14,12 @@ export const readFile = (path: string) => invoke<string>("read_file", { path });
 export const writeFile = (path: string, content: string) =>
   invoke<void>("write_file", { path, content });
 export const fileMtime = (path: string) => invoke<number>("file_mtime", { path });
+export const renamePath = (path: string, newName: string) =>
+  invoke<void>("rename_path", { path, newName });
+export const movePath = (from: string, to: string) =>
+  invoke<void>("move_path", { from, to });
+export const deletePath = (path: string) => invoke<void>("delete_path", { path });
+export const createDir = (path: string) => invoke<void>("create_dir", { path });
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
 
