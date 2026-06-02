@@ -42,7 +42,12 @@ pub fn pty_spawn(
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())?;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -70,7 +75,13 @@ pub fn pty_spawn(
                 Ok(0) => break,
                 Ok(n) => {
                     let data = STANDARD.encode(&buf[..n]);
-                    let _ = app2.emit("pty-output", PtyOutput { id: id2.clone(), data });
+                    let _ = app2.emit(
+                        "pty-output",
+                        PtyOutput {
+                            id: id2.clone(),
+                            data,
+                        },
+                    );
                 }
                 Err(_) => break,
             }
@@ -78,11 +89,14 @@ pub fn pty_spawn(
         let _ = app2.emit("pty-exit", PtyExit { id: id2.clone() });
     });
 
-    state
-        .0
-        .lock()
-        .unwrap()
-        .insert(id, Session { master: pair.master, writer, child });
+    state.0.lock().unwrap().insert(
+        id,
+        Session {
+            master: pair.master,
+            writer,
+            child,
+        },
+    );
     Ok(())
 }
 
@@ -90,17 +104,30 @@ pub fn pty_spawn(
 pub fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
     let mut map = state.0.lock().unwrap();
     let session = map.get_mut(&id).ok_or("no such terminal")?;
-    session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    session
+        .writer
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
     session.writer.flush().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn pty_resize(state: State<'_, PtyState>, id: String, rows: u16, cols: u16) -> Result<(), String> {
+pub fn pty_resize(
+    state: State<'_, PtyState>,
+    id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
     let map = state.0.lock().unwrap();
     let session = map.get(&id).ok_or("no such terminal")?;
     session
         .master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())
 }
 

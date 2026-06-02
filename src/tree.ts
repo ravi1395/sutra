@@ -1,7 +1,7 @@
 // File tree with VS Code-style compact folders. Single-subfolder chains arrive
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
-import { listDir, type Entry } from "./ipc";
+import { listDir, gitStatus, type Entry, type GitStatusEntry } from "./ipc";
 
 export interface FileTypeMeta {
   icon: string;
@@ -34,22 +34,59 @@ export function fileTypeMeta(name: string, isDir = false): FileTypeMeta {
   return fileTypeByExt[ext] ?? { icon: "TXT", className: "type-file" };
 }
 
+export type TreePaneSide = "left" | "right";
+
+export function paneSideFromClientX(
+  clientX: number,
+  rect: Pick<DOMRect, "left" | "width">,
+): TreePaneSide {
+  return clientX < rect.left + rect.width / 2 ? "left" : "right";
+}
+
 export class FileTree {
   private el: HTMLElement;
   private root: string | null = null;
   private expanded = new Set<string>();
   private activePath: string | null = null;
+  private status = new Map<string, "M" | "A" | "D">();
+  private changedDirs = new Set<string>();
   onOpenFile?: (path: string) => void;
+  onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
   }
 
-  setRoot(path: string): void {
+  async setRoot(path: string): Promise<void> {
     this.root = path;
     this.expanded.clear();
     this.expanded.add(path);
-    void this.render();
+    await this.loadStatus();
+    await this.render();
+  }
+
+  private async loadStatus(): Promise<void> {
+    this.status.clear();
+    this.changedDirs.clear();
+    if (!this.root) return;
+    let entries: GitStatusEntry[];
+    try {
+      entries = await gitStatus(this.root);
+    } catch {
+      return;
+    }
+    const rootPrefix = this.root.endsWith("/") ? this.root : this.root + "/";
+    for (const e of entries) {
+      this.status.set(e.path, e.status);
+      if (e.path.startsWith(rootPrefix)) {
+        const parts = e.path.slice(rootPrefix.length).split("/");
+        let cur = this.root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          cur = cur + "/" + parts[i];
+          this.changedDirs.add(cur);
+        }
+      }
+    }
   }
 
   setActive(path: string | null): void {
@@ -75,6 +112,8 @@ export class FileTree {
     } catch {
       return;
     }
+    const seen = new Set(entries.map((e) => e.path));
+    entries = entries.concat(this.deletedEntriesForDir(path, seen));
     for (const e of entries) {
       const row = this.makeRow(e, depth);
       container.appendChild(row);
@@ -86,6 +125,19 @@ export class FileTree {
         }
       }
     }
+  }
+
+  private deletedEntriesForDir(path: string, seen: Set<string>): Entry[] {
+    const prefix = path.endsWith("/") ? path : path + "/";
+    const deleted: Entry[] = [];
+    for (const [statusPath, status] of this.status) {
+      if (status !== "D" || seen.has(statusPath) || !statusPath.startsWith(prefix)) continue;
+      const name = statusPath.slice(prefix.length);
+      if (!name) continue;
+      if (name.includes("/") && seen.has(prefix + name.split("/")[0])) continue;
+      deleted.push({ name, path: statusPath, isDir: false });
+    }
+    return deleted.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private makeRow(e: Entry, depth: number): HTMLElement {
@@ -107,7 +159,31 @@ export class FileTree {
     icon.title = e.isDir ? "Folder" : `${meta.icon} file`;
     row.append(twisty, icon, label);
 
+    if (!e.isDir && this.status.has(e.path)) {
+      const s = this.status.get(e.path)!;
+      const cls = s === "M" ? "modified" : s === "A" ? "added" : "deleted";
+      row.classList.add(`status-${cls}`);
+      const badge = document.createElement("span");
+      badge.className = "tree-status";
+      badge.textContent = s;
+      row.appendChild(badge);
+    } else if (e.isDir && this.changedDirs.has(e.path)) {
+      row.classList.add("status-dir-changed");
+    }
+
     if (e.path === this.activePath) row.classList.add("active");
+
+    if (!e.isDir) {
+      row.draggable = true;
+      row.addEventListener("dragstart", (ev) => {
+        if (!ev.dataTransfer) return;
+        ev.dataTransfer.effectAllowed = "copy";
+        ev.dataTransfer.setData("application/x-sutra-file", e.path);
+        ev.dataTransfer.setData("text/plain", e.path);
+        row.classList.add("dragging");
+      });
+      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+    }
 
     row.onclick = () => {
       if (e.isDir) {
@@ -122,8 +198,9 @@ export class FileTree {
   }
 
   /** Re-read the tree from disk (after a new file is saved). */
-  refresh(): void {
-    void this.render();
+  async refresh(): Promise<void> {
+    await this.loadStatus();
+    await this.render();
   }
 }
 

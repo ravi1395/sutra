@@ -2,8 +2,9 @@
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and the optional AI-edit tracker.
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { FileTree } from "./tree";
+import { FileTree, paneSideFromClientX } from "./tree";
 import { EditorManager, type Tab } from "./editor";
+import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { vResizer, hResizer } from "./layout";
@@ -11,6 +12,7 @@ import { writeFile, fileMtime, readFile, gitHeadContent } from "./ipc";
 import { mountMenuBar, type MenuBarHandle } from "./menubar";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
+import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -18,6 +20,12 @@ const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("term-tab-list"));
 const diffViewer = new DiffViewer();
+const search = new SearchPanel(
+  $<HTMLInputElement>("search-input"),
+  $<HTMLButtonElement>("search-case"),
+  $("search-results"),
+);
+search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
 
 const banner = $("ai-banner");
 let menu: MenuBarHandle; // assigned at boot once toggle handlers exist
@@ -40,6 +48,12 @@ tree.onOpenFile = async (path) => {
   } catch (e) {
     alert(`Cannot open ${path}: ${e}`);
   }
+};
+tree.onOpenFileInPane = (path, side) => {
+  void editor
+    .openFileInSide(path, side)
+    .then(() => tree.setActive(path))
+    .catch((e) => alert(`Cannot open ${path}: ${e}`));
 };
 
 // ---- save / save-as ----
@@ -64,7 +78,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
     if (!chosen) return;
     path = chosen;
   }
-  const content = editor.active === tab ? editor.getContent() : tab.state.doc.toString();
+  const content = editor.contentOf(tab);
   try {
     await writeFile(path, content);
   } catch (e) {
@@ -76,9 +90,9 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   if (path !== prevPath) {
     // brand-new file or Save As → it now exists on disk; seed git baseline + tree
     tab.gitHead = await gitHeadContent(path).catch(() => null);
-    tree.refresh();
     tree.setActive(path);
   }
+  void tree.refresh();
   editor.recomputeDiff();
 }
 
@@ -88,8 +102,10 @@ editor.saveHandler = saveTab;
 async function openWorkspace(dir: string): Promise<void> {
   if (!confirmWorkspaceClose(dir)) return;
   editor.closeTabsOutsideWorkspace(dir);
+  editor.setWorkspaceRoot(dir);
   tree.setActive(editor.active?.path ?? null);
-  tree.setRoot(dir);
+  await tree.setRoot(dir);
+  search.setRoot(dir);
   menu.setCurrentWorkspace(dir);
   hideBanner();
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
@@ -142,6 +158,44 @@ const vres = $("vresizer");
 function setSidebar(on: boolean): void {
   sidebar.classList.toggle("hidden", !on);
   vres.classList.toggle("hidden", !on);
+}
+
+function togglePreview(): void {
+  void editor
+    .togglePreview()
+    .catch((e) => alert(`Preview failed: ${e instanceof Error ? e.message : e}`));
+}
+
+// ---- search view toggle ----
+const treeEl = $("tree");
+const searchView = $("search-view");
+const sidebarTitle = $("sidebar-title");
+const btnSearchToggle = $("btn-search-toggle");
+let searchViewOpen = false;
+let searchIconHtml = "";
+
+function openSearchView(): void {
+  searchViewOpen = true;
+  treeEl.classList.add("hidden");
+  searchView.classList.remove("hidden");
+  sidebarTitle.textContent = "SEARCH";
+  searchIconHtml = btnSearchToggle.innerHTML;
+  btnSearchToggle.innerHTML = "←";
+  btnSearchToggle.title = "Back to files";
+  search.focus();
+}
+
+function closeSearchView(): void {
+  searchViewOpen = false;
+  searchView.classList.add("hidden");
+  treeEl.classList.remove("hidden");
+  sidebarTitle.textContent = "FILES";
+  if (searchIconHtml) btnSearchToggle.innerHTML = searchIconHtml;
+  btnSearchToggle.title = "Search folder (⇧⌘F)";
+}
+
+function toggleSearchView(): void {
+  if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
 // ---- AI-edit tracking ----
@@ -253,6 +307,38 @@ hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.ref
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
 
+// ---- file-tree drag to editor split ----
+const panesEl = $("panes");
+
+function hasTreeFileDrag(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes("application/x-sutra-file");
+}
+
+function setPaneDropHint(side: "left" | "right" | null): void {
+  panesEl.classList.toggle("drop-left", side === "left");
+  panesEl.classList.toggle("drop-right", side === "right");
+}
+
+panesEl.addEventListener("dragover", (e) => {
+  if (!hasTreeFileDrag(e)) return;
+  e.preventDefault();
+  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  e.dataTransfer!.dropEffect = "copy";
+  setPaneDropHint(side);
+});
+panesEl.addEventListener("dragleave", (e) => {
+  const next = e.relatedTarget;
+  if (!(next instanceof Node) || !panesEl.contains(next)) setPaneDropHint(null);
+});
+panesEl.addEventListener("drop", (e) => {
+  const path = e.dataTransfer?.getData("application/x-sutra-file");
+  if (!path) return;
+  e.preventDefault();
+  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  setPaneDropHint(null);
+  tree.onOpenFileInPane?.(path, side);
+});
+
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey;
@@ -281,16 +367,31 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
+  } else if (mod && e.code === "Backslash") {
+    e.preventDefault();
+    if (editor.isSplit) editor.closeSplit();
+    else editor.openSplit();
+  } else if (isPreviewShortcut(e)) {
+    e.preventDefault();
+    togglePreview();
+  } else if (mod && e.shiftKey && e.code === "KeyF") {
+    e.preventDefault();
+    if (!searchViewOpen) openSearchView();
+    search.focus();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(termArea.classList.contains("hidden"));
   }
-});
+}, GLOBAL_SHORTCUT_OPTIONS);
 
 // ---- chrome: icon buttons + menu bar ----
 btnTrack.innerHTML = icon("trackAI", 17);
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("diff", 17);
+$("btn-refresh").innerHTML = icon("refresh", 15);
+$("btn-search-toggle").innerHTML = icon("search", 15);
+$("btn-refresh").onclick = () => void tree.refresh();
+btnSearchToggle.onclick = () => toggleSearchView();
 
 menu = mountMenuBar($("titlebar"), {
   newFile: () => editor.newUntitled(),

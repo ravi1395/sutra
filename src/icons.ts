@@ -9,7 +9,8 @@ export type IconName =
   | "folderAdd"
   | "check"
   | "chevronDown"
-  | "search";
+  | "search"
+  | "refresh";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -22,6 +23,7 @@ const paths: Record<IconName, string> = {
   check: '<path d="M5 13l4 4L19 7"/>',
   chevronDown: '<path d="M6 9l6 6 6-6"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  refresh: '<path d="M4 12a8 8 0 0 1 14.93-4H15m4 0V4"/><path d="M20 12a8 8 0 0 1-14.93 4H9m-4 0v4"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

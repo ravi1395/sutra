@@ -74,6 +74,26 @@ runtime font network request.
 - **Click a gutter marker** to open the diff viewer focused on that hunk.
 - Each hunk has a **Revert** button that restores that hunk to its HEAD version.
 
+### Split view & preview
+
+- **Split pane** — `⌘\` opens a second editor column; pressing again collapses it.
+- **Drag-to-split** — drag a file from the tree to the left or right half of the
+  editor area to open it in that pane. Dropping on the right creates the split if
+  needed.
+- **Markdown / HTML preview** — `⇧⌘V` on a focused `.md` or `.html` file opens a
+  live preview in the right pane (opening the split automatically if needed).
+  - Markdown is rendered via **marked** and sanitized with **DOMPurify** before
+    injection, so scripts and inline handlers are stripped.
+  - Saved HTML files are loaded from Sutra's local static preview server at
+    `127.0.0.1:<port>`, rooted at the opened workspace. Relative CSS, images,
+    and scripts resolve like a normal browser page.
+  - Markdown preview updates within ~150 ms of each keystroke in the source pane.
+    HTML preview serves disk content, so save the file to reload the preview.
+  - Pressing `⇧⌘V` again (source still focused) closes the preview; if the right
+    pane held only the preview, the split collapses automatically.
+  - Closing the source tab tears down any bound preview.
+  - Unsaved HTML tabs cannot be server-previewed until saved into the workspace.
+
 ### AI / external edit tracking (optional)
 - Toggle **Track AI** on (the spark icon in the top-right tools; emerald wash +
   under-dot when active). While on, open files are polled for changes made by
@@ -105,6 +125,8 @@ runtime font network request.
 | `Tab` | Indent selection |
 | `⌘J` / `^\`` | Toggle terminal |
 | `⌘B` | Toggle sidebar |
+| `⌘\` | Toggle split pane |
+| `⇧⌘V` | Toggle Markdown / HTML preview |
 
 ## Run
 
@@ -124,6 +146,7 @@ and takes a minute or two; later builds are incremental.
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), read/write, mtime |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |
 | Rust: pty | `src-tauri/src/pty.rs` | spawn/write/resize/kill PTYs, stream output events |
+| Rust: preview | `src-tauri/src/preview_server.rs` | local static server for saved HTML preview |
 | TS: ipc | `src/ipc.ts` | typed `invoke`/`listen` wrappers |
 | TS: tree | `src/tree.ts` | lazy, compact file tree |
 | TS: editor | `src/editor.ts` | CM6 manager, tabs, diff gutter, keybindings |

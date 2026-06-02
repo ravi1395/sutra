@@ -28,9 +28,17 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>, String> {
         let p = ent.path();
         if p.is_dir() {
             let (deep, label) = compact(p);
-            dirs.push(Entry { name: label, path: deep.to_string_lossy().into_owned(), is_dir: true });
+            dirs.push(Entry {
+                name: label,
+                path: deep.to_string_lossy().into_owned(),
+                is_dir: true,
+            });
         } else {
-            files.push(Entry { name: name_of(&p), path: p.to_string_lossy().into_owned(), is_dir: false });
+            files.push(Entry {
+                name: name_of(&p),
+                path: p.to_string_lossy().into_owned(),
+                is_dir: false,
+            });
         }
     }
     dirs.sort_by_key(|e| e.name.to_lowercase());

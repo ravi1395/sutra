@@ -1,6 +1,8 @@
 mod fs_cmds;
 mod git;
+mod preview_server;
 mod pty;
+mod search;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +12,7 @@ pub fn run() {
         .menu(|handle| tauri::menu::MenuBuilder::new(handle).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
         .invoke_handler(tauri::generate_handler![
             fs_cmds::list_dir,
@@ -17,10 +20,13 @@ pub fn run() {
             fs_cmds::write_file,
             fs_cmds::file_mtime,
             git::git_head_content,
+            git::git_status,
+            preview_server::preview_server_url,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            search::search_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
