@@ -20,15 +20,16 @@ Main flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App wiring, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, global shortcuts, AI edit polling | `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner` |
+| `src/main.ts` | App wiring, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, global shortcuts, tree drag-to-pane drops, AI edit polling | `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner` |
+| `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and the recents dropdown | `mountMenuBar`, `MenuActions`, `MenuBarHandle` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon`, `IconName` |
-| `src/editor.ts` | CodeMirror manager, tab states, language detection/highlighting, dirty state, diff gutter, workspace tab filtering, hunk revert | `EditorManager`, `openFile`, `newUntitled`, `activate`, `closeTab`, `tabsOutsideWorkspace`, `closeTabsOutsideWorkspace`, `setContent`, `recomputeDiff`, `revertHunk`, `markSaved`, `detectLanguage` |
+| `src/editor.ts` | CodeMirror manager, tab states, split panes, Markdown/HTML preview orchestration, language detection/highlighting, dirty state, diff gutter, workspace tab filtering, hunk revert | `EditorManager`, `openFile`, `openFileInSide`, `togglePreview`, `newUntitled`, `activate`, `closeTab`, `tabsOutsideWorkspace`, `closeTabsOutsideWorkspace`, `setContent`, `recomputeDiff`, `revertHunk`, `markSaved`, `detectLanguage` |
 | `src/diff.ts` | Line diff classification and diff viewer rendering | `computeLineDiff`, `hunkIndexAtLine`, `DiffViewer.render`, `DiffViewer.highlightHunk` |
-| `src/tree.ts` | Lazy folder tree rendering, active-file highlighting, and file-type badge metadata | `FileTree`, `setRoot`, `setActive`, `render`, `renderDir`, `makeRow`, `refresh`, `fileTypeMeta`, `cssEscape` |
+| `src/tree.ts` | Lazy folder tree rendering, active-file highlighting, file drag source, drop-side helper, and file-type badge metadata | `FileTree`, `setRoot`, `setActive`, `render`, `renderDir`, `makeRow`, `refresh`, `fileTypeMeta`, `paneSideFromClientX`, `cssEscape` |
 | `src/terminal.ts` | xterm frontends for Rust PTY sessions, multi-terminal tabs, resize, close/reset | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit`, `focusActive`, `b64ToBytes` |
 | `src/workspace.ts` | Workspace path membership helpers + recents store (pure logic + localStorage adapters) | `pathBelongsToRoot`, `filterWorkspaceTabs`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
-| `src/ipc.ts` | Typed Tauri command/event boundary | `listDir`, `readFile`, `writeFile`, `fileMtime`, `gitHeadContent`, `ptySpawn`, `ptyWrite`, `ptyResize`, `ptyKill`, `onPtyOutput`, `onPtyExit` |
+| `src/ipc.ts` | Typed Tauri command/event boundary | `listDir`, `readFile`, `writeFile`, `fileMtime`, `gitHeadContent`, `previewServerUrl`, `ptySpawn`, `ptyWrite`, `ptyResize`, `ptyKill`, `onPtyOutput`, `onPtyExit` |
 | `src/layout.ts` | Drag resize behavior for vertical and horizontal splitters | `vResizer`, `hResizer` |
 | `src/styles.css` | Graphite/emerald UI tokens, vendored `@font-face` (Hanken Grotesk + Spline Sans Mono), chrome (menu bar · switcher · icon tools · popover primitive), panes, tabs, tree, diff gutter/viewer, terminal, AI banner | CSS selectors only |
 | `src/assets/fonts/` | Vendored OFL variable woff2 (latin) — no runtime font network request | `HankenGrotesk-Variable.woff2`, `SplineSansMono-Variable.woff2` |
@@ -41,6 +42,7 @@ Main flow:
 | `src-tauri/src/main.rs` | Native binary entrypoint | `main` |
 | `src-tauri/src/fs_cmds.rs` | Directory listing, compact folder chains, text file read/write, mtime polling | `list_dir`, `read_entries`, `compact`, `name_of`, `read_file`, `write_file`, `file_mtime` |
 | `src-tauri/src/git.rs` | Git HEAD file lookup for diff baseline | `git_head_content` |
+| `src-tauri/src/preview_server.rs` | Session-local static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url` |
 | `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, writes, resize, kill | `PtyState`, `Session`, `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill` |
 
 ## Important Call Paths
@@ -69,6 +71,14 @@ Hunk revert:
 
 `DiffViewer.onRevert` -> `EditorManager.revertHunk` -> whole-document splice from hunk `oldText`.
 
+Preview:
+
+`Shift+Cmd+V` -> `main.togglePreview` -> `EditorManager.togglePreview`. Markdown preview renders the current editor buffer through `src/preview.ts` (`marked` + `DOMPurify`). HTML preview requires a saved file inside the current workspace: `EditorManager` calls `ipc.previewServerUrl` -> Rust `preview_server_url`, which starts/reuses a `127.0.0.1` static server rooted at the workspace and returns the file URL for the preview iframe. Saving an HTML tab reloads the bound preview URL.
+
+Drag-to-split:
+
+`FileTree.makeRow` marks file rows draggable and stores the absolute path in the drag payload. `main.ts` handles drops on `#panes`, uses `paneSideFromClientX` to choose left/right, then calls `EditorManager.openFileInSide`; right-side drops create the split if needed.
+
 Terminal:
 
 `setTerminal(true)` or `term-add` -> `TerminalManager.create` -> `ipc.ptySpawn` with `TerminalManager.cwd` -> Rust `pty_spawn` -> background reader emits `pty-output` base64 -> `onPtyOutput` -> `b64ToBytes` -> xterm write. Opening a folder calls `TerminalManager.reset(dir, visible)` so existing PTYs are killed and the visible shell respawns in the opened folder.
@@ -96,9 +106,10 @@ Focused test coverage exists for workspace path filtering:
 - Workspace tab filtering: `npm test`
 - Recents store (`upsertRecent` dedupe/move-to-front/cap, `basenameOf`): `npm test`
 - Language detection/highlighting coverage: `npm test`
+- Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`
 - Type-only frontend changes: `npm exec tsc -- --noEmit`
 - Rust command changes: `cargo check --manifest-path src-tauri/Cargo.toml`
-- UI behavior changes: `npm run tauri dev`, then smoke open folder, open/save file, toggle terminal, toggle diff, and exercise hunk revert.
+- UI behavior changes: `npm run tauri dev`, then smoke open folder, open/save file, toggle terminal, toggle diff, exercise hunk revert, toggle Markdown/HTML preview, and drag files left/right into split panes.
 - Diff logic changes: add tests before changing `computeLineDiff`; it is pure and should be unit-testable.
 - PTY changes: smoke multiple terminals, resize, close, panel toggle, and shell exit.
 
@@ -110,6 +121,7 @@ Focused test coverage exists for workspace path filtering:
 - PTY output is raw bytes encoded as base64; xterm handles UTF-8 reassembly after decode.
 - Folder switches kill existing PTYs so the next visible terminal starts in the opened cwd.
 - Rust `read_file` rejects non-UTF-8 files as `binary file`.
+- HTML preview intentionally runs saved workspace HTML through a real `127.0.0.1` static server; only serve paths under the opened root and keep traversal checks covered.
 - `git_head_content` returns `None` outside git repos, on unborn branches, or for untracked files.
 - `list_dir` compacts single-directory chains; tree labels may not equal the final filesystem basename.
 - `vite.config.ts` requires port `1420` with `strictPort: true`.

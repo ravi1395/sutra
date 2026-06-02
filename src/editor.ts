@@ -5,6 +5,7 @@
 // keybindings, language detection, and per-hunk revert.
 import {
   EditorState,
+  EditorSelection,
   StateField,
   StateEffect,
   RangeSet,
@@ -24,7 +25,8 @@ import {
   moveLineUp,
   deleteLine,
 } from "@codemirror/commands";
-import { openSearchPanel, selectNextOccurrence } from "@codemirror/search";
+import { openSearchPanel, selectNextOccurrence, search } from "@codemirror/search";
+import { buildSearchPanel } from "./search-panel";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { StreamLanguage } from "@codemirror/language";
 import { javascript } from "@codemirror/lang-javascript";
@@ -39,7 +41,9 @@ import { go } from "@codemirror/lang-go";
 import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { readFile, gitHeadContent } from "./ipc";
+import { previewServerUrl } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
+import { parseConflicts, acceptOurs, acceptTheirs, acceptBoth, type ConflictRegion } from "./conflict";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 
 export interface Tab {
@@ -137,6 +141,25 @@ export function isPreviewable(name: string): boolean {
   return ext === "md" || ext === "markdown" || ext === "html" || ext === "htm";
 }
 
+export type SplitPurpose = "editor" | "preview";
+export type PaneSide = "left" | "right";
+export type PreviewRefreshMode = "live" | "save";
+
+export function splitClonesActiveTab(purpose: SplitPurpose): boolean {
+  return purpose === "editor";
+}
+
+export function previewTabName(name: string): string {
+  return `Preview: ${name}`;
+}
+
+export function previewRefreshModeForName(name: string): PreviewRefreshMode | null {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "md" || ext === "markdown") return "live";
+  if (ext === "html" || ext === "htm") return "save";
+  return null;
+}
+
 let idSeq = 0;
 
 /**
@@ -148,6 +171,9 @@ export class Pane {
   view: EditorView;
   tabs: Tab[] = [];
   active: Tab | null = null;
+  // preview mode: when set, this pane shows previewSource's render, not an editor
+  previewSource: Tab | null = null;
+  private previewCtl: import("./preview").PreviewController | null = null;
   readonly el: HTMLElement; // .pane root
   private tabsEl: HTMLElement;
   private hostEl: HTMLElement;
@@ -189,6 +215,7 @@ export class Pane {
   private extensions(name: string): Extension {
     return [
       basicSetup,
+      search({ createPanel: buildSearchPanel }),
       oneDark,
       diffField,
       gutter({
@@ -237,6 +264,11 @@ export class Pane {
     return this.view.state.doc.toString();
   }
 
+  /** Persist the live view into the active tab's stored state before yielding focus. */
+  checkpoint(): void {
+    if (this.active) this.active.state = this.view.state;
+  }
+
   setContent(text: string): void {
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: text },
@@ -251,20 +283,115 @@ export class Pane {
     this.tabs.push(tab);
   }
 
+  // Detect merge conflicts in the active tab and render inline controls.
+  detectAndRenderConflicts(): void {
+    if (!this.active) return;
+    const docText = this.view.state.doc.toString();
+    const regions = parseConflicts(docText);
+    if (regions.length === 0) return; // No conflicts
+
+    // Clear any existing conflict UI
+    this.hostEl.querySelectorAll(".conflict-banner").forEach((e) => e.remove());
+
+    // For each conflict region, render a banner above the editor
+    for (let i = 0; i < regions.length; i++) {
+      const region = regions[i];
+      const banner = document.createElement("div");
+      banner.className = "conflict-banner";
+      banner.innerHTML = `<span>Conflict ${i + 1} of ${regions.length}</span>`;
+
+      const btnOurs = document.createElement("button");
+      btnOurs.className = "conflict-btn";
+      btnOurs.textContent = "Accept Current";
+      btnOurs.onclick = () => this.applyConflictResolution(region, "ours");
+
+      const btnTheirs = document.createElement("button");
+      btnTheirs.className = "conflict-btn";
+      btnTheirs.textContent = "Accept Incoming";
+      btnTheirs.onclick = () => this.applyConflictResolution(region, "theirs");
+
+      const btnBoth = document.createElement("button");
+      btnBoth.className = "conflict-btn";
+      btnBoth.textContent = "Accept Both";
+      btnBoth.onclick = () => this.applyConflictResolution(region, "both");
+
+      banner.append(btnOurs, btnTheirs, btnBoth);
+      this.hostEl.insertBefore(banner, this.view.dom);
+    }
+  }
+
+  // Apply a conflict resolution choice and update the document.
+  private applyConflictResolution(region: ConflictRegion, choice: "ours" | "theirs" | "both"): void {
+    if (!this.active) return;
+    const docText = this.view.state.doc.toString();
+    const newText =
+      choice === "ours"
+        ? acceptOurs(docText, region)
+        : choice === "theirs"
+          ? acceptTheirs(docText, region)
+          : acceptBoth(docText, region);
+    this.setContent(newText);
+    // Re-detect conflicts (fewer now)
+    this.detectAndRenderConflicts();
+  }
+
   /** Show `tab` in this pane's view, checkpointing the outgoing tab's state. */
   activate(tab: Tab): void {
+    if (this.previewSource) this.hidePreview();
     if (this.active && this.active !== tab) this.active.state = this.view.state;
     this.active = tab;
     this.view.setState(tab.state);
+    this.hostEl.classList.remove("hidden");
+    this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    // Detect conflicts in the newly activated tab
+    this.detectAndRenderConflicts();
   }
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */
   showWelcome(): void {
+    this.previewSource = null;
+    this.previewCtl = null;
+    this.hostEl.classList.remove("hidden");
+    this.previewEl.classList.add("hidden");
+    this.previewEl.innerHTML = "";
     this.view.setState(EditorState.create({ extensions: this.extensions("") }));
     this.view.dom.style.display = "none";
     this.welcomeEl.classList.remove("hidden");
+  }
+
+  /** Enter preview mode bound to `source`, rendering `text`. */
+  async showPreview(source: Tab, text: string): Promise<void> {
+    const { PreviewController, previewKind } = await import("./preview");
+    const kind = previewKind(source.name);
+    if (!kind) return;
+    this.previewSource = source;
+    this.previewCtl = new PreviewController(this.previewEl, kind);
+    this.previewCtl.render(text);
+    this.hostEl.classList.add("hidden");
+    this.view.dom.style.display = "none";
+    this.welcomeEl.classList.add("hidden");
+    this.previewEl.classList.remove("hidden");
+  }
+
+  /** Re-render the preview from updated source text (no-op if not previewing). */
+  refreshPreview(text: string): void {
+    this.previewCtl?.render(text);
+  }
+
+  /** Leave preview mode, restoring the editor (or welcome if empty). */
+  hidePreview(): void {
+    this.previewSource = null;
+    this.previewCtl = null;
+    this.hostEl.classList.remove("hidden");
+    this.previewEl.classList.add("hidden");
+    this.previewEl.innerHTML = "";
+    if (this.active) {
+      this.view.dom.style.display = "";
+    } else {
+      this.welcomeEl.classList.remove("hidden");
+    }
   }
 
   /** Remove `tab`; if it was active, activate a neighbour or show welcome. */
@@ -282,6 +409,22 @@ export class Pane {
 
   renderTabs(): void {
     this.tabsEl.innerHTML = "";
+    if (this.previewSource) {
+      const el = document.createElement("div");
+      el.className = "tab active preview-tab";
+      const name = document.createElement("span");
+      name.textContent = previewTabName(this.previewSource.name);
+      const close = document.createElement("button");
+      close.className = "tab-close";
+      close.textContent = "×";
+      close.onclick = (e) => {
+        e.stopPropagation();
+        this.mgr.closePreview(this);
+      };
+      el.append(name, close);
+      this.tabsEl.append(el);
+      return;
+    }
     for (const tab of this.tabs) {
       const el = document.createElement("div");
       el.className = "tab" + (tab === this.active ? " active" : "");
@@ -327,6 +470,8 @@ export class EditorManager {
   private container: HTMLElement;
   private splitter: HTMLElement | null = null;
   private diffTimer: number | undefined;
+  private previewTimer: number | undefined;
+  private workspaceRoot: string | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -337,15 +482,17 @@ export class EditorManager {
 
   setFocused(pane: Pane): void {
     if (this.focused === pane) return;
+    this.focused.checkpoint(); // sync outgoing pane's live edits into its active tab
     this.focused = pane;
     this.recomputeDiff();
     this.renderAllTabs();
     this.onActiveTabChanged?.(this.focused.active);
   }
 
-  /** Open the right pane (cloning the focused active file into it) if not split. */
-  openSplit(): void {
+  /** Open the right pane, cloning the active file only for normal editor splits. */
+  openSplit(purpose: SplitPurpose = "editor"): void {
     if (this.panes.length > 1) return;
+    const shouldClone = splitClonesActiveTab(purpose);
     this.splitter = document.createElement("div");
     this.splitter.className = "pane-splitter";
     this.container.append(this.splitter);
@@ -354,9 +501,9 @@ export class EditorManager {
     // drag-resize: shrink/grow the right pane
     attachPaneSplitter(this.splitter, right.el);
 
-    const src = this.panes[0].active;
-    this.setFocused(right);
-    if (src && src.path) {
+    const src = this.focused.active;
+    if (shouldClone) this.setFocused(right);
+    if (shouldClone && src && src.path) {
       void this.openFile(src.path); // opens a fresh tab in the now-focused right pane
     } else {
       right.showWelcome();
@@ -364,10 +511,17 @@ export class EditorManager {
     }
   }
 
-  /** Collapse back to a single pane, discarding the right pane's tabs. */
-  closeSplit(): void {
-    if (this.panes.length < 2) return;
-    const right = this.panes.pop()!;
+  /** Collapse back to a single pane after confirming dirty tabs in the right pane. */
+  closeSplit(): boolean {
+    if (this.panes.length < 2) return true;
+    const right = this.panes[1];
+    right.checkpoint();
+    if (this.confirmCloseTab) {
+      for (const tab of right.tabs) {
+        if (tab.dirty && !this.confirmCloseTab(tab)) return false;
+      }
+    }
+    this.panes.pop();
     right.el.remove();
     this.splitter?.remove();
     this.splitter = null;
@@ -376,10 +530,15 @@ export class EditorManager {
     this.renderAllTabs();
     this.onActiveTabChanged?.(this.focused.active);
     this.onTabsChanged?.();
+    return true;
   }
 
   get isSplit(): boolean {
     return this.panes.length > 1;
+  }
+
+  setWorkspaceRoot(root: string | null): void {
+    this.workspaceRoot = root;
   }
 
   // ---- focused-pane delegating accessors (compat with single-pane callers) ----
@@ -407,6 +566,13 @@ export class EditorManager {
     return this.panes.find((p) => p.tabs.includes(tab));
   }
 
+  /** Live content of `tab`: owning pane's view when active there, else stored state. */
+  contentOf(tab: Tab): string {
+    const pane = this.paneOf(tab);
+    if (pane && pane.active === tab) return pane.getContent();
+    return tab.state.doc.toString();
+  }
+
   renderAllTabs(): void {
     for (const p of this.panes) p.renderTabs();
   }
@@ -415,10 +581,11 @@ export class EditorManager {
     return tab.override ?? tab.gitHead;
   }
 
-  async openFile(path: string): Promise<void> {
-    const existing = this.tabs.find((t) => t.path === path);
+  async openFile(path: string, line?: number): Promise<void> {
+    const existing = this.focused.tabByPath(path);
     if (existing) {
       this.activate(existing);
+      if (line !== undefined) this.revealLine(line);
       return;
     }
     const content = await readFile(path);
@@ -439,6 +606,26 @@ export class EditorManager {
     };
     pane.addTab(tab);
     this.activateInPane(pane, tab);
+    if (line !== undefined) this.revealLine(line);
+  }
+
+  async openFileInSide(path: string, side: PaneSide): Promise<void> {
+    const pane = side === "left" ? this.panes[0] : this.ensureRightPane();
+    this.setFocused(pane);
+    await this.openFile(path);
+  }
+
+  revealLine(line: number): void {
+    const view = this.focused.view;
+    const doc = view.state.doc;
+    // `line` is 1-based (matches backend search results and CM6 doc.line).
+    const clampedLine = Math.max(1, Math.min(line, doc.lines));
+    const pos = doc.line(clampedLine).from;
+    view.dispatch({
+      selection: EditorSelection.cursor(pos),
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
   }
 
   newUntitled(): void {
@@ -481,12 +668,24 @@ export class EditorManager {
     this.closeTabInPane(pane, tab);
   }
 
+  closePreview(pane: Pane): void {
+    pane.hidePreview();
+    if (this.panes[1] === pane && pane.tabs.length === 0) {
+      this.closeSplit();
+      return;
+    }
+    this.renderAllTabs();
+    this.onTabsChanged?.();
+  }
+
   closeTab(tab: Tab): void {
     const pane = this.paneOf(tab);
     if (pane) this.closeTabInPane(pane, tab);
   }
 
   private closeTabInPane(pane: Pane, tab: Tab): void {
+    // closing a source tab tears down any preview bound to it
+    for (const p of this.panes) if (p.previewSource === tab) p.hidePreview();
     const wasActive = pane.active === tab;
     pane.removeTab(tab);
     if (wasActive) {
@@ -508,6 +707,13 @@ export class EditorManager {
   closeTabsOutsideWorkspace(root: string): void {
     let changed = false;
     for (const pane of this.panes) {
+      if (
+        pane.previewSource &&
+        (pane.previewSource.path == null || !pathBelongsToRoot(pane.previewSource.path, root))
+      ) {
+        pane.hidePreview();
+        changed = true;
+      }
       const kept = filterWorkspaceTabs(pane.tabs, root);
       if (kept.length === pane.tabs.length) continue;
       changed = true;
@@ -556,10 +762,68 @@ export class EditorManager {
     this.onDiffChanged?.(hunks, label);
   }
 
+  /**
+   * Toggle preview for the focused active tab. Renders into the right pane
+   * (opening the split if needed). Pressing again for the same source closes it.
+   */
+  async togglePreview(): Promise<void> {
+    const source = this.focused.active;
+    if (!source) return;
+    const { previewKind } = await import("./preview");
+    if (!previewKind(source.name)) return; // not md/html → no-op
+
+    // already previewing this exact source in the right pane → close it
+    const right = this.panes[1];
+    if (right && right.previewSource === source) {
+      right.hidePreview();
+      if (right.tabs.length === 0) this.closeSplit();
+      return;
+    }
+
+    const text = await this.previewRenderValue(source);
+    if (!this.isSplit) this.openSplit("preview");
+    const target = this.panes[1];
+    await target.showPreview(source, text);
+    this.renderAllTabs();
+  }
+
+  private ensureRightPane(): Pane {
+    if (!this.isSplit) this.openSplit("preview");
+    return this.panes[1];
+  }
+
+  private async previewRenderValue(source: Tab): Promise<string> {
+    const mode = previewRefreshModeForName(source.name);
+    if (mode === "live") return this.contentOf(source);
+    if (!source.path) throw new Error("Save the HTML file before previewing it.");
+    if (!this.workspaceRoot) throw new Error("Open a folder before previewing HTML.");
+    if (!pathBelongsToRoot(source.path, this.workspaceRoot)) {
+      throw new Error("HTML preview only serves files inside the opened workspace.");
+    }
+    const url = await previewServerUrl(this.workspaceRoot, source.path);
+    return `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+  }
+
+  private schedulePreviewRefresh(source: Tab, text: string): void {
+    if (this.previewTimer !== undefined) clearTimeout(this.previewTimer);
+    this.previewTimer = window.setTimeout(() => {
+      this.previewTimer = undefined;
+      if (previewRefreshModeForName(source.name) !== "live") return;
+      for (const p of this.panes) if (p.previewSource === source) p.refreshPreview(text);
+    }, 150);
+  }
+
+  private async refreshSavedPreview(source: Tab): Promise<void> {
+    if (previewRefreshModeForName(source.name) !== "save") return;
+    const text = await this.previewRenderValue(source);
+    for (const p of this.panes) if (p.previewSource === source) p.refreshPreview(text);
+  }
+
   /** Called by a pane when its active doc changes. */
   onPaneDocChanged(pane: Pane): void {
     this.focused = pane;
     this.scheduleDiff();
+    if (pane.active) this.schedulePreviewRefresh(pane.active, pane.getContent());
     this.renderAllTabs();
     this.onTabsChanged?.();
   }
@@ -584,6 +848,7 @@ export class EditorManager {
     tab.dirty = false;
     tab.savedContent = pane && pane.active === tab ? pane.getContent() : tab.savedContent;
     tab.lastMtime = mtime;
+    void this.refreshSavedPreview(tab);
     this.renderAllTabs();
     this.onTabsChanged?.();
   }

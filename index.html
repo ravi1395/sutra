@@ -10,19 +10,34 @@
   <body>
     <div id="app">
       <div id="titlebar">
-        <nav id="menubar"></nav>
         <div class="spacer"></div>
         <div id="workspace"></div>
+        <div id="gitbar"></div>
         <div id="view-tools">
           <button id="btn-track" class="tbtn" title="Track edits made by Claude/Codex" aria-label="Track AI edits"></button>
           <button id="btn-term" class="tbtn on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
           <button id="btn-diff" class="tbtn" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
+          <button id="btn-browser" class="tbtn" title="Toggle browser" aria-label="Toggle browser"></button>
         </div>
       </div>
 
       <div id="body">
         <div id="sidebar">
+          <div id="sidebar-header">
+            <span id="sidebar-title">FILES</span>
+            <div class="sidebar-actions">
+              <button id="btn-refresh" class="sbtn" title="Refresh folder" aria-label="Refresh folder"></button>
+              <button id="btn-search-toggle" class="sbtn" title="Search folder (⇧⌘F)" aria-label="Search folder"></button>
+            </div>
+          </div>
           <div id="tree" class="tree"></div>
+          <div id="search-view" class="hidden">
+            <div id="search-input-row">
+              <input id="search-input" type="text" placeholder="Search folder (regex)" spellcheck="false" />
+              <button id="search-case" class="sbtn" title="Case sensitive">Aa</button>
+            </div>
+            <div id="search-results"></div>
+          </div>
         </div>
         <div id="vresizer" class="resizer-v" data-target="sidebar"></div>
 
@@ -35,7 +50,17 @@
                 <span id="diff-title">Diff</span>
                 <button id="diff-close" title="Close">×</button>
               </div>
+              <div id="diff-files"></div>
               <div id="diff-body"></div>
+            </div>
+            <div id="browser-resizer" class="resizer-v hidden" data-target="browser-area"></div>
+            <div id="browser-area" class="hidden">
+              <div id="browser-header">
+                <button id="btn-back" class="browser-btn" title="Back" aria-label="Back"></button>
+                <button id="btn-reload" class="browser-btn" title="Reload" aria-label="Reload"></button>
+                <input id="browser-url" type="text" placeholder="Enter URL or localhost:port" class="browser-url-input" spellcheck="false" />
+              </div>
+              <iframe id="browser-frame" class="browser-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
             </div>
           </div>
 

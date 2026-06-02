@@ -1,7 +1,13 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { detectLanguage } from "../src/editor";
-import { fileTypeMeta } from "../src/tree";
+import {
+  detectLanguage,
+  previewRefreshModeForName,
+  previewTabName,
+  splitClonesActiveTab,
+} from "../src/editor";
+import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "../src/shortcuts";
+import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
   filterWorkspaceTabs,
@@ -82,10 +88,39 @@ test("detectLanguage covers requested syntax highlighted extensions", () => {
   }
 });
 
+test("preview-created split does not clone the active file into the preview pane", () => {
+  assert.equal(splitClonesActiveTab("editor"), true);
+  assert.equal(splitClonesActiveTab("preview"), false);
+});
+
+test("preview tabs expose their source and refresh markdown live but html from disk", () => {
+  assert.equal(previewTabName("README.md"), "Preview: README.md");
+  assert.equal(previewRefreshModeForName("README.md"), "live");
+  assert.equal(previewRefreshModeForName("index.html"), "save");
+  assert.equal(previewRefreshModeForName("main.ts"), null);
+});
+
+test("preview shortcut is handled before focused editor paste handlers", () => {
+  assert.equal(
+    isPreviewShortcut({ metaKey: true, ctrlKey: false, shiftKey: true, code: "KeyV" }),
+    true,
+  );
+  assert.equal(
+    isPreviewShortcut({ metaKey: true, ctrlKey: false, shiftKey: false, code: "KeyV" }),
+    false,
+  );
+  assert.equal(GLOBAL_SHORTCUT_OPTIONS.capture, true);
+});
+
 test("fileTypeMeta gives file tree rows type-specific icons and classes", () => {
   assert.deepEqual(fileTypeMeta("src/component.TSX"), { icon: "TSX", className: "type-ts" });
   assert.deepEqual(fileTypeMeta("README.md"), { icon: "MD", className: "type-md" });
   assert.deepEqual(fileTypeMeta("package.json"), { icon: "{}", className: "type-json" });
   assert.deepEqual(fileTypeMeta("src", true), { icon: "DIR", className: "type-folder" });
   assert.deepEqual(fileTypeMeta("unknown"), { icon: "TXT", className: "type-file" });
+});
+
+test("paneSideFromClientX splits a drop target into left and right halves", () => {
+  assert.equal(paneSideFromClientX(149, { left: 100, width: 100 }), "left");
+  assert.equal(paneSideFromClientX(150, { left: 100, width: 100 }), "right");
 });

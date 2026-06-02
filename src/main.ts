@@ -2,15 +2,20 @@
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and the optional AI-edit tracker.
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { FileTree } from "./tree";
+import { FileTree, paneSideFromClientX } from "./tree";
 import { EditorManager, type Tab } from "./editor";
+import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
+import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
-import { writeFile, fileMtime, readFile, gitHeadContent } from "./ipc";
-import { mountMenuBar, type MenuBarHandle } from "./menubar";
+import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles } from "./ipc";
+import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
+import { mountPalette, type PaletteHandle } from "./palette";
+import { createGitBar, type GitBarHandle } from "./gitbar";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
+import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -18,9 +23,32 @@ const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("term-tab-list"));
 const diffViewer = new DiffViewer();
+const search = new SearchPanel(
+  $<HTMLInputElement>("search-input"),
+  $<HTMLButtonElement>("search-case"),
+  $("search-results"),
+);
+search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+const browser = new BrowserPane(
+  $("browser-area"),
+  $<HTMLIFrameElement>("browser-frame"),
+  $<HTMLInputElement>("browser-url"),
+  $<HTMLButtonElement>("btn-back"),
+  $<HTMLButtonElement>("btn-reload"),
+);
+
+// Wire terminal link clicks → embedded browser.
+terminals.onLinkActivate = (url: string) => {
+  setBrowser(true);
+  browser.show();
+  browser.open(url);
+};
 
 const banner = $("ai-banner");
-let menu: MenuBarHandle; // assigned at boot once toggle handlers exist
+let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
+let palette: PaletteHandle; // assigned at boot once all actions are defined
+let gitBar: GitBarHandle; // assigned at boot
+let currentRoot: string | null = null; // track opened workspace
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
@@ -39,6 +67,89 @@ tree.onOpenFile = async (path) => {
     tree.setActive(path);
   } catch (e) {
     alert(`Cannot open ${path}: ${e}`);
+  }
+};
+tree.onOpenFileInPane = (path, side) => {
+  void editor
+    .openFileInSide(path, side)
+    .then(() => tree.setActive(path))
+    .catch((e) => alert(`Cannot open ${path}: ${e}`));
+};
+
+// Tree context menu actions
+tree.onRename = async (path: string, newName: string) => {
+  try {
+    await renamePath(path, newName);
+    // Update open tabs with renamed path
+    const parent = path.split("/").slice(0, -1).join("/");
+    const newPath = parent ? parent + "/" + newName : newName;
+    for (const tab of editor.tabs) {
+      if (tab.path === path) {
+        editor.markSaved(tab, newPath, newName, null);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Rename failed: ${e}`);
+  }
+};
+
+tree.onDelete = async (path: string) => {
+  if (!confirm(`Delete "${path.split("/").pop()}"?`)) return;
+  try {
+    await deletePath(path);
+    // Close any open tabs for deleted path and its children
+    const pathPrefix = path.endsWith("/") ? path : path + "/";
+    for (const tab of editor.tabs.slice()) {
+      if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
+        editor.closeTab(tab);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Delete failed: ${e}`);
+  }
+};
+
+tree.onCreate = async (parentDir: string, isDir: boolean) => {
+  const type = isDir ? "folder" : "file";
+  const name = prompt(`New ${type} name:`);
+  if (!name) return;
+  try {
+    if (isDir) {
+      const path = parentDir + "/" + name;
+      await createDir(path);
+    } else {
+      const path = parentDir + "/" + name;
+      await writeFile(path, "");
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Create ${type} failed: ${e}`);
+  }
+};
+
+tree.onMove = async (src: string, destDir: string) => {
+  try {
+    // Compute destination path: destDir + "/" + basename(src)
+    const srcBaseName = src.split("/").pop() || src;
+    const destPath = destDir + "/" + srcBaseName;
+    await movePath(src, destPath);
+    // Update open tabs with moved path
+    const srcPrefix = src.endsWith("/") ? src : src + "/";
+    for (const tab of editor.tabs.slice()) {
+      if (tab.path === src) {
+        editor.markSaved(tab, destPath, srcBaseName, null);
+      } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+        // Move children: /old/child -> /new/child
+        const relPath = tab.path.slice(srcPrefix.length);
+        const newPath = destPath + "/" + relPath;
+        editor.markSaved(tab, newPath, tab.name, null);
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    alert(`Move failed: ${e}`);
   }
 };
 
@@ -64,7 +175,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
     if (!chosen) return;
     path = chosen;
   }
-  const content = editor.active === tab ? editor.getContent() : tab.state.doc.toString();
+  const content = editor.contentOf(tab);
   try {
     await writeFile(path, content);
   } catch (e) {
@@ -76,9 +187,10 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   if (path !== prevPath) {
     // brand-new file or Save As → it now exists on disk; seed git baseline + tree
     tab.gitHead = await gitHeadContent(path).catch(() => null);
-    tree.refresh();
     tree.setActive(path);
   }
+  void tree.refresh();
+  if (currentRoot) void gitBar.refresh(currentRoot);
   editor.recomputeDiff();
 }
 
@@ -88,12 +200,16 @@ editor.saveHandler = saveTab;
 async function openWorkspace(dir: string): Promise<void> {
   if (!confirmWorkspaceClose(dir)) return;
   editor.closeTabsOutsideWorkspace(dir);
+  editor.setWorkspaceRoot(dir);
+  currentRoot = dir;
   tree.setActive(editor.active?.path ?? null);
-  tree.setRoot(dir);
-  menu.setCurrentWorkspace(dir);
+  await tree.setRoot(dir);
+  search.setRoot(dir);
+  workspaceBar.setCurrentWorkspace(dir);
   hideBanner();
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
+  void gitBar.refresh(dir);
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -123,6 +239,30 @@ function setTerminal(on: boolean): void {
 btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
 $("term-add").onclick = () => void terminals.create();
 
+// ---- diff file list ----
+async function refreshDiffFileList(): Promise<void> {
+  if (!currentRoot) return;
+  try {
+    const gitFiles = await gitChangedFiles(currentRoot);
+    // Merge in any open tabs with override baseline (pre-AI captures)
+    const fileMap = new Map(gitFiles.map((f) => [f.path, f]));
+    for (const tab of editor.tabs) {
+      if (tab.path && tab.override && !fileMap.has(tab.path)) {
+        fileMap.set(tab.path, { path: tab.path, status: "M" });
+      }
+    }
+    const files = Array.from(fileMap.values());
+    const activePath = editor.active?.path ?? null;
+    diffViewer.renderFileList(files, activePath, (path: string) => {
+      void editor.openFile(path).then(() => {
+        // Existing onDiffChanged hook will render hunks
+      });
+    });
+  } catch (e) {
+    // Silently skip on error
+  }
+}
+
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
 const diffRes = $("diff-resizer");
@@ -131,10 +271,24 @@ function setDiff(on: boolean): void {
   diffPane.classList.toggle("hidden", !on);
   diffRes.classList.toggle("hidden", !on);
   btnDiff.classList.toggle("on", on);
-  if (on) editor.recomputeDiff();
+  if (on) {
+    editor.recomputeDiff();
+    void refreshDiffFileList();
+  }
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
+
+// ---- browser toggle ----
+const browserArea = $("browser-area");
+const browserRes = $("browser-resizer");
+const btnBrowser = $("btn-browser");
+function setBrowser(on: boolean): void {
+  browserArea.classList.toggle("hidden", !on);
+  browserRes.classList.toggle("hidden", !on);
+  btnBrowser.classList.toggle("on", on);
+}
+btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
 
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
@@ -142,6 +296,44 @@ const vres = $("vresizer");
 function setSidebar(on: boolean): void {
   sidebar.classList.toggle("hidden", !on);
   vres.classList.toggle("hidden", !on);
+}
+
+function togglePreview(): void {
+  void editor
+    .togglePreview()
+    .catch((e) => alert(`Preview failed: ${e instanceof Error ? e.message : e}`));
+}
+
+// ---- search view toggle ----
+const treeEl = $("tree");
+const searchView = $("search-view");
+const sidebarTitle = $("sidebar-title");
+const btnSearchToggle = $("btn-search-toggle");
+let searchViewOpen = false;
+let searchIconHtml = "";
+
+function openSearchView(): void {
+  searchViewOpen = true;
+  treeEl.classList.add("hidden");
+  searchView.classList.remove("hidden");
+  sidebarTitle.textContent = "SEARCH";
+  searchIconHtml = btnSearchToggle.innerHTML;
+  btnSearchToggle.innerHTML = "←";
+  btnSearchToggle.title = "Back to files";
+  search.focus();
+}
+
+function closeSearchView(): void {
+  searchViewOpen = false;
+  searchView.classList.add("hidden");
+  treeEl.classList.remove("hidden");
+  sidebarTitle.textContent = "FILES";
+  if (searchIconHtml) btnSearchToggle.innerHTML = searchIconHtml;
+  btnSearchToggle.title = "Search folder (⇧⌘F)";
+}
+
+function toggleSearchView(): void {
+  if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
 // ---- AI-edit tracking ----
@@ -197,6 +389,7 @@ function onExternalEdit(tab: Tab, oldBuf: string, disk: string): void {
   editor.activate(tab);
   editor.setContent(disk); // show the AI version; recompute uses override baseline
   setDiff(true);
+  void refreshDiffFileList(); // Refresh the file list in diff pane
   showAiBanner(tab);
 }
 
@@ -251,7 +444,40 @@ function hideBanner(): void {
 vResizer(vres, sidebar, { min: 120, max: 600 });
 hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.refit() });
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
+vResizer(browserRes, browserArea, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
+
+// ---- file-tree drag to editor split ----
+const panesEl = $("panes");
+
+function hasTreeFileDrag(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes("application/x-sutra-file");
+}
+
+function setPaneDropHint(side: "left" | "right" | null): void {
+  panesEl.classList.toggle("drop-left", side === "left");
+  panesEl.classList.toggle("drop-right", side === "right");
+}
+
+panesEl.addEventListener("dragover", (e) => {
+  if (!hasTreeFileDrag(e)) return;
+  e.preventDefault();
+  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  e.dataTransfer!.dropEffect = "copy";
+  setPaneDropHint(side);
+});
+panesEl.addEventListener("dragleave", (e) => {
+  const next = e.relatedTarget;
+  if (!(next instanceof Node) || !panesEl.contains(next)) setPaneDropHint(null);
+});
+panesEl.addEventListener("drop", (e) => {
+  const path = e.dataTransfer?.getData("application/x-sutra-file");
+  if (!path) return;
+  e.preventDefault();
+  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  setPaneDropHint(null);
+  tree.onOpenFileInPane?.(path, side);
+});
 
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
@@ -281,18 +507,39 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
+  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP")) {
+    e.preventDefault();
+    palette.open();
+  } else if (mod && e.code === "Backslash") {
+    e.preventDefault();
+    if (editor.isSplit) editor.closeSplit();
+    else editor.openSplit();
+  } else if (isPreviewShortcut(e)) {
+    e.preventDefault();
+    togglePreview();
+  } else if (mod && e.shiftKey && e.code === "KeyF") {
+    e.preventDefault();
+    if (!searchViewOpen) openSearchView();
+    search.focus();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(termArea.classList.contains("hidden"));
   }
-});
+}, GLOBAL_SHORTCUT_OPTIONS);
 
 // ---- chrome: icon buttons + menu bar ----
 btnTrack.innerHTML = icon("trackAI", 17);
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("diff", 17);
+btnBrowser.innerHTML = icon("browser", 17);
+$("btn-back").innerHTML = icon("back", 16);
+$("btn-reload").innerHTML = icon("reload", 16);
+$("btn-refresh").innerHTML = icon("refresh", 15);
+$("btn-search-toggle").innerHTML = icon("search", 15);
+$("btn-refresh").onclick = () => void tree.refresh();
+btnSearchToggle.onclick = () => toggleSearchView();
 
-menu = mountMenuBar($("titlebar"), {
+const actions = {
   newFile: () => editor.newUntitled(),
   saveActive: () => {
     if (editor.active) void saveTab(editor.active);
@@ -307,14 +554,56 @@ menu = mountMenuBar($("titlebar"), {
   closeTab: () => closeActiveTab(),
   toggleTerminal: () => setTerminal(termArea.classList.contains("hidden")),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
+  toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
   toggleTrackAI: () => setTracking(!tracking),
   newTerminal: () => void terminals.create(),
+  openInBrowser: () => {
+    setBrowser(true);
+    browser.show();
+    $<HTMLInputElement>("browser-url").focus();
+    $<HTMLInputElement>("browser-url").select();
+  },
   recents: () => loadRecents(),
-  switchWorkspace: (path) => void openWorkspace(path),
+  switchWorkspace: (path: string) => void openWorkspace(path),
   addFolder: () => void openFolderDialog(),
+};
+
+workspaceBar = mountWorkspaceBar($("titlebar"), {
+  recents: actions.recents,
+  switchWorkspace: actions.switchWorkspace,
+  addFolder: actions.addFolder,
+  openFolder: actions.openFolder,
 });
-menu.setCurrentWorkspace(null);
+workspaceBar.setCurrentWorkspace(null);
+
+gitBar = createGitBar($("gitbar"));
+gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
+
+// ---- command palette ----
+palette = mountPalette([
+  { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
+  { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
+  { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
+  { id: "save-all", title: "Save All", run: actions.saveAllDirty, shortcut: "⌥⌘S" },
+  { id: "open-folder", title: "Open Folder…", run: actions.openFolder, shortcut: "⌘O" },
+  { id: "close-tab", title: "Close Tab", run: actions.closeTab, shortcut: "⌘W" },
+  { id: "toggle-terminal", title: "Toggle Terminal", run: actions.toggleTerminal, shortcut: "⌘J" },
+  { id: "toggle-diff", title: "Toggle Diff Viewer", run: actions.toggleDiff },
+  { id: "toggle-browser", title: "Toggle Browser", run: actions.toggleBrowser },
+  { id: "open-in-browser", title: "Open in Browser…", run: actions.openInBrowser },
+  { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: "⌘B" },
+  { id: "toggle-split", title: "Toggle Split", run: () => {
+    if (editor.isSplit) editor.closeSplit();
+    else editor.openSplit();
+  }, shortcut: "⌘\\" },
+  { id: "toggle-ai-track", title: "Track AI Edits", run: actions.toggleTrackAI },
+  { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
+  { id: "search", title: "Search Folder", run: () => {
+    if (!searchViewOpen) openSearchView();
+    search.focus();
+  }, shortcut: "⇧⌘F" },
+]);
 
 // ---- boot ----
 editor.renderAllTabs();
