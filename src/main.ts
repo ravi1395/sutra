@@ -8,9 +8,10 @@ import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { vResizer, hResizer } from "./layout";
-import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath } from "./ipc";
+import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles } from "./ipc";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type PaletteHandle } from "./palette";
+import { createGitBar, type GitBarHandle } from "./gitbar";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
@@ -31,6 +32,8 @@ search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActiv
 const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
+let gitBar: GitBarHandle; // assigned at boot
+let currentRoot: string | null = null; // track opened workspace
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
@@ -172,6 +175,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
     tree.setActive(path);
   }
   void tree.refresh();
+  if (currentRoot) void gitBar.refresh(currentRoot);
   editor.recomputeDiff();
 }
 
@@ -182,6 +186,7 @@ async function openWorkspace(dir: string): Promise<void> {
   if (!confirmWorkspaceClose(dir)) return;
   editor.closeTabsOutsideWorkspace(dir);
   editor.setWorkspaceRoot(dir);
+  currentRoot = dir;
   tree.setActive(editor.active?.path ?? null);
   await tree.setRoot(dir);
   search.setRoot(dir);
@@ -189,6 +194,7 @@ async function openWorkspace(dir: string): Promise<void> {
   hideBanner();
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
+  void gitBar.refresh(dir);
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -218,6 +224,30 @@ function setTerminal(on: boolean): void {
 btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
 $("term-add").onclick = () => void terminals.create();
 
+// ---- diff file list ----
+async function refreshDiffFileList(): Promise<void> {
+  if (!currentRoot) return;
+  try {
+    const gitFiles = await gitChangedFiles(currentRoot);
+    // Merge in any open tabs with override baseline (pre-AI captures)
+    const fileMap = new Map(gitFiles.map((f) => [f.path, f]));
+    for (const tab of editor.tabs) {
+      if (tab.path && tab.override && !fileMap.has(tab.path)) {
+        fileMap.set(tab.path, { path: tab.path, status: "M" });
+      }
+    }
+    const files = Array.from(fileMap.values());
+    const activePath = editor.active?.path ?? null;
+    diffViewer.renderFileList(files, activePath, (path: string) => {
+      void editor.openFile(path).then(() => {
+        // Existing onDiffChanged hook will render hunks
+      });
+    });
+  } catch (e) {
+    // Silently skip on error
+  }
+}
+
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
 const diffRes = $("diff-resizer");
@@ -226,7 +256,10 @@ function setDiff(on: boolean): void {
   diffPane.classList.toggle("hidden", !on);
   diffRes.classList.toggle("hidden", !on);
   btnDiff.classList.toggle("on", on);
-  if (on) editor.recomputeDiff();
+  if (on) {
+    editor.recomputeDiff();
+    void refreshDiffFileList();
+  }
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
@@ -330,6 +363,7 @@ function onExternalEdit(tab: Tab, oldBuf: string, disk: string): void {
   editor.activate(tab);
   editor.setContent(disk); // show the AI version; recompute uses override baseline
   setDiff(true);
+  void refreshDiffFileList(); // Refresh the file list in diff pane
   showAiBanner(tab);
 }
 
@@ -505,6 +539,9 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   openFolder: actions.openFolder,
 });
 workspaceBar.setCurrentWorkspace(null);
+
+gitBar = createGitBar($("gitbar"));
+gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 
 // ---- command palette ----
 palette = mountPalette([

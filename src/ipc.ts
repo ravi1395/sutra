@@ -30,6 +30,32 @@ export interface GitStatusEntry {
 export const gitStatus = (root: string) =>
   invoke<GitStatusEntry[]>("git_status", { root });
 
+export const gitBranch = (root: string) =>
+  invoke<string | null>("git_branch", { root });
+
+export interface AheadBehindResult {
+  ahead: number;
+  behind: number;
+  base: string;
+}
+export const gitAheadBehind = (root: string) =>
+  invoke<AheadBehindResult | null>("git_ahead_behind", { root });
+
+export interface ChangedFile {
+  path: string;
+  status: string;
+}
+export const gitChangedFiles = (root: string) =>
+  invoke<ChangedFile[]>("git_changed_files", { root });
+
+export interface WorktreeInfo {
+  name: string;
+  path: string;
+  is_current: boolean;
+}
+export const gitWorktrees = (root: string) =>
+  invoke<WorktreeInfo[]>("git_worktrees", { root });
+
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
 

@@ -43,6 +43,7 @@ import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { readFile, gitHeadContent } from "./ipc";
 import { previewServerUrl } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
+import { parseConflicts, acceptOurs, acceptTheirs, acceptBoth, type ConflictRegion } from "./conflict";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 
 export interface Tab {
@@ -282,6 +283,58 @@ export class Pane {
     this.tabs.push(tab);
   }
 
+  // Detect merge conflicts in the active tab and render inline controls.
+  detectAndRenderConflicts(): void {
+    if (!this.active) return;
+    const docText = this.view.state.doc.toString();
+    const regions = parseConflicts(docText);
+    if (regions.length === 0) return; // No conflicts
+
+    // Clear any existing conflict UI
+    this.hostEl.querySelectorAll(".conflict-banner").forEach((e) => e.remove());
+
+    // For each conflict region, render a banner above the editor
+    for (let i = 0; i < regions.length; i++) {
+      const region = regions[i];
+      const banner = document.createElement("div");
+      banner.className = "conflict-banner";
+      banner.innerHTML = `<span>Conflict ${i + 1} of ${regions.length}</span>`;
+
+      const btnOurs = document.createElement("button");
+      btnOurs.className = "conflict-btn";
+      btnOurs.textContent = "Accept Current";
+      btnOurs.onclick = () => this.applyConflictResolution(region, "ours");
+
+      const btnTheirs = document.createElement("button");
+      btnTheirs.className = "conflict-btn";
+      btnTheirs.textContent = "Accept Incoming";
+      btnTheirs.onclick = () => this.applyConflictResolution(region, "theirs");
+
+      const btnBoth = document.createElement("button");
+      btnBoth.className = "conflict-btn";
+      btnBoth.textContent = "Accept Both";
+      btnBoth.onclick = () => this.applyConflictResolution(region, "both");
+
+      banner.append(btnOurs, btnTheirs, btnBoth);
+      this.hostEl.insertBefore(banner, this.view.dom);
+    }
+  }
+
+  // Apply a conflict resolution choice and update the document.
+  private applyConflictResolution(region: ConflictRegion, choice: "ours" | "theirs" | "both"): void {
+    if (!this.active) return;
+    const docText = this.view.state.doc.toString();
+    const newText =
+      choice === "ours"
+        ? acceptOurs(docText, region)
+        : choice === "theirs"
+          ? acceptTheirs(docText, region)
+          : acceptBoth(docText, region);
+    this.setContent(newText);
+    // Re-detect conflicts (fewer now)
+    this.detectAndRenderConflicts();
+  }
+
   /** Show `tab` in this pane's view, checkpointing the outgoing tab's state. */
   activate(tab: Tab): void {
     if (this.previewSource) this.hidePreview();
@@ -292,6 +345,8 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    // Detect conflicts in the newly activated tab
+    this.detectAndRenderConflicts();
   }
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */

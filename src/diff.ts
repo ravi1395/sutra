@@ -108,7 +108,9 @@ export function hunkIndexAtLine(hunks: Hunk[], line0: number): number {
 export class DiffViewer {
   private body = document.getElementById("diff-body")!;
   private titleEl = document.getElementById("diff-title")!;
+  private filesEl = document.getElementById("diff-files")!;
   onRevert?: (h: Hunk) => void;
+  onFileSelect?: (path: string) => void;
 
   render(hunks: Hunk[], label: string): void {
     this.titleEl.textContent = label;
@@ -161,5 +163,43 @@ export class DiffViewer {
       el.classList.add("highlight");
       el.scrollIntoView({ block: "nearest" });
     }
+  }
+
+  // Render list of changed files with clickable rows.
+  renderFileList(files: { path: string; status: string }[], active: string | null, onPick: (path: string) => void): void {
+    this.filesEl.innerHTML = "";
+    if (!files.length) return;
+
+    const list = document.createElement("div");
+    list.className = "diff-file-list";
+
+    for (const file of files) {
+      const row = document.createElement("div");
+      row.className = "diff-file-row";
+      if (file.path === active) row.classList.add("active");
+
+      const status = document.createElement("span");
+      status.className = `diff-file-status status-${file.status.toLowerCase()}`;
+      status.textContent = file.status;
+
+      const name = document.createElement("span");
+      name.className = "diff-file-name";
+      const basename = file.path.split("/").pop() || file.path;
+      name.textContent = basename;
+      name.title = file.path; // Full path in tooltip
+
+      row.appendChild(status);
+      row.appendChild(name);
+      row.onclick = () => {
+        // Highlight the active row
+        list.querySelectorAll(".diff-file-row.active").forEach((e) => e.classList.remove("active"));
+        row.classList.add("active");
+        onPick(file.path);
+      };
+
+      list.appendChild(row);
+    }
+
+    this.filesEl.appendChild(list);
   }
 }
