@@ -2,6 +2,7 @@
 // Rust boundary so the rest of the app stays transport-agnostic.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 export interface Entry {
   name: string;
@@ -79,3 +80,7 @@ export interface SearchMatch { path: string; line: number; text: string; }
 export interface SearchResult { matches: SearchMatch[]; truncated: boolean; }
 export const searchDir = (root: string, pattern: string, caseInsensitive: boolean) =>
   invoke<SearchResult>("search_dir", { root, pattern, caseInsensitive });
+
+// Clipboard wrappers over tauri-plugin-clipboard-manager.
+export const clipboardRead = (): Promise<string> => readText();
+export const clipboardWrite = (text: string): Promise<void> => writeText(text);

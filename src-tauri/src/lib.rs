@@ -12,6 +12,7 @@ pub fn run() {
         .menu(|handle| tauri::menu::MenuBuilder::new(handle).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
         .invoke_handler(tauri::generate_handler![
