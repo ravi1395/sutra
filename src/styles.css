@@ -1312,3 +1312,72 @@ button:hover {
   background: var(--bg-2);
   color: var(--fg);
 }
+
+/* ---- browser pane ---- */
+#browser-area {
+  flex: 0 0 40%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+}
+#browser-area.hidden {
+  display: none;
+}
+#browser-header {
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  background: var(--bg-bar);
+  border-bottom: 1px solid var(--border);
+}
+.browser-btn {
+  flex: 0 0 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.browser-btn:hover {
+  background: var(--em-wash);
+  color: var(--em);
+  border-color: var(--em-dim);
+}
+.browser-url-input {
+  flex: 1;
+  height: 32px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 4px 8px;
+  outline: none;
+  min-width: 0;
+}
+.browser-url-input:focus {
+  border-color: var(--em-dim);
+}
+.browser-url-input::placeholder {
+  color: var(--fg-faint);
+}
+.browser-frame {
+  flex: 1;
+  border: 0;
+  background: white;
+  min-height: 0;
+}
+#browser-resizer.hidden {
+  display: none;
+}

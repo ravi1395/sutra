@@ -7,6 +7,7 @@ import { EditorManager, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
+import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
 import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles } from "./ipc";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
@@ -28,6 +29,20 @@ const search = new SearchPanel(
   $("search-results"),
 );
 search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+const browser = new BrowserPane(
+  $("browser-area"),
+  $<HTMLIFrameElement>("browser-frame"),
+  $<HTMLInputElement>("browser-url"),
+  $<HTMLButtonElement>("btn-back"),
+  $<HTMLButtonElement>("btn-reload"),
+);
+
+// Wire terminal link clicks → embedded browser.
+terminals.onLinkActivate = (url: string) => {
+  setBrowser(true);
+  browser.show();
+  browser.open(url);
+};
 
 const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
@@ -264,6 +279,17 @@ function setDiff(on: boolean): void {
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
 
+// ---- browser toggle ----
+const browserArea = $("browser-area");
+const browserRes = $("browser-resizer");
+const btnBrowser = $("btn-browser");
+function setBrowser(on: boolean): void {
+  browserArea.classList.toggle("hidden", !on);
+  browserRes.classList.toggle("hidden", !on);
+  btnBrowser.classList.toggle("on", on);
+}
+btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
+
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
 const vres = $("vresizer");
@@ -418,6 +444,7 @@ function hideBanner(): void {
 vResizer(vres, sidebar, { min: 120, max: 600 });
 hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.refit() });
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
+vResizer(browserRes, browserArea, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
 
 // ---- file-tree drag to editor split ----
@@ -504,6 +531,9 @@ window.addEventListener("keydown", (e) => {
 btnTrack.innerHTML = icon("trackAI", 17);
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("diff", 17);
+btnBrowser.innerHTML = icon("browser", 17);
+$("btn-back").innerHTML = icon("back", 16);
+$("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
@@ -524,9 +554,16 @@ const actions = {
   closeTab: () => closeActiveTab(),
   toggleTerminal: () => setTerminal(termArea.classList.contains("hidden")),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
+  toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
   toggleTrackAI: () => setTracking(!tracking),
   newTerminal: () => void terminals.create(),
+  openInBrowser: () => {
+    setBrowser(true);
+    browser.show();
+    $<HTMLInputElement>("browser-url").focus();
+    $<HTMLInputElement>("browser-url").select();
+  },
   recents: () => loadRecents(),
   switchWorkspace: (path: string) => void openWorkspace(path),
   addFolder: () => void openFolderDialog(),
@@ -553,6 +590,8 @@ palette = mountPalette([
   { id: "close-tab", title: "Close Tab", run: actions.closeTab, shortcut: "⌘W" },
   { id: "toggle-terminal", title: "Toggle Terminal", run: actions.toggleTerminal, shortcut: "⌘J" },
   { id: "toggle-diff", title: "Toggle Diff Viewer", run: actions.toggleDiff },
+  { id: "toggle-browser", title: "Toggle Browser", run: actions.toggleBrowser },
+  { id: "open-in-browser", title: "Open in Browser…", run: actions.openInBrowser },
   { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: "⌘B" },
   { id: "toggle-split", title: "Toggle Split", run: () => {
     if (editor.isSplit) editor.closeSplit();
