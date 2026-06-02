@@ -9,7 +9,8 @@ import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { vResizer, hResizer } from "./layout";
 import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath } from "./ipc";
-import { mountMenuBar, type MenuBarHandle } from "./menubar";
+import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
+import { mountPalette, type PaletteHandle } from "./palette";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
@@ -28,7 +29,8 @@ const search = new SearchPanel(
 search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
 
 const banner = $("ai-banner");
-let menu: MenuBarHandle; // assigned at boot once toggle handlers exist
+let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
+let palette: PaletteHandle; // assigned at boot once all actions are defined
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
@@ -183,7 +185,7 @@ async function openWorkspace(dir: string): Promise<void> {
   tree.setActive(editor.active?.path ?? null);
   await tree.setRoot(dir);
   search.setRoot(dir);
-  menu.setCurrentWorkspace(dir);
+  workspaceBar.setCurrentWorkspace(dir);
   hideBanner();
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
@@ -444,6 +446,9 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
+  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP")) {
+    e.preventDefault();
+    palette.open();
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
     if (editor.isSplit) editor.closeSplit();
@@ -470,7 +475,7 @@ $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
 
-menu = mountMenuBar($("titlebar"), {
+const actions = {
   newFile: () => editor.newUntitled(),
   saveActive: () => {
     if (editor.active) void saveTab(editor.active);
@@ -489,10 +494,40 @@ menu = mountMenuBar($("titlebar"), {
   toggleTrackAI: () => setTracking(!tracking),
   newTerminal: () => void terminals.create(),
   recents: () => loadRecents(),
-  switchWorkspace: (path) => void openWorkspace(path),
+  switchWorkspace: (path: string) => void openWorkspace(path),
   addFolder: () => void openFolderDialog(),
+};
+
+workspaceBar = mountWorkspaceBar($("titlebar"), {
+  recents: actions.recents,
+  switchWorkspace: actions.switchWorkspace,
+  addFolder: actions.addFolder,
+  openFolder: actions.openFolder,
 });
-menu.setCurrentWorkspace(null);
+workspaceBar.setCurrentWorkspace(null);
+
+// ---- command palette ----
+palette = mountPalette([
+  { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
+  { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
+  { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
+  { id: "save-all", title: "Save All", run: actions.saveAllDirty, shortcut: "⌥⌘S" },
+  { id: "open-folder", title: "Open Folder…", run: actions.openFolder, shortcut: "⌘O" },
+  { id: "close-tab", title: "Close Tab", run: actions.closeTab, shortcut: "⌘W" },
+  { id: "toggle-terminal", title: "Toggle Terminal", run: actions.toggleTerminal, shortcut: "⌘J" },
+  { id: "toggle-diff", title: "Toggle Diff Viewer", run: actions.toggleDiff },
+  { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: "⌘B" },
+  { id: "toggle-split", title: "Toggle Split", run: () => {
+    if (editor.isSplit) editor.closeSplit();
+    else editor.openSplit();
+  }, shortcut: "⌘\\" },
+  { id: "toggle-ai-track", title: "Track AI Edits", run: actions.toggleTrackAI },
+  { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
+  { id: "search", title: "Search Folder", run: () => {
+    if (!searchViewOpen) openSearchView();
+    search.focus();
+  }, shortcut: "⇧⌘F" },
+]);
 
 // ---- boot ----
 editor.renderAllTabs();

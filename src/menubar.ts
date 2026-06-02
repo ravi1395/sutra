@@ -1,48 +1,20 @@
-// Custom in-window menu bar + workspace switcher. Pure presentation driven by an
-// injected action map — no business logic lives here. A single popover primitive
-// (`openPopover`) backs both the top-level menus and the switcher dropdown so
-// there is only one popover implementation to maintain.
+// Workspace switcher + popover primitive. Retains the workspace pill (folder switcher
+// in titlebar) and provides the openPopover primitive for recents + context menus.
+// The command palette and keyboard shortcuts now own the menu actions.
 import { icon } from "./icons";
 import type { RecentWorkspace } from "./workspace";
 
-export interface MenuActions {
-  newFile(): void;
-  saveActive(): void;
-  saveAllDirty(): void;
-  saveActiveAs(): void;
-  openFolder(): void;
-  closeTab(): void;
-  toggleTerminal(): void;
-  toggleDiff(): void;
-  toggleSidebar(): void;
-  toggleTrackAI(): void;
-  newTerminal(): void;
+export interface WorkspaceActions {
   recents(): RecentWorkspace[];
   switchWorkspace(path: string): void;
   addFolder(): void;
+  openFolder(): void;
 }
 
-export interface MenuBarHandle {
+export interface WorkspaceBarHandle {
   setCurrentWorkspace(path: string | null): void;
-  closeAll(): void;
+  openPopover: (anchor: HTMLElement, build: (el: HTMLElement) => void) => void;
 }
-
-// ---- menu model ----
-interface MenuItem {
-  label?: string;
-  kbd?: string;
-  arrow?: boolean;
-  disabled?: boolean;
-  sep?: boolean;
-  run?: () => void;
-}
-interface Menu {
-  title: string;
-  items: MenuItem[];
-}
-
-const sep: MenuItem = { sep: true };
-const soon: MenuItem = { label: "Coming soon", disabled: true };
 
 // Best-effort ~ collapse for display; the renderer has no HOME env, so match the
 // common macOS /Users/<name> prefix.
@@ -51,44 +23,9 @@ function homeCollapse(path: string): string {
   return m ? `~${m[1] ?? ""}` : path;
 }
 
-export function mountMenuBar(root: HTMLElement, actions: MenuActions): MenuBarHandle {
-  const menubarEl = root.querySelector<HTMLElement>("#menubar")!;
+export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions): WorkspaceBarHandle {
   const wsEl = root.querySelector<HTMLElement>("#workspace")!;
   let current: string | null = null;
-
-  const menus: Menu[] = [
-    { title: "Sutra", items: [{ label: "About Sutra", disabled: true }] },
-    {
-      title: "File",
-      items: [
-        { label: "New File", kbd: "⌘N", run: actions.newFile },
-        sep,
-        { label: "Open Folder…", kbd: "⌘O", run: actions.openFolder },
-        { label: "Open Recent", arrow: true, run: () => openSwitcher() },
-        sep,
-        { label: "Save", kbd: "⌘S", run: actions.saveActive },
-        { label: "Save As…", kbd: "⇧⌘S", run: actions.saveActiveAs },
-        { label: "Save All", kbd: "⌥⌘S", run: actions.saveAllDirty },
-        sep,
-        { label: "Close Tab", kbd: "⌘W", run: actions.closeTab },
-      ],
-    },
-    { title: "Edit", items: [soon] },
-    { title: "Selection", items: [soon] },
-    {
-      title: "View",
-      items: [
-        { label: "Toggle Sidebar", kbd: "⌘B", run: actions.toggleSidebar },
-        { label: "Toggle Terminal", kbd: "⌘J", run: actions.toggleTerminal },
-        { label: "Toggle Diff Viewer", run: actions.toggleDiff },
-        sep,
-        { label: "Track AI Edits", run: actions.toggleTrackAI },
-      ],
-    },
-    { title: "Go", items: [soon] },
-    { title: "Terminal", items: [{ label: "New Terminal", run: actions.newTerminal }] },
-    { title: "Help", items: [{ label: "About Sutra", disabled: true }] },
-  ];
 
   // ---- popover lifecycle ----
   let pop: HTMLElement | null = null;
@@ -97,7 +34,7 @@ export function mountMenuBar(root: HTMLElement, actions: MenuActions): MenuBarHa
   function closeAll(): void {
     pop?.remove();
     pop = null;
-    openBtn?.classList.remove("open"); // both .menu-btn and .ws-pill use .open
+    openBtn?.classList.remove("open");
     openBtn = null;
   }
 
@@ -123,49 +60,6 @@ export function mountMenuBar(root: HTMLElement, actions: MenuActions): MenuBarHa
     pop = el;
     openBtn = anchor;
     anchor.classList.add("open");
-  }
-
-  function makeRow(it: MenuItem): HTMLElement | null {
-    if (it.sep) {
-      const s = document.createElement("div");
-      s.className = "po-sep";
-      return s;
-    }
-    const row = document.createElement("div");
-    row.className = "po-item" + (it.disabled ? " disabled" : "");
-    const gi = document.createElement("span");
-    gi.className = "po-gi";
-    row.appendChild(gi);
-    const label = document.createElement("span");
-    label.textContent = it.label ?? "";
-    row.appendChild(label);
-    if (it.kbd) {
-      const k = document.createElement("span");
-      k.className = "po-kbd";
-      k.textContent = it.kbd;
-      row.appendChild(k);
-    } else if (it.arrow) {
-      const a = document.createElement("span");
-      a.className = "po-arrow";
-      a.textContent = "▸";
-      row.appendChild(a);
-    }
-    if (!it.disabled) {
-      row.onclick = () => {
-        closeAll();
-        it.run?.();
-      };
-    }
-    return row;
-  }
-
-  function openMenu(menu: Menu, btn: HTMLElement): void {
-    openPopover(btn, (el) => {
-      for (const it of menu.items) {
-        const row = makeRow(it);
-        if (row) el.appendChild(row);
-      }
-    });
   }
 
   function openSwitcher(): void {
@@ -224,22 +118,6 @@ export function mountMenuBar(root: HTMLElement, actions: MenuActions): MenuBarHa
     });
   }
 
-  // ---- render menu bar ----
-  menubarEl.innerHTML = "";
-  for (const menu of menus) {
-    const btn = document.createElement("button");
-    btn.className = "menu-btn";
-    btn.textContent = menu.title;
-    btn.onclick = () => openMenu(menu, btn);
-    // hover-switch while a menu is already open
-    btn.onmouseenter = () => {
-      if (pop && openBtn && openBtn !== btn && openBtn.classList.contains("menu-btn")) {
-        openMenu(menu, btn);
-      }
-    };
-    menubarEl.appendChild(btn);
-  }
-
   // ---- render switcher (pill + add) ----
   wsEl.innerHTML = "";
   const pill = document.createElement("button");
@@ -285,6 +163,6 @@ export function mountMenuBar(root: HTMLElement, actions: MenuActions): MenuBarHa
       current = path;
       renderPill();
     },
-    closeAll,
+    openPopover,
   };
 }
