@@ -72,6 +72,9 @@ export function beginSplitPointerDrag(options: SplitPointerDragOptions): void {
     if (!started) {
       started = true;
       onStart?.();
+      // Capture only once a real drag begins. Capturing in pointerdown makes
+      // WKWebView swallow the synthetic click, breaking tab activation on tap.
+      source.setPointerCapture(pointerId);
       source.classList.add("dragging");
     }
     moveEvent.preventDefault();
@@ -101,7 +104,6 @@ export function beginSplitPointerDrag(options: SplitPointerDragOptions): void {
     clear();
   };
 
-  source.setPointerCapture(pointerId);
   window.addEventListener("pointermove", move, { capture: true, passive: false });
   window.addEventListener("pointerup", finish, { capture: true });
   window.addEventListener("pointercancel", cancelPointer, { capture: true });

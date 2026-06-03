@@ -954,18 +954,19 @@ button:hover {
 .term-tab-list {
   display: flex;
   overflow-x: auto;
-  flex: 1;
+  flex: 0 1 auto; /* size to tabs, then scroll — keeps + button beside the last tab */
+  min-width: 0;
 }
 .term-add {
   border: none;
   border-radius: 0;
   background: var(--bg-bar);
-  padding: 0 12px;
+  padding: 0 10px;
   cursor: pointer;
-  color: var(--fg-dim);
+  color: var(--fg);
 }
 .term-add:hover {
-  color: var(--fg);
+  color: var(--em);
 }
 .term-group-body {
   flex: 1;

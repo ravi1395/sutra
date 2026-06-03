@@ -36,6 +36,11 @@ const THEME = {
   selectionBackground: "#264f78",
 };
 
+// Process-lifetime PTY id counter. Never reset (unlike the per-workspace display
+// counter), so a recycled "zsh N" title can't collide with a killed PTY's id and
+// pick up its stale pty-exit event.
+let ptyIdSeq = 0;
+
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -86,7 +91,13 @@ export class TerminalManager {
       body.className = "term-group-body";
 
       col.append(tabsBar, body);
-      col.addEventListener("mousedown", () => this.focusGroup(side));
+      // Focus the group when its body is pressed. Skip presses inside the tab bar:
+      // focusGroup() rebuilds the tab DOM, which would destroy the pressed tab node
+      // before its click fires (killing tab activation). Tab clicks set focus via activate().
+      col.addEventListener("mousedown", (e) => {
+        if ((e.target as Element).closest(".term-group-tabs")) return;
+        this.focusGroup(side);
+      });
 
       return { col, tabList, body };
     };
@@ -166,7 +177,8 @@ export class TerminalManager {
   }
 
   async create(sideArg?: TerminalGroupSide): Promise<void> {
-    const id = `pty${++this.seq}`;
+    const num = ++this.seq; // display number, resets per workspace
+    const id = `pty${++ptyIdSeq}`; // globally unique, never reused
     const term = new Terminal({
       theme: THEME,
       fontFamily: '"SF Mono", Menlo, monospace',
@@ -200,7 +212,7 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${this.seq}`, alive: true, cmdHistory: [], currentInput: "" };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, cmdHistory: [], currentInput: "" };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
