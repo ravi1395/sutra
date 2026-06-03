@@ -61,10 +61,16 @@ runtime font network request.
 ### Terminal
 - Real PTYs via `portable-pty` (your `$SHELL`, defaults to zsh).
 - **Multiple terminals** (`+` in the terminal tab bar).
+- **Split terminals** — drag a terminal tab to the right half of the terminal
+  panel to move that same live shell into a right terminal group. Drag it back
+  left to move the same shell back.
+- Terminal split is max two groups. Pressing `+` creates a new terminal in the
+  focused group. Closing the last right-group terminal collapses the right group.
 - **Toggle** the panel with `⌘J` to reclaim editor space; the shell keeps
   running and the session **resumes** on reopen (it is never killed by toggling).
 - Opening a folder resets terminal sessions so the active shell starts in that
-  folder. New terminals inherit the same folder cwd.
+  folder. New terminals inherit the same folder cwd, and terminal split state
+  resets to one group.
 
 ### Git diff viewer
 - Gutter markers vs **git HEAD**, in the line-number space:
@@ -78,8 +84,8 @@ runtime font network request.
 
 - **Split pane** — `⌘\` opens a second editor column; pressing again collapses it.
 - **Drag-to-split** — drag a file from the tree to the left or right half of the
-  editor area to open it in that pane. Dropping on the right creates the split if
-  needed.
+  editor area to open it in that pane. A shaded drop target appears before
+  release. Dropping on the right creates the split if needed.
 - **Markdown / HTML preview** — `⇧⌘V` on a focused `.md` or `.html` file opens a
   live preview in the right pane (opening the split automatically if needed).
   - Markdown is rendered via **marked** and sanitized with **DOMPurify** before
@@ -151,7 +157,9 @@ and takes a minute or two; later builds are incremental.
 | TS: tree | `src/tree.ts` | lazy, compact file tree |
 | TS: editor | `src/editor.ts` | CM6 manager, tabs, diff gutter, keybindings |
 | TS: diff | `src/diff.ts` | line-diff classification + hunk viewer |
-| TS: terminal | `src/terminal.ts` | xterm front-ends, multi-session, refit |
+| TS: split drop | `src/split-drop.ts` | shared drag payloads, side detection, drop hint classes |
+| TS: terminal groups | `src/terminal-groups.ts` | pure left/right terminal group movement helpers |
+| TS: terminal | `src/terminal.ts` | xterm front-ends, multi-session, terminal split groups, refit |
 | TS: layout | `src/layout.ts` | drag-resize splitters |
 | TS: main | `src/main.ts` | wiring, toggles, shortcuts, save, AI tracker |
 
