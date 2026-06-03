@@ -28,7 +28,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
-const terminals = new TerminalManager($("term-host"), $("term-tab-list"), $("terminal-area"));
+const terminals = new TerminalManager($("term-host"), $("terminal-area"));
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
   $<HTMLInputElement>("search-input"),
@@ -244,7 +244,6 @@ function setTerminal(on: boolean): void {
   }
 }
 btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
-$("term-add").onclick = () => void terminals.create();
 
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {

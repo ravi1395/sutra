@@ -733,6 +733,20 @@ export class EditorManager {
       }
       this.onActiveTabChanged?.(this.focused.active);
     }
+    // Auto-collapse split when a pane is emptied.
+    if (this.isSplit && pane.tabs.length === 0 && !pane.previewSource) {
+      if (pane === this.panes[1]) {
+        this.closeSplit();
+        return;
+      }
+      const right = this.panes[1];
+      if (right.tabs.length > 0) {
+        for (const t of [...right.tabs]) this.moveTabToSide(t.id, "left");
+      } else {
+        this.closeSplit();
+      }
+      return;
+    }
     this.renderAllTabs();
     this.onTabsChanged?.();
   }

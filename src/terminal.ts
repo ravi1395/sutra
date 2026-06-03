@@ -45,9 +45,10 @@ function b64ToBytes(b64: string): Uint8Array {
 
 export class TerminalManager {
   private host: HTMLElement;
-  private tabList: HTMLElement;
   private area: HTMLElement;
   private groupHosts: Record<TerminalGroupSide, HTMLElement>;
+  private tabLists: Record<TerminalGroupSide, HTMLElement>;
+  private bodyHosts: Record<TerminalGroupSide, HTMLElement>;
   private groups: TerminalGroups<Term> = { left: [], right: [] };
   private activeByGroup: Record<TerminalGroupSide, Term | null> = { left: null, right: null };
   private focusedGroup: TerminalGroupSide = "left";
@@ -58,24 +59,45 @@ export class TerminalManager {
   onTabsChanged?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
 
-  constructor(host: HTMLElement, tabList: HTMLElement, area: HTMLElement) {
+  constructor(host: HTMLElement, area: HTMLElement) {
     this.host = host;
-    this.tabList = tabList;
     this.area = area;
 
-    const left = document.createElement("div");
-    left.className = "term-group term-group-left";
-    left.dataset.side = "left";
+    const buildGroup = (side: TerminalGroupSide, extraClass: string) => {
+      const col = document.createElement("div");
+      col.className = `term-group ${extraClass}`;
+      col.dataset.side = side;
 
-    const right = document.createElement("div");
-    right.className = "term-group term-group-right hidden";
-    right.dataset.side = "right";
+      const tabsBar = document.createElement("div");
+      tabsBar.className = "term-group-tabs";
 
-    this.groupHosts = { left, right };
-    this.host.append(left, right);
+      const tabList = document.createElement("div");
+      tabList.className = "term-tab-list";
 
-    left.addEventListener("mousedown", () => this.focusGroup("left"));
-    right.addEventListener("mousedown", () => this.focusGroup("right"));
+      const addBtn = document.createElement("button");
+      addBtn.className = "term-add";
+      addBtn.title = "New terminal";
+      addBtn.textContent = "+";
+      addBtn.onclick = () => void this.create(side);
+
+      tabsBar.append(tabList, addBtn);
+
+      const body = document.createElement("div");
+      body.className = "term-group-body";
+
+      col.append(tabsBar, body);
+      col.addEventListener("mousedown", () => this.focusGroup(side));
+
+      return { col, tabList, body };
+    };
+
+    const l = buildGroup("left", "term-group-left");
+    const r = buildGroup("right", "term-group-right hidden");
+
+    this.groupHosts = { left: l.col, right: r.col };
+    this.tabLists = { left: l.tabList, right: r.tabList };
+    this.bodyHosts = { left: l.body, right: r.body };
+    this.host.append(l.col, r.col);
 
     void onPtyOutput((p) => {
       const t = this.terms.find((x) => x.id === p.id);
@@ -109,7 +131,7 @@ export class TerminalManager {
       return;
     }
     this.groups = moveItemToGroup(this.groups, t, side);
-    this.groupHosts[side].appendChild(t.el);
+    this.bodyHosts[side].appendChild(t.el);
     this.activeByGroup[side] = t;
     this.focusedGroup = side;
     this.activate(t);
@@ -118,7 +140,7 @@ export class TerminalManager {
   private syncGroupHosts(): void {
     for (const side of ["left", "right"] as const) {
       for (const t of this.groups[side]) {
-        if (t.el.parentElement !== this.groupHosts[side]) this.groupHosts[side].appendChild(t.el);
+        if (t.el.parentElement !== this.bodyHosts[side]) this.bodyHosts[side].appendChild(t.el);
       }
     }
   }
@@ -143,7 +165,7 @@ export class TerminalManager {
     if (this.focusedGroup === "right" && this.groups.right.length === 0) this.focusedGroup = "left";
   }
 
-  async create(): Promise<void> {
+  async create(sideArg?: TerminalGroupSide): Promise<void> {
     const id = `pty${++this.seq}`;
     const term = new Terminal({
       theme: THEME,
@@ -173,8 +195,8 @@ export class TerminalManager {
 
     const el = document.createElement("div");
     el.className = "term-instance";
-    const side = this.focusedGroup;
-    this.groupHosts[side].appendChild(el);
+    const side = sideArg ?? this.focusedGroup;
+    this.bodyHosts[side].appendChild(el);
     term.open(el);
     fit.fit();
 
@@ -425,8 +447,8 @@ export class TerminalManager {
     this.groups = { left: [], right: [] };
     this.activeByGroup = { left: null, right: null };
     this.focusedGroup = "left";
-    this.groupHosts.left.innerHTML = "";
-    this.groupHosts.right.innerHTML = "";
+    this.bodyHosts.left.innerHTML = "";
+    this.bodyHosts.right.innerHTML = "";
     this.renderGroups();
     this.renderTabs();
     if (create) await this.create();
@@ -451,8 +473,8 @@ export class TerminalManager {
   }
 
   private renderTabs(): void {
-    this.tabList.innerHTML = "";
     for (const side of ["left", "right"] as const) {
+      this.tabLists[side].innerHTML = "";
       for (const t of this.groups[side]) {
         const tab = document.createElement("div");
         tab.dataset.side = side;
@@ -480,7 +502,7 @@ export class TerminalManager {
           this.close(t);
         };
         tab.append(label, close);
-        this.tabList.append(tab);
+        this.tabLists[side].append(tab);
       }
     }
     this.onTabsChanged?.();
