@@ -16,6 +16,13 @@ import {
   splitDropClassForSide,
   splitSideFromClientX,
 } from "../src/split-drop";
+import {
+  collapseAfterClose,
+  groupSideForItem,
+  moveItemToGroup,
+  removeItemFromGroups,
+  type TerminalGroups,
+} from "../src/terminal-groups";
 import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
@@ -148,4 +155,42 @@ test("split drop helper exposes stable payload types and overlay classes", () =>
   assert.equal(SPLIT_DROP_RIGHT_CLASS, "split-drop-right");
   assert.equal(splitDropClassForSide("left"), "split-drop-left");
   assert.equal(splitDropClassForSide("right"), "split-drop-right");
+});
+
+test("terminal group helpers move the same item right and back left", () => {
+  const one = { id: "pty1" };
+  const two = { id: "pty2" };
+  let groups: TerminalGroups<typeof one> = { left: [one, two], right: [] };
+
+  groups = moveItemToGroup(groups, one, "right");
+  assert.deepEqual(groups.left.map((t) => t.id), ["pty2"]);
+  assert.deepEqual(groups.right.map((t) => t.id), ["pty1"]);
+  assert.equal(groupSideForItem(groups, one), "right");
+
+  groups = moveItemToGroup(groups, one, "left");
+  assert.deepEqual(groups.left.map((t) => t.id), ["pty2", "pty1"]);
+  assert.deepEqual(groups.right, []);
+  assert.equal(groupSideForItem(groups, one), "left");
+});
+
+test("terminal drag of the only item right keeps right group visible", () => {
+  const one = { id: "pty1" };
+  const groups = moveItemToGroup({ left: [one], right: [] }, one, "right");
+  assert.deepEqual(groups.left, []);
+  assert.deepEqual(groups.right.map((t) => t.id), ["pty1"]);
+});
+
+test("terminal close collapses right group and promotes right-only groups left", () => {
+  const one = { id: "pty1" };
+  const two = { id: "pty2" };
+
+  assert.deepEqual(removeItemFromGroups({ left: [one], right: [two] }, two), {
+    left: [one],
+    right: [],
+  });
+
+  assert.deepEqual(collapseAfterClose({ left: [], right: [two] }), {
+    left: [two],
+    right: [],
+  });
 });
