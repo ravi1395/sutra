@@ -22,7 +22,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
-const terminals = new TerminalManager($("term-host"), $("term-tab-list"));
+const terminals = new TerminalManager($("term-host"), $("term-tab-list"), $("terminal-area"));
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
   $<HTMLInputElement>("search-input"),

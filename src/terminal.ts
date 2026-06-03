@@ -8,6 +8,20 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { ptySpawn, ptyWrite, ptyResize, ptyKill, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite } from "./ipc";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
+import {
+  TERMINAL_DRAG_TYPE,
+  dragHasType,
+  setSplitDropHint,
+  splitSideFromClientX,
+} from "./split-drop";
+import {
+  collapseAfterClose,
+  groupSideForItem,
+  moveItemToGroup,
+  removeItemFromGroups,
+  type TerminalGroupSide,
+  type TerminalGroups,
+} from "./terminal-groups";
 
 interface Term {
   id: string;
@@ -37,6 +51,11 @@ function b64ToBytes(b64: string): Uint8Array {
 export class TerminalManager {
   private host: HTMLElement;
   private tabList: HTMLElement;
+  private area: HTMLElement;
+  private groupHosts: Record<TerminalGroupSide, HTMLElement>;
+  private groups: TerminalGroups<Term> = { left: [], right: [] };
+  private activeByGroup: Record<TerminalGroupSide, Term | null> = { left: null, right: null };
+  private focusedGroup: TerminalGroupSide = "left";
   private terms: Term[] = [];
   private active: Term | null = null;
   private seq = 0;
@@ -44,9 +63,26 @@ export class TerminalManager {
   onTabsChanged?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
 
-  constructor(host: HTMLElement, tabList: HTMLElement) {
+  constructor(host: HTMLElement, tabList: HTMLElement, area: HTMLElement) {
     this.host = host;
     this.tabList = tabList;
+    this.area = area;
+
+    const left = document.createElement("div");
+    left.className = "term-group term-group-left";
+    left.dataset.side = "left";
+
+    const right = document.createElement("div");
+    right.className = "term-group term-group-right hidden";
+    right.dataset.side = "right";
+
+    this.groupHosts = { left, right };
+    this.host.append(left, right);
+
+    left.addEventListener("mousedown", () => this.focusGroup("left"));
+    right.addEventListener("mousedown", () => this.focusGroup("right"));
+    this.installSplitDropTarget();
+
     void onPtyOutput((p) => {
       const t = this.terms.find((x) => x.id === p.id);
       if (t) t.term.write(b64ToBytes(p.data));
@@ -56,12 +92,84 @@ export class TerminalManager {
       if (t) {
         t.alive = false;
         t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+        this.renderTabs();
       }
     });
   }
 
   get count(): number {
     return this.terms.length;
+  }
+
+  private focusGroup(side: TerminalGroupSide): void {
+    this.focusedGroup = side;
+    const active = this.activeByGroup[side];
+    if (active) this.active = active;
+    this.renderGroups();
+    this.renderTabs();
+  }
+
+  private installSplitDropTarget(): void {
+    this.area.addEventListener("dragover", (e) => {
+      if (!dragHasType(e, TERMINAL_DRAG_TYPE)) return;
+      e.preventDefault();
+      const side = splitSideFromClientX(e.clientX, this.area.getBoundingClientRect());
+      e.dataTransfer!.dropEffect = "move";
+      setSplitDropHint(this.area, side);
+    });
+
+    this.area.addEventListener("dragleave", (e) => {
+      const next = e.relatedTarget;
+      if (!(next instanceof Node) || !this.area.contains(next)) setSplitDropHint(this.area, null);
+    });
+
+    this.area.addEventListener("drop", (e) => {
+      const id = e.dataTransfer?.getData(TERMINAL_DRAG_TYPE);
+      if (!id) return;
+      e.preventDefault();
+      const side = splitSideFromClientX(e.clientX, this.area.getBoundingClientRect());
+      setSplitDropHint(this.area, null);
+      const term = this.terms.find((candidate) => candidate.id === id);
+      if (term) this.moveToGroup(term, side);
+    });
+
+    window.addEventListener("dragend", () => setSplitDropHint(this.area, null));
+  }
+
+  private moveToGroup(t: Term, side: TerminalGroupSide): void {
+    this.groups = moveItemToGroup(this.groups, t, side);
+    this.groupHosts[side].appendChild(t.el);
+    this.activeByGroup[side] = t;
+    this.focusedGroup = side;
+    this.activate(t);
+  }
+
+  private syncGroupHosts(): void {
+    for (const side of ["left", "right"] as const) {
+      for (const t of this.groups[side]) {
+        if (t.el.parentElement !== this.groupHosts[side]) this.groupHosts[side].appendChild(t.el);
+      }
+    }
+  }
+
+  private renderGroups(): void {
+    this.syncGroupHosts();
+    const hasRight = this.groups.right.length > 0;
+    this.host.classList.toggle("terminal-split", hasRight);
+    this.groupHosts.right.classList.toggle("hidden", !hasRight);
+    this.groupHosts.left.classList.toggle("focused", this.focusedGroup === "left");
+    this.groupHosts.right.classList.toggle("focused", this.focusedGroup === "right");
+  }
+
+  private refreshActiveByGroup(): void {
+    for (const side of ["left", "right"] as const) {
+      const active = this.activeByGroup[side];
+      if (!active || !this.groups[side].includes(active)) {
+        const group = this.groups[side];
+        this.activeByGroup[side] = group.length > 0 ? group[group.length - 1] : null;
+      }
+    }
+    if (this.focusedGroup === "right" && this.groups.right.length === 0) this.focusedGroup = "left";
   }
 
   async create(): Promise<void> {
@@ -94,12 +202,16 @@ export class TerminalManager {
 
     const el = document.createElement("div");
     el.className = "term-instance";
-    this.host.appendChild(el);
+    const side = this.focusedGroup;
+    this.groupHosts[side].appendChild(el);
     term.open(el);
     fit.fit();
 
     const t: Term = { id, term, fit, el, title: `zsh ${this.seq}`, alive: true, cmdHistory: [], currentInput: "" };
     this.terms.push(t);
+    this.groups[side].push(t);
+    this.activeByGroup[side] = t;
+    this.renderGroups();
     term.onData((d) => {
       // Track raw input; newlines push to history.
       if (d === "\r" || d === "\n") {
@@ -290,8 +402,15 @@ export class TerminalManager {
   }
 
   activate(t: Term): void {
+    const side = groupSideForItem(this.groups, t) ?? this.focusedGroup;
+    this.focusedGroup = side;
+    this.activeByGroup[side] = t;
     this.active = t;
-    for (const x of this.terms) x.el.classList.toggle("hidden", x !== t);
+    for (const groupSide of ["left", "right"] as const) {
+      const active = this.activeByGroup[groupSide];
+      for (const x of this.groups[groupSide]) x.el.classList.toggle("hidden", x !== active);
+    }
+    this.renderGroups();
     this.refit();
     t.term.focus();
     this.renderTabs();
@@ -301,14 +420,23 @@ export class TerminalManager {
     void ptyKill(t.id).catch(() => {});
     t.term.dispose();
     t.el.remove();
-    const idx = this.terms.indexOf(t);
-    this.terms.splice(idx, 1);
-    if (this.active === t) {
+    this.terms.splice(this.terms.indexOf(t), 1);
+    const wasActive = this.active === t;
+    const side = groupSideForItem(this.groups, t) ?? "left";
+    this.groups = removeItemFromGroups(this.groups, t);
+    this.groups = collapseAfterClose(this.groups);
+    this.refreshActiveByGroup();
+    if (wasActive) {
       this.active = null;
-      const next = this.terms[idx] ?? this.terms[idx - 1] ?? null;
+      const sideActive = this.activeByGroup[side];
+      const next = sideActive ?? this.activeByGroup[this.focusedGroup] ?? this.activeByGroup.left ?? this.activeByGroup.right;
       if (next) this.activate(next);
-      else this.renderTabs();
+      else {
+        this.renderGroups();
+        this.renderTabs();
+      }
     } else {
+      this.renderGroups();
       this.renderTabs();
     }
   }
@@ -323,18 +451,27 @@ export class TerminalManager {
     this.active = null;
     this.seq = 0;
     this.cwd = cwd;
+    this.groups = { left: [], right: [] };
+    this.activeByGroup = { left: null, right: null };
+    this.focusedGroup = "left";
+    this.groupHosts.left.innerHTML = "";
+    this.groupHosts.right.innerHTML = "";
+    this.renderGroups();
     this.renderTabs();
     if (create) await this.create();
   }
 
   /** Re-measure + tell the PTY the new size. Call after the panel is shown/resized. */
   refit(): void {
-    if (!this.active) return;
-    try {
-      this.active.fit.fit();
-      void ptyResize(this.active.id, this.active.term.rows, this.active.term.cols).catch(() => {});
-    } catch {
-      /* host not measurable while hidden */
+    for (const side of ["left", "right"] as const) {
+      const active = this.activeByGroup[side];
+      if (!active) continue;
+      try {
+        active.fit.fit();
+        void ptyResize(active.id, active.term.rows, active.term.cols).catch(() => {});
+      } catch {
+        /* host not measurable while hidden */
+      }
     }
   }
 
@@ -344,21 +481,35 @@ export class TerminalManager {
 
   private renderTabs(): void {
     this.tabList.innerHTML = "";
-    for (const t of this.terms) {
-      const tab = document.createElement("div");
-      tab.className = "term-tab" + (t === this.active ? " active" : "");
-      const label = document.createElement("span");
-      label.textContent = t.title + (t.alive ? "" : " (exited)");
-      label.onclick = () => this.activate(t);
-      const close = document.createElement("button");
-      close.className = "term-close";
-      close.textContent = "×";
-      close.onclick = (e) => {
-        e.stopPropagation();
-        this.close(t);
-      };
-      tab.append(label, close);
-      this.tabList.append(tab);
+    for (const side of ["left", "right"] as const) {
+      for (const t of this.groups[side]) {
+        const tab = document.createElement("div");
+        tab.draggable = true;
+        tab.dataset.side = side;
+        tab.className =
+          "term-tab" +
+          (t === this.activeByGroup[side] ? " active" : "") +
+          (side === this.focusedGroup ? " focused" : "");
+        tab.addEventListener("dragstart", (e) => {
+          if (!e.dataTransfer) return;
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData(TERMINAL_DRAG_TYPE, t.id);
+          tab.classList.add("dragging");
+        });
+        tab.addEventListener("dragend", () => tab.classList.remove("dragging"));
+        const label = document.createElement("span");
+        label.textContent = t.title + (t.alive ? "" : " (exited)");
+        label.onclick = () => this.activate(t);
+        const close = document.createElement("button");
+        close.className = "term-close";
+        close.textContent = "×";
+        close.onclick = (e) => {
+          e.stopPropagation();
+          this.close(t);
+        };
+        tab.append(label, close);
+        this.tabList.append(tab);
+      }
     }
     this.onTabsChanged?.();
   }

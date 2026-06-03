@@ -939,6 +939,24 @@ button:hover {
   flex: 1;
   min-height: 0;
   position: relative;
+  display: flex;
+}
+.term-group {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+.term-group-right {
+  border-left: 1px solid var(--border);
+}
+.term-group.hidden {
+  display: none;
+}
+.term-group.focused {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--em) 45%, transparent);
+}
+.terminal-split .term-group {
+  flex-basis: 50%;
 }
 .term-instance {
   position: absolute;
@@ -947,6 +965,12 @@ button:hover {
 }
 .term-instance.hidden {
   display: none;
+}
+.term-tab[data-side="right"] {
+  border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--border));
+}
+.term-tab.dragging {
+  opacity: 0.55;
 }
 
 /* ---- in-file search panel (VS Code style) ---- */
