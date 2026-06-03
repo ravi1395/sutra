@@ -8,12 +8,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { ptySpawn, ptyWrite, ptyResize, ptyKill, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite } from "./ipc";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
-import {
-  TERMINAL_DRAG_TYPE,
-  dragHasType,
-  setSplitDropHint,
-  splitSideFromClientX,
-} from "./split-drop";
+import { beginSplitPointerDrag } from "./split-drop";
 import {
   collapseAfterClose,
   groupSideForItem,
@@ -81,7 +76,6 @@ export class TerminalManager {
 
     left.addEventListener("mousedown", () => this.focusGroup("left"));
     right.addEventListener("mousedown", () => this.focusGroup("right"));
-    this.installSplitDropTarget();
 
     void onPtyOutput((p) => {
       const t = this.terms.find((x) => x.id === p.id);
@@ -109,34 +103,11 @@ export class TerminalManager {
     this.renderTabs();
   }
 
-  private installSplitDropTarget(): void {
-    this.area.addEventListener("dragover", (e) => {
-      if (!dragHasType(e, TERMINAL_DRAG_TYPE)) return;
-      e.preventDefault();
-      const side = splitSideFromClientX(e.clientX, this.area.getBoundingClientRect());
-      e.dataTransfer!.dropEffect = "move";
-      setSplitDropHint(this.area, side);
-    });
-
-    this.area.addEventListener("dragleave", (e) => {
-      const next = e.relatedTarget;
-      if (!(next instanceof Node) || !this.area.contains(next)) setSplitDropHint(this.area, null);
-    });
-
-    this.area.addEventListener("drop", (e) => {
-      const id = e.dataTransfer?.getData(TERMINAL_DRAG_TYPE);
-      if (!id) return;
-      e.preventDefault();
-      const side = splitSideFromClientX(e.clientX, this.area.getBoundingClientRect());
-      setSplitDropHint(this.area, null);
-      const term = this.terms.find((candidate) => candidate.id === id);
-      if (term) this.moveToGroup(term, side);
-    });
-
-    window.addEventListener("dragend", () => setSplitDropHint(this.area, null));
-  }
-
   private moveToGroup(t: Term, side: TerminalGroupSide): void {
+    if (groupSideForItem(this.groups, t) === side) {
+      this.activate(t);
+      return;
+    }
     this.groups = moveItemToGroup(this.groups, t, side);
     this.groupHosts[side].appendChild(t.el);
     this.activeByGroup[side] = t;
@@ -484,22 +455,23 @@ export class TerminalManager {
     for (const side of ["left", "right"] as const) {
       for (const t of this.groups[side]) {
         const tab = document.createElement("div");
-        tab.draggable = true;
         tab.dataset.side = side;
         tab.className =
           "term-tab" +
           (t === this.activeByGroup[side] ? " active" : "") +
           (side === this.focusedGroup ? " focused" : "");
-        tab.addEventListener("dragstart", (e) => {
-          if (!e.dataTransfer) return;
-          e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData(TERMINAL_DRAG_TYPE, t.id);
-          tab.classList.add("dragging");
+        tab.addEventListener("pointerdown", (e) => {
+          if ((e.target as Element).closest(".term-close")) return;
+          beginSplitPointerDrag({
+            event: e,
+            source: tab,
+            target: this.area,
+            onDrop: (targetSide) => this.moveToGroup(t, targetSide),
+          });
         });
-        tab.addEventListener("dragend", () => tab.classList.remove("dragging"));
         const label = document.createElement("span");
         label.textContent = t.title + (t.alive ? "" : " (exited)");
-        label.onclick = () => this.activate(t);
+        tab.onclick = () => this.activate(t);
         const close = document.createElement("button");
         close.className = "term-close";
         close.textContent = "×";

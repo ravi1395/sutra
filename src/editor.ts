@@ -44,6 +44,7 @@ import { readFile, gitHeadContent } from "./ipc";
 import { previewServerUrl } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
 import { parseConflicts, acceptOurs, acceptTheirs, acceptBoth, type ConflictRegion } from "./conflict";
+import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 
 export interface Tab {
@@ -208,8 +209,10 @@ export class Pane {
     this.view = new EditorView({ parent: this.hostEl });
     this.view.dom.style.display = "none";
 
-    // clicking anywhere in this pane focuses it (Phase 3 reads mgr.focused)
-    this.el.addEventListener("mousedown", () => this.mgr.setFocused(this));
+    // Tab clicks activate through their own handler; rerendering on press would detach a drag source.
+    this.el.addEventListener("mousedown", (e) => {
+      if (!(e.target as Element).closest(".pane-tabs")) this.mgr.setFocused(this);
+    });
   }
 
   private extensions(name: string): Extension {
@@ -428,6 +431,16 @@ export class Pane {
     for (const tab of this.tabs) {
       const el = document.createElement("div");
       el.className = "tab" + (tab === this.active ? " active" : "");
+      el.addEventListener("pointerdown", (e) => {
+        if ((e.target as Element).closest(".tab-close")) return;
+        beginSplitPointerDrag({
+          event: e,
+          source: el,
+          target: this.mgr.splitTarget,
+          onStart: () => this.checkpoint(),
+          onDrop: (side) => this.mgr.moveTabToSide(tab.id, side),
+        });
+      });
 
       const name = document.createElement("span");
       name.textContent = tab.name + (tab.path ? "" : " *");
@@ -478,6 +491,11 @@ export class EditorManager {
     const pane = new Pane(this, container);
     this.panes = [pane];
     this.focused = pane;
+  }
+
+  /** Root hit target for internal editor tab split drags. */
+  get splitTarget(): HTMLElement {
+    return this.container;
   }
 
   setFocused(pane: Pane): void {
@@ -613,6 +631,25 @@ export class EditorManager {
     const pane = side === "left" ? this.panes[0] : this.ensureRightPane();
     this.setFocused(pane);
     await this.openFile(path);
+  }
+
+  /** Move the exact live tab into the requested pane without re-reading from disk. */
+  moveTabToSide(tabId: string, side: PaneSide): void {
+    const tab = this.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    const source = this.paneOf(tab);
+    const target = side === "left" ? this.panes[0] : this.ensureRightPane();
+    if (!source || source === target) return;
+
+    source.checkpoint();
+    if (target.previewSource) target.hidePreview();
+    source.removeTab(tab);
+    target.addTab(tab);
+    this.activateInPane(target, tab);
+
+    if (source === this.panes[1] && source.tabs.length === 0 && !source.previewSource) {
+      this.closeSplit();
+    }
   }
 
   revealLine(line: number): void {

@@ -11,9 +11,11 @@ import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_LEFT_CLASS,
   SPLIT_DROP_RIGHT_CLASS,
-  TERMINAL_DRAG_TYPE,
+  SPLIT_DROP_TARGET_OPTIONS,
   TREE_ENTRY_DRAG_TYPE,
+  pointerDragStarted,
   splitDropClassForSide,
+  splitSideAtPoint,
   splitSideFromClientX,
 } from "../src/split-drop";
 import {
@@ -147,14 +149,31 @@ test("splitSideFromClientX splits any horizontal drop target into left and right
   assert.equal(splitSideFromClientX(201, { left: 100, width: 200 }), "right");
 });
 
-test("split drop helper exposes stable payload types and overlay classes", () => {
+test("split drop helper exposes stable tree payload types and overlay classes", () => {
   assert.equal(FILE_DRAG_TYPE, "application/x-sutra-file");
   assert.equal(TREE_ENTRY_DRAG_TYPE, "application/x-sutra-tree-entry");
-  assert.equal(TERMINAL_DRAG_TYPE, "application/x-sutra-terminal");
   assert.equal(SPLIT_DROP_LEFT_CLASS, "split-drop-left");
   assert.equal(SPLIT_DROP_RIGHT_CLASS, "split-drop-right");
   assert.equal(splitDropClassForSide("left"), "split-drop-left");
   assert.equal(splitDropClassForSide("right"), "split-drop-right");
+});
+
+test("native tree-file split drop target captures before editor content", () => {
+  assert.equal(SPLIT_DROP_TARGET_OPTIONS.capture, true);
+});
+
+test("pointer split drag starts only after a deliberate move", () => {
+  assert.equal(pointerDragStarted({ x: 10, y: 10 }, { x: 14, y: 14 }), false);
+  assert.equal(pointerDragStarted({ x: 10, y: 10 }, { x: 16, y: 10 }), true);
+});
+
+test("pointer split drop resolves only inside the target bounds", () => {
+  const rect = { left: 100, top: 50, width: 200, height: 100 };
+  assert.equal(splitSideAtPoint(99, 75, rect), null);
+  assert.equal(splitSideAtPoint(199, 75, rect), "left");
+  assert.equal(splitSideAtPoint(200, 75, rect), "right");
+  assert.equal(splitSideAtPoint(250, 150, rect), "right");
+  assert.equal(splitSideAtPoint(250, 151, rect), null);
 });
 
 test("terminal group helpers move the same item right and back left", () => {

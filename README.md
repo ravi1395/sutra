@@ -83,9 +83,12 @@ runtime font network request.
 ### Split view & preview
 
 - **Split pane** — `⌘\` opens a second editor column; pressing again collapses it.
-- **Drag-to-split** — drag a file from the tree to the left or right half of the
-  editor area to open it in that pane. A shaded drop target appears before
-  release. Dropping on the right creates the split if needed.
+- **Drag-to-split** — drag a file from the tree to open it in the left or right
+  editor pane, or drag an open editor tab to move its live buffer between panes.
+  A shaded half-screen drop target appears before release. Dropping on the right
+  creates the split if needed; moving the last right-side tab left collapses it.
+  Editor and terminal tab gestures are pointer-tracked inside Sutra so release
+  over a highlighted target applies reliably.
 - **Markdown / HTML preview** — `⇧⌘V` on a focused `.md` or `.html` file opens a
   live preview in the right pane (opening the split automatically if needed).
   - Markdown is rendered via **marked** and sanitized with **DOMPurify** before

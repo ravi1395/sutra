@@ -20,14 +20,14 @@ Main flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App wiring, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, global shortcuts, tree drag-to-pane drops, AI edit polling | `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner` |
+| `src/main.ts` | App wiring, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, global shortcuts, tree-file drag-to-pane drops, AI edit polling | `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner` |
 | `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and the recents dropdown | `mountMenuBar`, `MenuActions`, `MenuBarHandle` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon`, `IconName` |
-| `src/editor.ts` | CodeMirror manager, tab states, split panes, Markdown/HTML preview orchestration, language detection/highlighting, dirty state, diff gutter, workspace tab filtering, hunk revert | `EditorManager`, `openFile`, `openFileInSide`, `togglePreview`, `newUntitled`, `activate`, `closeTab`, `tabsOutsideWorkspace`, `closeTabsOutsideWorkspace`, `setContent`, `recomputeDiff`, `revertHunk`, `markSaved`, `detectLanguage` |
+| `src/editor.ts` | CodeMirror manager, draggable tab states, live tab movement between split panes, Markdown/HTML preview orchestration, language detection/highlighting, dirty state, diff gutter, workspace tab filtering, hunk revert | `EditorManager`, `openFile`, `openFileInSide`, `moveTabToSide`, `togglePreview`, `newUntitled`, `activate`, `closeTab`, `tabsOutsideWorkspace`, `closeTabsOutsideWorkspace`, `setContent`, `recomputeDiff`, `revertHunk`, `markSaved`, `detectLanguage` |
 | `src/diff.ts` | Line diff classification and diff viewer rendering | `computeLineDiff`, `hunkIndexAtLine`, `DiffViewer.render`, `DiffViewer.highlightHunk` |
 | `src/tree.ts` | Lazy folder tree rendering, active-file highlighting, file drag source, tree move payloads, and file-type badge metadata | `FileTree`, `setRoot`, `setActive`, `render`, `renderDir`, `makeRow`, `refresh`, `fileTypeMeta`, `paneSideFromClientX`, `cssEscape` |
-| `src/split-drop.ts` | Shared left/right drag side detection, drag payload constants, and split-drop overlay class helpers for editor and terminal targets | `splitSideFromClientX`, `dragHasType`, `setSplitDropHint`, `FILE_DRAG_TYPE`, `TREE_ENTRY_DRAG_TYPE`, `TERMINAL_DRAG_TYPE` |
+| `src/split-drop.ts` | Shared pointer-driven editor/terminal tab drag tracking, left/right target detection, tree drag payload constants, and split-drop overlay helpers | `beginSplitPointerDrag`, `pointerDragStarted`, `splitSideAtPoint`, `splitSideFromClientX`, `dragHasType`, `setSplitDropHint`, `FILE_DRAG_TYPE`, `TREE_ENTRY_DRAG_TYPE` |
 | `src/terminal-groups.ts` | Pure left/right terminal group movement helpers used by `TerminalManager` and tests | `moveItemToGroup`, `removeItemFromGroups`, `collapseAfterClose`, `groupSideForItem` |
 | `src/terminal.ts` | xterm frontends for Rust PTY sessions, multi-terminal tabs, max-two terminal split groups, terminal tab drag between groups, resize, close/reset | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit`, `focusActive`, `b64ToBytes` |
 | `src/workspace.ts` | Workspace path membership helpers + recents store (pure logic + localStorage adapters) | `pathBelongsToRoot`, `filterWorkspaceTabs`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
@@ -79,7 +79,7 @@ Preview:
 
 Drag-to-split editor:
 
-`FileTree.makeRow` marks file rows with `FILE_DRAG_TYPE` and tree move rows with `TREE_ENTRY_DRAG_TYPE`. `main.ts` handles drops on `#panes`, uses `splitSideFromClientX` to choose left/right, shows the shared split-drop overlay, then calls `EditorManager.openFileInSide`; right-side drops create the split if needed.
+`FileTree.makeRow` marks file rows with `FILE_DRAG_TYPE` and tree move rows with `TREE_ENTRY_DRAG_TYPE`; `main.ts` handles those native tree-file drops on `#panes`. Editor tabs use `beginSplitPointerDrag` directly, avoiding WKWebView HTML drag/drop routing. Releasing over `#panes` calls `EditorManager.moveTabToSide`, preserving the live buffer and collapsing an emptied right pane.
 
 Terminal:
 
@@ -87,7 +87,7 @@ Terminal:
 
 Terminal split:
 
-`TerminalManager.renderTabs` marks terminal tabs draggable with `TERMINAL_DRAG_TYPE`. Drops on `#terminal-area` use `splitSideFromClientX`; right-side drops create/use the right terminal group and move the same live `Term` object there. `reset` kills all PTYs, clears groups, and recreates one left-group terminal when visible.
+`TerminalManager.renderTabs` uses `beginSplitPointerDrag` so xterm/WKWebView HTML drag routing cannot swallow the gesture. Releasing over `#terminal-area` moves the same live `Term` object into the selected group; right-side drops create/use the right group. `reset` kills all PTYs, clears groups, and recreates one left-group terminal when visible.
 
 AI/external edit tracking:
 
@@ -116,7 +116,7 @@ Focused test coverage exists for workspace path filtering:
 - Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`
 - Type-only frontend changes: `npm exec tsc -- --noEmit`
 - Rust command changes: `cargo check --manifest-path src-tauri/Cargo.toml`
-- UI behavior changes: `npm run tauri dev`, then smoke open folder, open/save file, toggle terminal, toggle diff, exercise hunk revert, toggle Markdown/HTML preview, drag files left/right into split panes, drag terminal tabs right/left, create a terminal in the focused group, close the last right-group terminal, and switch workspace to verify terminal reset.
+- UI behavior changes: `npm run tauri dev`, then smoke open folder, open/save file, toggle terminal, toggle diff, exercise hunk revert, toggle Markdown/HTML preview, drag tree files and dirty/untitled editor tabs left/right, drag terminal tabs right/left, create a terminal in the focused group, close the last right-group terminal, and switch workspace to verify terminal reset.
 - Diff logic changes: add tests before changing `computeLineDiff`; it is pure and should be unit-testable.
 - PTY changes: smoke multiple terminals, resize, close, panel toggle, and shell exit.
 

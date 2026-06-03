@@ -240,18 +240,20 @@ export class FileTree {
             action: () => this.onDelete?.(e.path),
             danger: true,
           },
-          ...(e.isDir
-            ? [
-                {
-                  label: "New File",
-                  action: () => this.onCreate?.(e.path, false),
-                },
-                {
-                  label: "New Folder",
-                  action: () => this.onCreate?.(e.path, true),
-                },
-              ]
-            : []),
+          {
+            label: "New File",
+            action: () => {
+              const dir = e.isDir ? e.path : e.path.split("/").slice(0, -1).join("/");
+              this.onCreate?.(dir, false);
+            },
+          },
+          {
+            label: "New Folder",
+            action: () => {
+              const dir = e.isDir ? e.path : e.path.split("/").slice(0, -1).join("/");
+              this.onCreate?.(dir, true);
+            },
+          },
         ],
         this.el,
       );

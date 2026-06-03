@@ -3,7 +3,13 @@
 // (native dialog), pane resizers, and the optional AI-edit tracker.
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { FileTree } from "./tree";
-import { FILE_DRAG_TYPE, dragHasType, setSplitDropHint, splitSideFromClientX } from "./split-drop";
+import {
+  FILE_DRAG_TYPE,
+  SPLIT_DROP_TARGET_OPTIONS,
+  dragHasType,
+  setSplitDropHint,
+  splitSideFromClientX,
+} from "./split-drop";
 import { EditorManager, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
@@ -114,7 +120,7 @@ tree.onDelete = async (path: string) => {
 
 tree.onCreate = async (parentDir: string, isDir: boolean) => {
   const type = isDir ? "folder" : "file";
-  const name = prompt(`New ${type} name:`);
+  const name = await promptInput(`New ${type} name:`);
   if (!name) return;
   try {
     if (isDir) {
@@ -465,11 +471,11 @@ panesEl.addEventListener("dragover", (e) => {
   const side = splitSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
   e.dataTransfer!.dropEffect = "copy";
   setSplitDropHint(panesEl, side);
-});
+}, SPLIT_DROP_TARGET_OPTIONS);
 panesEl.addEventListener("dragleave", (e) => {
   const next = e.relatedTarget;
   if (!(next instanceof Node) || !panesEl.contains(next)) clearPaneDropHint();
-});
+}, SPLIT_DROP_TARGET_OPTIONS);
 panesEl.addEventListener("drop", (e) => {
   const path = e.dataTransfer?.getData(FILE_DRAG_TYPE);
   if (!path) return;
@@ -477,7 +483,7 @@ panesEl.addEventListener("drop", (e) => {
   const side = splitSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
   clearPaneDropHint();
   tree.onOpenFileInPane?.(path, side);
-});
+}, SPLIT_DROP_TARGET_OPTIONS);
 window.addEventListener("dragend", clearPaneDropHint);
 
 // ---- global shortcuts ----
@@ -605,6 +611,54 @@ palette = mountPalette([
     search.focus();
   }, shortcut: "⇧⌘F" },
 ]);
+
+/** Custom input dialog replacing window.prompt() — WKWebView silently returns null for native JS dialogs. */
+function promptInput(message: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "prompt-overlay";
+
+    const box = document.createElement("div");
+    box.className = "prompt-box";
+
+    const lbl = document.createElement("div");
+    lbl.className = "prompt-label";
+    lbl.textContent = message;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "prompt-input tree-edit-input";
+
+    const btns = document.createElement("div");
+    btns.className = "prompt-btns";
+
+    const btnOk = document.createElement("button");
+    btnOk.className = "prompt-btn";
+    btnOk.textContent = "OK";
+
+    const btnCancel = document.createElement("button");
+    btnCancel.className = "prompt-btn secondary";
+    btnCancel.textContent = "Cancel";
+
+    const done = (value: string | null) => {
+      overlay.remove();
+      resolve(value);
+    };
+
+    btnOk.onclick = () => done(input.value.trim() || null);
+    btnCancel.onclick = () => done(null);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); done(input.value.trim() || null); }
+      if (ev.key === "Escape") { ev.preventDefault(); done(null); }
+    });
+
+    btns.append(btnCancel, btnOk);
+    box.append(lbl, input, btns);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    input.focus();
+  });
+}
 
 // ---- boot ----
 editor.renderAllTabs();

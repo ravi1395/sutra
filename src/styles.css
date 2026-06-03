@@ -647,6 +647,18 @@ button:hover {
   font-family: var(--mono);
   font-size: 12px;
 }
+.tab:not(.preview-tab),
+.term-tab {
+  cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+.tab.dragging,
+.term-tab.dragging {
+  cursor: grabbing;
+  opacity: 0.55;
+}
 .tab.active {
   background: var(--bg-1);
   color: var(--fg);
@@ -969,10 +981,6 @@ button:hover {
 .term-tab[data-side="right"] {
   border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--border));
 }
-.term-tab.dragging {
-  opacity: 0.55;
-}
-
 /* ---- in-file search panel (VS Code style) ---- */
 .sf-panel {
   background: #252526;
@@ -1293,6 +1301,58 @@ button:hover {
 .cm-item.danger:hover {
   background: rgba(244, 71, 71, 0.1);
   color: var(--deleted);
+}
+
+/* ---- prompt input dialog ---- */
+.prompt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.prompt-box {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 16px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.8);
+}
+.prompt-label {
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.prompt-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.prompt-btn {
+  padding: 4px 12px;
+  font-size: 12.5px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  background: var(--em);
+  color: #fff;
+  font-family: inherit;
+}
+.prompt-btn.secondary {
+  background: transparent;
+  color: var(--fg);
+}
+.prompt-btn:hover {
+  opacity: 0.85;
 }
 
 /* ---- terminal find overlay ---- */
