@@ -3,7 +3,12 @@
 // node reveals real content instead of a corridor of empty folders.
 import { listDir, gitStatus, type Entry, type GitStatusEntry } from "./ipc";
 import { showContextMenu } from "./contextmenu";
-import { splitSideFromClientX, type SplitDropSide } from "./split-drop";
+import {
+  FILE_DRAG_TYPE,
+  TREE_ENTRY_DRAG_TYPE,
+  splitSideFromClientX,
+  type SplitDropSide,
+} from "./split-drop";
 
 export interface FileTypeMeta {
   icon: string;
@@ -177,9 +182,10 @@ export class FileTree {
     row.draggable = true;
     row.addEventListener("dragstart", (ev) => {
       if (!ev.dataTransfer) return;
-      ev.dataTransfer.effectAllowed = "move";
-      ev.dataTransfer.setData("application/x-sutra-file", e.path);
+      ev.dataTransfer.effectAllowed = e.isDir ? "move" : "copyMove";
+      ev.dataTransfer.setData(TREE_ENTRY_DRAG_TYPE, e.path);
       ev.dataTransfer.setData("text/plain", e.path);
+      if (!e.isDir) ev.dataTransfer.setData(FILE_DRAG_TYPE, e.path);
       row.classList.add("dragging");
     });
     row.addEventListener("dragend", () => row.classList.remove("dragging"));
@@ -187,7 +193,7 @@ export class FileTree {
     // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant)
     if (e.isDir) {
       row.addEventListener("dragover", (ev) => {
-        const src = ev.dataTransfer?.getData("application/x-sutra-file");
+        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
         if (!src) return;
         // Reject drops onto self or a descendant
         if (src === e.path || src.startsWith(e.path + "/")) return;
@@ -202,7 +208,7 @@ export class FileTree {
         ev.preventDefault();
         ev.stopPropagation();
         row.classList.remove("drop-target");
-        const src = ev.dataTransfer?.getData("application/x-sutra-file");
+        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
         if (!src || src === e.path || src.startsWith(e.path + "/")) return;
         this.onMove?.(src, e.path);
       });

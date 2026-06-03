@@ -442,9 +442,37 @@ button:hover {
   min-width: 0;
   position: relative;
 }
-#panes.drop-left .pane:first-child,
-#panes.drop-right .pane:last-child {
-  box-shadow: inset 0 0 0 2px var(--em-dim);
+#panes.split-drop-left::before,
+#panes.split-drop-right::before,
+#terminal-area.split-drop-left::before,
+#terminal-area.split-drop-right::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: calc(50% - 8px);
+  pointer-events: none;
+  z-index: 20;
+  border: 2px solid var(--em);
+  background: color-mix(in srgb, var(--em) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--em) 30%, transparent);
+  animation: split-drop-pulse 0.9s ease-in-out infinite alternate;
+}
+#panes.split-drop-left::before,
+#terminal-area.split-drop-left::before {
+  left: 8px;
+}
+#panes.split-drop-right::before,
+#terminal-area.split-drop-right::before {
+  right: 8px;
+}
+@keyframes split-drop-pulse {
+  from {
+    opacity: 0.72;
+  }
+  to {
+    opacity: 1;
+  }
 }
 .pane {
   flex: 1;
@@ -458,6 +486,7 @@ button:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
   background: #181818;
   border-top: 1px solid var(--border);
 }

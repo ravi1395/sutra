@@ -2,7 +2,8 @@
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and the optional AI-edit tracker.
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { FileTree, paneSideFromClientX } from "./tree";
+import { FileTree } from "./tree";
+import { FILE_DRAG_TYPE, dragHasType, setSplitDropHint, splitSideFromClientX } from "./split-drop";
 import { EditorManager, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
@@ -450,34 +451,34 @@ window.addEventListener("resize", () => terminals.refit());
 // ---- file-tree drag to editor split ----
 const panesEl = $("panes");
 
-function hasTreeFileDrag(e: DragEvent): boolean {
-  return Array.from(e.dataTransfer?.types ?? []).includes("application/x-sutra-file");
+function hasEditorFileDrag(e: DragEvent): boolean {
+  return dragHasType(e, FILE_DRAG_TYPE);
 }
 
-function setPaneDropHint(side: "left" | "right" | null): void {
-  panesEl.classList.toggle("drop-left", side === "left");
-  panesEl.classList.toggle("drop-right", side === "right");
+function clearPaneDropHint(): void {
+  setSplitDropHint(panesEl, null);
 }
 
 panesEl.addEventListener("dragover", (e) => {
-  if (!hasTreeFileDrag(e)) return;
+  if (!hasEditorFileDrag(e)) return;
   e.preventDefault();
-  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  const side = splitSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
   e.dataTransfer!.dropEffect = "copy";
-  setPaneDropHint(side);
+  setSplitDropHint(panesEl, side);
 });
 panesEl.addEventListener("dragleave", (e) => {
   const next = e.relatedTarget;
-  if (!(next instanceof Node) || !panesEl.contains(next)) setPaneDropHint(null);
+  if (!(next instanceof Node) || !panesEl.contains(next)) clearPaneDropHint();
 });
 panesEl.addEventListener("drop", (e) => {
-  const path = e.dataTransfer?.getData("application/x-sutra-file");
+  const path = e.dataTransfer?.getData(FILE_DRAG_TYPE);
   if (!path) return;
   e.preventDefault();
-  const side = paneSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
-  setPaneDropHint(null);
+  const side = splitSideFromClientX(e.clientX, panesEl.getBoundingClientRect());
+  clearPaneDropHint();
   tree.onOpenFileInPane?.(path, side);
 });
+window.addEventListener("dragend", clearPaneDropHint);
 
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
