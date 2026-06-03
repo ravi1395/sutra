@@ -16,7 +16,7 @@ import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
-import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles } from "./ipc";
+import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles, gitCheckout } from "./ipc";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -217,6 +217,7 @@ async function openWorkspace(dir: string): Promise<void> {
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void gitBar.refresh(dir);
+  startExternalPoll(); // auto-track AI/external edits to open tabs
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -343,24 +344,15 @@ function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
-// ---- AI-edit tracking ----
-const btnTrack = $("btn-track");
-let tracking = false;
+// ---- AI-edit tracking (always on) ----
+// Polls open tabs for external disk writes. Cheap (only open tabs) and covers
+// AI agents (Codex/Claude/aider) editing in the Sutra terminal — no toggle.
 let pollTimer: number | undefined;
 
-function setTracking(on: boolean): void {
-  tracking = on;
-  btnTrack.classList.toggle("on", on);
-  if (on) {
-    // baseline current mtimes so only future external edits trip the tracker
-    for (const t of editor.tabs) if (t.path) void fileMtime(t.path).then((m) => (t.lastMtime = m));
-    pollTimer = window.setInterval(checkExternal, 1500);
-  } else if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = undefined;
-  }
+function startExternalPoll(): void {
+  if (pollTimer !== undefined) return;
+  pollTimer = window.setInterval(checkExternal, 1500);
 }
-btnTrack.onclick = () => setTracking(!tracking);
 
 async function checkExternal(): Promise<void> {
   for (const tab of editor.tabs) {
@@ -390,11 +382,18 @@ async function checkExternal(): Promise<void> {
 }
 
 function onExternalEdit(tab: Tab, oldBuf: string, disk: string): void {
-  tab.override = oldBuf; // diff baseline = pre-AI content
+  // Dirty tab: unsaved user edits present — warn only, never clobber the buffer.
+  if (tab.dirty) {
+    showAiBanner(tab);
+    return;
+  }
+  // Capture the pre-AI baseline exactly ONCE. Reassigning every poll collapsed
+  // the baseline forward each 1.5s, shrinking the gutter to the last interval's
+  // delta. Keeping it fixed diffs the whole AI session: pre-AI → latest disk.
+  if (tab.override == null) tab.override = oldBuf;
   tab.savedContent = disk;
-  tab.dirty = false;
   editor.activate(tab);
-  editor.setContent(disk); // show the AI version; recompute uses override baseline
+  editor.setContent(disk); // setContent → deferred scheduleDiff recomputes on fresh content
   setDiff(true);
   void refreshDiffFileList(); // Refresh the file list in diff pane
   showAiBanner(tab);
@@ -445,6 +444,15 @@ function showAiBanner(tab: Tab): void {
 function hideBanner(): void {
   banner.classList.add("hidden");
   banner.innerHTML = "";
+}
+
+/** One-off error banner (e.g. branch checkout rejected on a dirty tree). */
+function showErrorBanner(message: string): void {
+  banner.innerHTML = "";
+  const span = document.createElement("span");
+  span.textContent = message;
+  banner.append(span, bannerBtn("Dismiss", hideBanner));
+  banner.classList.remove("hidden");
 }
 
 // ---- resizers ----
@@ -535,7 +543,6 @@ window.addEventListener("keydown", (e) => {
 }, GLOBAL_SHORTCUT_OPTIONS);
 
 // ---- chrome: icon buttons + menu bar ----
-btnTrack.innerHTML = icon("trackAI", 17);
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("diff", 17);
 btnBrowser.innerHTML = icon("browser", 17);
@@ -563,7 +570,6 @@ const actions = {
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
-  toggleTrackAI: () => setTracking(!tracking),
   newTerminal: () => void terminals.create(),
   openInBrowser: () => {
     setBrowser(true);
@@ -586,6 +592,23 @@ workspaceBar.setCurrentWorkspace(null);
 
 gitBar = createGitBar($("gitbar"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
+gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
+
+// Checkout a branch in place, then re-baseline open tabs against the new HEAD.
+async function switchBranch(branch: string): Promise<void> {
+  if (!currentRoot) return;
+  try {
+    await gitCheckout(currentRoot, branch);
+  } catch (e) {
+    showErrorBanner(`Checkout failed: ${e}. Commit or stash changes first.`);
+    return;
+  }
+  await editor.reloadAllFromDisk();
+  void tree.refresh();
+  void gitBar.refresh(currentRoot);
+  editor.recomputeDiff();
+  hideBanner();
+}
 
 // ---- command palette ----
 palette = mountPalette([
@@ -604,7 +627,6 @@ palette = mountPalette([
     if (editor.isSplit) editor.closeSplit();
     else editor.openSplit();
   }, shortcut: "⌘\\" },
-  { id: "toggle-ai-track", title: "Track AI Edits", run: actions.toggleTrackAI },
   { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();

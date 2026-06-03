@@ -30,6 +30,8 @@ pub fn run() {
             git::git_ahead_behind,
             git::git_changed_files,
             git::git_worktrees,
+            git::git_branches,
+            git::git_checkout,
             preview_server::preview_server_url,
             pty::pty_spawn,
             pty::pty_write,

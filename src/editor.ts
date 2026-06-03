@@ -40,7 +40,7 @@ import { sql } from "@codemirror/lang-sql";
 import { go } from "@codemirror/lang-go";
 import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
-import { readFile, gitHeadContent } from "./ipc";
+import { readFile, gitHeadContent, fileMtime } from "./ipc";
 import { previewServerUrl } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
 import { parseConflicts, acceptOurs, acceptTheirs, acceptBoth, type ConflictRegion } from "./conflict";
@@ -875,6 +875,37 @@ export class EditorManager {
 
   requestSave(pane: Pane): void {
     if (pane.active) void this.saveHandler?.(pane.active);
+  }
+
+  /** Replace `tab`'s content whether it is the live active tab or backgrounded. */
+  private setTabContent(tab: Tab, text: string): void {
+    const pane = this.paneOf(tab);
+    if (pane && pane.active === tab) pane.setContent(text);
+    else tab.state = (pane ?? this.focused).makeState(text, tab.name);
+  }
+
+  /**
+   * Reload one tab from disk: refresh content + git HEAD baseline, drop any
+   * AI-edit override (fresh baseline = new git HEAD after checkout), recompute
+   * diff. Caller must ensure the tab is clean — unsaved edits would be lost.
+   */
+  async reloadFromDisk(tab: Tab): Promise<void> {
+    if (!tab.path) return;
+    const content = await readFile(tab.path).catch(() => null);
+    if (content == null) return;
+    this.setTabContent(tab, content);
+    tab.savedContent = content;
+    tab.dirty = false;
+    tab.override = null;
+    tab.gitHead = await gitHeadContent(tab.path).catch(() => null);
+    tab.lastMtime = await fileMtime(tab.path).catch(() => tab.lastMtime);
+    this.recomputeDiff();
+  }
+
+  /** Reload every clean tab from disk; dirty tabs are left untouched. */
+  async reloadAllFromDisk(): Promise<void> {
+    for (const tab of this.tabs) if (!tab.dirty) await this.reloadFromDisk(tab);
+    this.renderAllTabs();
   }
 
   /** Mark a tab clean after a successful save. */

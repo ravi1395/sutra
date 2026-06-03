@@ -1,14 +1,28 @@
-// Git status bar: branch, ahead/behind count, worktree switcher dropdown.
-import { gitBranch, gitAheadBehind, gitWorktrees, type WorktreeInfo } from "./ipc";
+// Git status bar: branch chip + dropdown with Branches and Worktrees sections.
+import {
+  gitBranch,
+  gitAheadBehind,
+  gitWorktrees,
+  gitBranches,
+  type WorktreeInfo,
+  type BranchInfo,
+} from "./ipc";
 
 export interface GitBarHandle {
   refresh(root: string): Promise<void>;
   onWorktreeSelect?: (path: string) => void;
+  onBranchSelect?: (branch: string) => void;
 }
 
 export function createGitBar(container: HTMLElement): GitBarHandle {
   // Render the git bar UI (branch chip + dropdown).
-  function render(branch: string | null, ahead: number | null, behind: number | null, worktrees: WorktreeInfo[]): void {
+  function render(
+    branch: string | null,
+    ahead: number | null,
+    behind: number | null,
+    worktrees: WorktreeInfo[],
+    branches: BranchInfo[],
+  ): void {
     container.innerHTML = "";
     if (!branch) return; // No git repo or detached head.
 
@@ -44,21 +58,48 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
       }
     }
 
+    function sectionHeader(text: string): HTMLElement {
+      const h = document.createElement("div");
+      h.className = "gitbar-section";
+      h.textContent = text;
+      return h;
+    }
+
     function openDropdown(): void {
       closeDropdown();
       dropdown = document.createElement("div");
       dropdown.className = "gitbar-dropdown";
-      for (const wt of worktrees) {
-        const row = document.createElement("div");
-        row.className = "gitbar-worktree";
-        if (wt.is_current) row.classList.add("current");
-        row.textContent = wt.name;
-        row.onclick = () => {
-          handle.onWorktreeSelect?.(wt.path);
-          closeDropdown();
-        };
-        dropdown.appendChild(row);
+
+      if (branches.length > 0) {
+        dropdown.appendChild(sectionHeader("Branches"));
+        for (const br of branches) {
+          const row = document.createElement("div");
+          row.className = "gitbar-worktree";
+          if (br.is_current) row.classList.add("current");
+          row.textContent = br.name;
+          row.onclick = () => {
+            if (!br.is_current) handle.onBranchSelect?.(br.name);
+            closeDropdown();
+          };
+          dropdown.appendChild(row);
+        }
       }
+
+      if (worktrees.length > 0) {
+        dropdown.appendChild(sectionHeader("Worktrees"));
+        for (const wt of worktrees) {
+          const row = document.createElement("div");
+          row.className = "gitbar-worktree";
+          if (wt.is_current) row.classList.add("current");
+          row.textContent = wt.name;
+          row.onclick = () => {
+            if (!wt.is_current) handle.onWorktreeSelect?.(wt.path);
+            closeDropdown();
+          };
+          dropdown.appendChild(row);
+        }
+      }
+
       document.body.appendChild(dropdown);
 
       // Position dropdown below chip
@@ -80,7 +121,7 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
     chip.onclick = (e) => {
       e.stopPropagation();
       if (dropdown) closeDropdown();
-      else if (worktrees.length > 0) openDropdown();
+      else if (branches.length > 0 || worktrees.length > 0) openDropdown();
     };
 
     container.appendChild(chip);
@@ -92,14 +133,16 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
         const branch = await gitBranch(root);
         const aheadBehind = await gitAheadBehind(root);
         const worktrees = await gitWorktrees(root);
+        const branches = await gitBranches(root);
         render(
           branch,
           aheadBehind?.ahead ?? null,
           aheadBehind?.behind ?? null,
           worktrees,
+          branches,
         );
       } catch (e) {
-        render(null, null, null, []);
+        render(null, null, null, [], []);
       }
     },
   };

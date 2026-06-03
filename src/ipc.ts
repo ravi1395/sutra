@@ -57,6 +57,15 @@ export interface WorktreeInfo {
 export const gitWorktrees = (root: string) =>
   invoke<WorktreeInfo[]>("git_worktrees", { root });
 
+export interface BranchInfo {
+  name: string;
+  is_current: boolean;
+}
+export const gitBranches = (root: string) =>
+  invoke<BranchInfo[]>("git_branches", { root });
+export const gitCheckout = (root: string, branch: string) =>
+  invoke<void>("git_checkout", { root, branch });
+
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
 
