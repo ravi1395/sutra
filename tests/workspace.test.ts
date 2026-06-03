@@ -7,6 +7,15 @@ import {
   splitClonesActiveTab,
 } from "../src/editor";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "../src/shortcuts";
+import {
+  FILE_DRAG_TYPE,
+  SPLIT_DROP_LEFT_CLASS,
+  SPLIT_DROP_RIGHT_CLASS,
+  TERMINAL_DRAG_TYPE,
+  TREE_ENTRY_DRAG_TYPE,
+  splitDropClassForSide,
+  splitSideFromClientX,
+} from "../src/split-drop";
 import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
@@ -123,4 +132,20 @@ test("fileTypeMeta gives file tree rows type-specific icons and classes", () => 
 test("paneSideFromClientX splits a drop target into left and right halves", () => {
   assert.equal(paneSideFromClientX(149, { left: 100, width: 100 }), "left");
   assert.equal(paneSideFromClientX(150, { left: 100, width: 100 }), "right");
+});
+
+test("splitSideFromClientX splits any horizontal drop target into left and right halves", () => {
+  assert.equal(splitSideFromClientX(199, { left: 100, width: 200 }), "left");
+  assert.equal(splitSideFromClientX(200, { left: 100, width: 200 }), "right");
+  assert.equal(splitSideFromClientX(201, { left: 100, width: 200 }), "right");
+});
+
+test("split drop helper exposes stable payload types and overlay classes", () => {
+  assert.equal(FILE_DRAG_TYPE, "application/x-sutra-file");
+  assert.equal(TREE_ENTRY_DRAG_TYPE, "application/x-sutra-tree-entry");
+  assert.equal(TERMINAL_DRAG_TYPE, "application/x-sutra-terminal");
+  assert.equal(SPLIT_DROP_LEFT_CLASS, "split-drop-left");
+  assert.equal(SPLIT_DROP_RIGHT_CLASS, "split-drop-right");
+  assert.equal(splitDropClassForSide("left"), "split-drop-left");
+  assert.equal(splitDropClassForSide("right"), "split-drop-right");
 });

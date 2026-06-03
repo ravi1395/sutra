@@ -3,6 +3,7 @@
 // node reveals real content instead of a corridor of empty folders.
 import { listDir, gitStatus, type Entry, type GitStatusEntry } from "./ipc";
 import { showContextMenu } from "./contextmenu";
+import { splitSideFromClientX, type SplitDropSide } from "./split-drop";
 
 export interface FileTypeMeta {
   icon: string;
@@ -35,14 +36,8 @@ export function fileTypeMeta(name: string, isDir = false): FileTypeMeta {
   return fileTypeByExt[ext] ?? { icon: "TXT", className: "type-file" };
 }
 
-export type TreePaneSide = "left" | "right";
-
-export function paneSideFromClientX(
-  clientX: number,
-  rect: Pick<DOMRect, "left" | "width">,
-): TreePaneSide {
-  return clientX < rect.left + rect.width / 2 ? "left" : "right";
-}
+export type TreePaneSide = SplitDropSide;
+export const paneSideFromClientX = splitSideFromClientX;
 
 export class FileTree {
   private el: HTMLElement;
