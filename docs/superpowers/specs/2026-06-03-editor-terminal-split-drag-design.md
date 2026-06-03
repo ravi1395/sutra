@@ -86,7 +86,8 @@ Rules:
 - If there is no focused group, `+` creates in the left group.
 - Closing a terminal activates a neighbor in the same group when possible.
 - Closing the last terminal in the right group collapses the right group.
-- If the left group becomes empty while the right group has terminals, remaining terminals move left and the split collapses.
+- If dragging leaves the left group empty, keep the split visible so the moved shell remains in the right group as requested.
+- If closing terminals leaves the left group empty while the right group still has terminals, move the right-group terminals left and collapse the split.
 - `reset(dir, create)` kills all PTYs in all groups, clears terminal split state, sets cwd, then creates one terminal in the left group when `create` is true.
 - `refit()` resizes visible active terminals in both groups so split terminals keep correct PTY dimensions.
 
@@ -123,6 +124,7 @@ Workspace reset:
 - No terminal sessions: `+` creates one in the left group.
 - Terminal tab dragged to its current group: no-op except activation/focus.
 - Terminal tab dragged right when right group exists: moves into existing right group.
+- Dragging the only terminal right: right group stays visible and the left side shows an empty terminal drop area.
 - Last right-group terminal closed: right group collapses.
 - Workspace switch: all terminal groups reset to one left group in the new cwd.
 - PTY resize errors while hidden or not measurable: keep existing safe catch behavior.
