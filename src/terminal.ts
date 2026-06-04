@@ -6,7 +6,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { ptySpawn, ptyWrite, ptyResize, ptyKill, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite } from "./ipc";
+import { ptySpawn, ptyWrite, ptyResize, ptyKill, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin } from "./ipc";
+import { isIntegratedAgentCommand } from "./agent-tracking";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
 import { beginSplitPointerDrag } from "./split-drop";
 import {
@@ -218,6 +219,7 @@ export class TerminalManager {
     this.activeByGroup[side] = t;
     this.renderGroups();
     term.onData((d) => {
+      const submittedCommand = d === "\r" || d === "\n" ? t.currentInput : null;
       // Track raw input; newlines push to history.
       if (d === "\r" || d === "\n") {
         if (t.currentInput.trim()) {
@@ -234,7 +236,12 @@ export class TerminalManager {
         // Regular char: add to input (simple; doesn't handle cursor movement).
         t.currentInput += d;
       }
-      void ptyWrite(id, d).catch(() => {});
+      const send = () => void ptyWrite(id, d).catch(() => {});
+      if (submittedCommand && this.cwd && isIntegratedAgentCommand(submittedCommand)) {
+        void agentTrackingBegin(this.cwd).then(send, send);
+      } else {
+        send();
+      }
     });
 
     // Keyboard handlers for copy/paste/find/history.

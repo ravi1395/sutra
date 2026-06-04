@@ -33,9 +33,10 @@ Two baselines have different responsibilities:
 
 - **Git baseline:** current `HEAD`. Used by **View** and the diff panel. It stays
   fixed until a commit changes `HEAD`.
-- **Pre-agent snapshot:** exact workspace disk state when the first integrated
-  Claude/Codex process starts. Used only to safely revert candidate agent
-  changes while preserving uncommitted work that existed before the agent.
+- **Safe-revert snapshot:** initialized from workspace disk state when the first
+  integrated Claude/Codex process starts. A path advances when Sutra performs a
+  known human-only mutation before any candidate agent change on that path.
+  It is used only to revert candidate agent changes while preserving human work.
 
 Concurrent integrated Claude/Codex processes share one active tracking session
 and one pre-agent snapshot. The session ends after the final process exits and
@@ -50,6 +51,8 @@ Add a focused Rust tracker owned by Tauri state.
 Responsibilities:
 
 - Register each integrated PTY shell PID.
+- Capture a pre-execution snapshot before direct `claude` or `codex` terminal
+  commands; process ancestry remains authoritative after launch.
 - Determine whether `claude` or `codex` is running as a descendant of a
   registered shell.
 - For Git workspaces, snapshot files using existing git-ignore-aware traversal.
@@ -79,8 +82,10 @@ visible in the Git `HEAD` versus disk diff, but affect revert safety:
 - A Sutra-only write does not create a candidate agent change.
 - A Sutra save after an agent changes the same file marks that file as
   human-touched-after-agent.
-- A Sutra edit does not clear the pending workspace change or alter the immutable
-  Git baseline.
+- A Sutra-only mutation advances that path's safe-revert snapshot without
+  altering the immutable Git baseline.
+- A Sutra mutation after a candidate agent change keeps the pending change and
+  marks it unsafe for whole-file revert.
 
 ### Frontend Notification And Review
 
@@ -110,6 +115,9 @@ work:
 - File touched by Sutra after an agent change: do not whole-file revert.
   Open it for manual review and allow existing per-hunk revert against Git
   `HEAD`.
+- File content that differs from the tracker's last observed agent state: do not
+  whole-file revert. This protects later external human edits that Sutra cannot
+  otherwise attribute.
 - If restore/delete fails, keep the file pending and report the error.
 
 This preserves uncommitted work that existed before the agent session and avoids

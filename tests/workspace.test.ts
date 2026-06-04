@@ -34,6 +34,13 @@ import {
   upsertRecent,
   type RecentWorkspace,
 } from "../src/workspace";
+import {
+  agentBannerText,
+  firstViewableAgentChange,
+  isIntegratedAgentCommand,
+  mergeChangedFiles,
+} from "../src/agent-tracking";
+import type { AgentChange } from "../src/ipc";
 
 interface TabLike {
   name: string;
@@ -152,6 +159,61 @@ test("preview shortcut is handled before focused editor paste handlers", () => {
     false,
   );
   assert.equal(GLOBAL_SHORTCUT_OPTIONS.capture, true);
+});
+
+test("native Edit menu restores standard editing shortcuts", () => {
+  const libRs = readFileSync("src-tauri/src/lib.rs", "utf8");
+
+  assert.match(libRs, /SubmenuBuilder::new\(handle, "Edit"\)/);
+  for (const item of ["undo", "redo", "cut", "copy", "paste", "select_all"]) {
+    assert.match(libRs, new RegExp(`\\.${item}\\(\\)`), item);
+  }
+});
+
+test("agent changes merge into git file list without duplicates", () => {
+  const agent: AgentChange[] = [
+    { path: "/repo/new.ts", status: "A", humanTouched: false, binary: false },
+    { path: "/repo/shared.ts", status: "M", humanTouched: true, binary: false },
+  ];
+  const merged = mergeChangedFiles(
+    [
+      { path: "/repo/git.ts", status: "M" },
+      { path: "/repo/shared.ts", status: "M" },
+    ],
+    agent,
+  );
+
+  assert.deepEqual(merged.map((file) => file.path), [
+    "/repo/git.ts",
+    "/repo/new.ts",
+    "/repo/shared.ts",
+  ]);
+  assert.equal(merged.find((file) => file.path === "/repo/shared.ts")?.humanTouched, true);
+});
+
+test("agent banner and first viewable change handle unsafe deleted and binary files", () => {
+  const changes: AgentChange[] = [
+    { path: "/repo/deleted.ts", status: "D", humanTouched: false, binary: false },
+    { path: "/repo/image.bin", status: "M", humanTouched: false, binary: true },
+    { path: "/repo/view.ts", status: "M", humanTouched: true, binary: false },
+  ];
+
+  assert.equal(agentBannerText(changes), "Integrated agent changed 3 files; 1 needs manual review.");
+  assert.equal(firstViewableAgentChange(changes)?.path, "/repo/view.ts");
+});
+
+test("integrated agent command hint recognizes direct Claude and Codex launches", () => {
+  assert.equal(isIntegratedAgentCommand("claude"), true);
+  assert.equal(isIntegratedAgentCommand("/usr/local/bin/codex --full-auto"), true);
+  assert.equal(isIntegratedAgentCommand("vim file.ts"), false);
+});
+
+test("main uses workspace agent tracking instead of open-tab mtime polling", () => {
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  assert.match(mainTs, /agentTrackingPoll\(currentRoot\)/);
+  assert.doesNotMatch(mainTs, /async function checkExternal/);
+  assert.match(mainTs, /diffViewer\.renderStatus/);
 });
 
 test("fileTypeMeta gives file tree rows type-specific icons and classes", () => {

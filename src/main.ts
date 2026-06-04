@@ -1,6 +1,6 @@
 // App entry: instantiates the tree / editor / terminal / diff modules and wires
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
-// (native dialog), pane resizers, and the optional AI-edit tracker.
+// (native dialog), pane resizers, and integrated-agent workspace tracking.
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { FileTree } from "./tree";
 import {
@@ -16,7 +16,23 @@ import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
 import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
-import { writeFile, fileMtime, readFile, gitHeadContent, renamePath, deletePath, createDir, movePath, gitChangedFiles, gitCheckout } from "./ipc";
+import {
+  agentTrackingAccept,
+  agentTrackingPoll,
+  agentTrackingRevert,
+  writeFile,
+  fileMtime,
+  gitHeadContent,
+  renamePath,
+  deletePath,
+  createDir,
+  movePath,
+  gitChangedFiles,
+  gitCheckout,
+  type AgentChange,
+  type AgentTrackingStatus,
+} from "./ipc";
+import { agentBannerText, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -56,6 +72,7 @@ let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers e
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
 let currentRoot: string | null = null; // track opened workspace
+let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
@@ -209,6 +226,7 @@ async function openWorkspace(dir: string): Promise<void> {
   editor.closeTabsOutsideWorkspace(dir);
   editor.setWorkspaceRoot(dir);
   currentRoot = dir;
+  agentStatus = { enabled: false, agentActive: false, changes: [] };
   tree.setActive(editor.active?.path ?? null);
   await tree.setRoot(dir);
   search.setRoot(dir);
@@ -217,7 +235,8 @@ async function openWorkspace(dir: string): Promise<void> {
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void gitBar.refresh(dir);
-  startExternalPoll(); // auto-track AI/external edits to open tabs
+  startAgentTrackingPoll();
+  void pollAgentChanges();
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -251,19 +270,10 @@ async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
   try {
     const gitFiles = await gitChangedFiles(currentRoot);
-    // Merge in any open tabs with override baseline (pre-AI captures)
-    const fileMap = new Map(gitFiles.map((f) => [f.path, f]));
-    for (const tab of editor.tabs) {
-      if (tab.path && tab.override && !fileMap.has(tab.path)) {
-        fileMap.set(tab.path, { path: tab.path, status: "M" });
-      }
-    }
-    const files = Array.from(fileMap.values());
+    const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
     diffViewer.renderFileList(files, activePath, (path: string) => {
-      void editor.openFile(path).then(() => {
-        // Existing onDiffChanged hook will render hunks
-      });
+      void viewChangedPath(path);
     });
   } catch (e) {
     // Silently skip on error
@@ -343,59 +353,46 @@ function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
-// ---- AI-edit tracking (always on) ----
-// Polls open tabs for external disk writes. Cheap (only open tabs) and covers
-// AI agents (Codex/Claude/aider) editing in the Sutra terminal — no toggle.
+// ---- integrated-agent workspace tracking ----
 let pollTimer: number | undefined;
 
-function startExternalPoll(): void {
+function startAgentTrackingPoll(): void {
   if (pollTimer !== undefined) return;
-  pollTimer = window.setInterval(checkExternal, 1500);
+  pollTimer = window.setInterval(pollAgentChanges, 1500);
 }
 
-async function checkExternal(): Promise<void> {
-  for (const tab of editor.tabs) {
-    if (!tab.path) continue;
-    let mt: number;
-    try {
-      mt = await fileMtime(tab.path);
-    } catch {
-      continue;
-    }
-    if (tab.lastMtime == null) {
-      tab.lastMtime = mt;
-      continue;
-    }
-    if (mt <= tab.lastMtime) continue;
-    tab.lastMtime = mt;
-    let disk: string;
-    try {
-      disk = await readFile(tab.path);
-    } catch {
-      continue;
-    }
-    const buf = editor.active === tab ? editor.getContent() : tab.state.doc.toString();
-    if (disk === buf) continue; // already in sync (e.g. our own save)
-    onExternalEdit(tab, buf, disk);
+async function pollAgentChanges(): Promise<void> {
+  if (!currentRoot) return;
+  const root = currentRoot;
+  try {
+    const next = await agentTrackingPoll(currentRoot);
+    if (currentRoot !== root) return;
+    agentStatus = next;
+    if (next.changes.length > 0) showAgentBanner(next.changes);
+    else hideAgentBanner();
+    if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
+  } catch {
+    // Poll failures must not interrupt editing.
   }
 }
 
-function onExternalEdit(tab: Tab, oldBuf: string, disk: string): void {
-  // Dirty tab: unsaved user edits present — warn only, never clobber the buffer.
-  if (tab.dirty) {
-    showAiBanner(tab);
+async function viewChangedPath(path: string): Promise<void> {
+  const change = agentStatus.changes.find((candidate) => candidate.path === path);
+  setDiff(true);
+  if (change?.status === "D") {
+    diffViewer.renderStatus(basename(path), "File deleted by integrated agent. Git HEAD retains the review baseline.");
     return;
   }
-  // Capture the pre-AI baseline exactly ONCE. Reassigning every poll collapsed
-  // the baseline forward each 1.5s, shrinking the gutter to the last interval's
-  // delta. Keeping it fixed diffs the whole AI session: pre-AI → latest disk.
-  if (tab.override == null) tab.override = oldBuf;
-  tab.savedContent = disk;
-  editor.activate(tab);
-  editor.setContent(disk); // setContent → deferred scheduleDiff recomputes on fresh content
-  setDiff(true);
-  void refreshDiffFileList(); // Refresh the file list in diff pane
-  showAiBanner(tab);
+  if (change?.binary) {
+    diffViewer.renderStatus(basename(path), "Binary file changed by integrated agent. Text diff is unavailable.");
+    return;
+  }
+  try {
+    await editor.openLatestFile(path, change?.status ?? "M");
+    tree.setActive(path);
+  } catch (e) {
+    diffViewer.renderStatus(basename(path), `Cannot open changed file: ${e}`);
+  }
 }
 
 function bannerBtn(text: string, fn: () => void): HTMLButtonElement {
@@ -405,49 +402,60 @@ function bannerBtn(text: string, fn: () => void): HTMLButtonElement {
   return b;
 }
 
-function showAiBanner(tab: Tab): void {
+function showAgentBanner(changes: AgentChange[]): void {
   banner.innerHTML = "";
+  banner.dataset.kind = "agent";
   const span = document.createElement("span");
-  span.textContent = `External edit detected in ${tab.name} (Claude/Codex). Review in the diff viewer.`;
+  span.textContent = agentBannerText(changes);
   banner.append(
     span,
     bannerBtn("View", () => {
-      editor.activate(tab);
-      setDiff(true);
+      const change = firstViewableAgentChange(changes);
+      if (change) void viewChangedPath(change.path);
     }),
     bannerBtn("Keep AI changes", () => {
-      tab.override = null;
-      editor.recomputeDiff();
-      hideBanner();
+      if (!currentRoot) return;
+      void agentTrackingAccept(currentRoot).then((status) => {
+        agentStatus = status;
+        hideAgentBanner();
+        void refreshDiffFileList();
+      });
     }),
-    bannerBtn("Revert to mine", async () => {
-      const mine = tab.override ?? "";
-      editor.activate(tab);
-      editor.setContent(mine);
-      tab.savedContent = mine;
-      tab.override = null;
-      try {
-        await writeFile(tab.path!, mine);
-        tab.lastMtime = await fileMtime(tab.path!).catch(() => tab.lastMtime);
-      } catch (e) {
-        alert(`Revert failed: ${e}`);
-      }
-      tab.dirty = false;
-      editor.recomputeDiff();
-      editor.renderAllTabs();
-      hideBanner();
+    bannerBtn("Revert agent changes", () => {
+      if (!currentRoot) return;
+      void agentTrackingRevert(currentRoot).then(async (result) => {
+        await tree.refresh();
+        await editor.reloadAllFromDisk();
+        await pollAgentChanges();
+        if (result.unsafePaths.length || result.errors.length) {
+          const unsafe = result.unsafePaths.length
+            ? `${result.unsafePaths.length} human-touched file(s) need manual review.`
+            : "";
+          const errors = result.errors.length ? ` ${result.errors.join("; ")}` : "";
+          alert(`${unsafe}${errors}`.trim());
+        }
+      }).catch((e) => alert(`Revert failed: ${e}`));
     }),
   );
   banner.classList.remove("hidden");
 }
+
+function hideAgentBanner(): void {
+  if (banner.dataset.kind === "agent") {
+    hideBanner();
+  }
+}
+
 function hideBanner(): void {
   banner.classList.add("hidden");
   banner.innerHTML = "";
+  delete banner.dataset.kind;
 }
 
 /** One-off error banner (e.g. branch checkout rejected on a dirty tree). */
 function showErrorBanner(message: string): void {
   banner.innerHTML = "";
+  banner.dataset.kind = "error";
   const span = document.createElement("span");
   span.textContent = message;
   banner.append(span, bannerBtn("Dismiss", hideBanner));

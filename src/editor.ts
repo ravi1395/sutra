@@ -627,6 +627,22 @@ export class EditorManager {
     if (line !== undefined) this.revealLine(line);
   }
 
+  /** Open latest disk content for review without overwriting a dirty human buffer. */
+  async openLatestFile(path: string, status: string): Promise<Tab> {
+    let tab = this.tabByPath(path);
+    if (tab) {
+      if (!tab.dirty) await this.reloadFromDisk(tab);
+      this.activate(tab);
+    } else {
+      await this.openFile(path);
+      tab = this.tabByPath(path);
+    }
+    if (!tab) throw new Error(`Could not open ${path}`);
+    if (status === "A" && tab.gitHead == null) tab.gitHead = "";
+    this.recomputeDiff();
+    return tab;
+  }
+
   async openFileInSide(path: string, side: PaneSide): Promise<void> {
     const pane = side === "left" ? this.panes[0] : this.ensureRightPane();
     this.setFocused(pane);

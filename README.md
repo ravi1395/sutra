@@ -13,7 +13,7 @@ Three regions, resizable by dragging the splitters:
 - **Editor** — the remaining space.
 
 ```
-┌─ menu bar (Sutra·File·Edit·…) ───────── [⊟ sutra ▾] [＋]   ✦ ▣ ⊟ (icons) ─┐
+┌────────────────────────────── [⊟ sutra ▾] [git]       ✦ ▣ ⊟ (icons) ──────┐
 ├──────────┬─────────────────────────────────────────────────────────────────┤
 │  tree    │  tabs                                            │  diff viewer  │
 │  (15%)   │  editor (line numbers + diff gutter)             │  (toggle)     │
@@ -22,12 +22,11 @@ Three regions, resizable by dragging the splitters:
 └──────────┴─────────────────────────────────────────────────────────────────┘
 ```
 
-The top bar is a custom in-window **menu bar** (left), a **workspace switcher**
-pill + add-folder button (right of center), and three **icon toggles** —
-Track AI · Terminal · Diff. There is no native macOS menu; the in-window bar is
-the single source of truth. Graphite palette with a single emerald accent;
-fonts (Hanken Grotesk UI + Spline Sans Mono code) are vendored locally — no
-runtime font network request.
+The top bar contains a **workspace switcher**, git status, and editor/terminal
+tools. A minimal native macOS **Edit** menu
+provides standard cut, copy, paste, undo, redo, and select-all responders.
+Graphite palette with a single emerald accent; fonts (Hanken Grotesk UI +
+Spline Sans Mono code) are vendored locally — no runtime font network request.
 
 ## Features
 
@@ -105,17 +104,18 @@ runtime font network request.
   - Closing the source tab tears down any bound preview.
   - Unsaved HTML tabs cannot be server-previewed until saved into the workspace.
 
-### AI / external edit tracking (optional)
-- Toggle **Track AI** on (the spark icon in the top-right tools; emerald wash +
-  under-dot when active). While on, open files are polled for changes made by
-  external tools (Claude, Codex, formatters, etc.).
-- When an external edit lands, the file opens in **diff mode** (baseline = your
-  pre-edit buffer, current = the new on-disk content) so you can review it, and
-  a banner above the terminal offers:
-  - **Keep AI changes** — accept the edit; gutter reverts to normal git diff.
-  - **Revert to mine** — write your buffer back to disk, discarding the edit.
-  - Per-hunk **Revert** also works in this mode.
-- Off by default; no polling happens until you enable it.
+### Integrated-agent workspace tracking
+- In Git workspaces, Sutra tracks the whole workspace while Claude or Codex runs
+  under an integrated terminal. Changed files need not be open in the editor.
+- **View** opens the selected text file and compares latest disk content with
+  Git `HEAD`. Deleted and binary files show a clear non-editor review status.
+- **Keep AI changes** clears the notification; changes remain visible against
+  Git `HEAD` until committed.
+- **Revert agent changes** restores safe agent-only changes. Files edited in
+  Sutra, or changed externally after the last agent observation, are preserved
+  and require manual/per-hunk review.
+- Non-Git workspaces and Claude/Codex processes launched outside Sutra are not
+  tracked.
 
 ## Keyboard shortcuts
 
@@ -127,6 +127,9 @@ runtime font network request.
 | `⌘N` | New file (untitled tab) |
 | `⌘O` | Open folder |
 | `⌘W` | Close tab |
+| `⌘X` / `⌘C` / `⌘V` | Cut / copy / paste |
+| `⌘Z` / `⇧⌘Z` | Undo / redo |
+| `⌘A` | Select all |
 | `⌘F` | Find |
 | `⌘/` | Toggle line comment |
 | `⌘D` | Select next occurrence |
@@ -154,7 +157,8 @@ and takes a minute or two; later builds are incremental.
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), read/write, mtime |
+| Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
+| Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |
 | Rust: pty | `src-tauri/src/pty.rs` | spawn/write/resize/kill PTYs, stream output events |
 | Rust: preview | `src-tauri/src/preview_server.rs` | local static server for saved HTML preview |
@@ -166,7 +170,8 @@ and takes a minute or two; later builds are incremental.
 | TS: terminal groups | `src/terminal-groups.ts` | pure left/right terminal group movement helpers |
 | TS: terminal | `src/terminal.ts` | xterm front-ends, multi-session, terminal split groups, refit |
 | TS: layout | `src/layout.ts` | drag-resize splitters; terminal height shrinks within app bounds |
-| TS: main | `src/main.ts` | wiring, toggles, shortcuts, save, AI tracker |
+| TS: agent tracking | `src/agent-tracking.ts` | pending-file merge, banner text, direct-command hint |
+| TS: main | `src/main.ts` | wiring, toggles, shortcuts, save, integrated-agent review flow |
 
 PTY output is shipped to the UI as base64-encoded raw bytes and decoded to a
 `Uint8Array` for xterm, so UTF-8 reassembly across chunk boundaries stays
@@ -176,5 +181,8 @@ correct.
 
 - Diff baseline is **git HEAD**; a brand-new untracked file shows no gutter
   (there is nothing to diff against) until it is committed.
-- AI tracking uses mtime polling (1.5s) — near-real-time, not instant.
+- Integrated-agent tracking polls process/workspace state every 1.5s; direct
+  `claude`/`codex` terminal commands snapshot before execution.
+- Workspace snapshots retain file bytes for exact safe revert and may use
+  significant memory in large repositories.
 - Binary files are rejected by the editor (`read_file` returns an error).

@@ -112,6 +112,15 @@ export class DiffViewer {
   onRevert?: (h: Hunk) => void;
   onFileSelect?: (path: string) => void;
 
+  renderStatus(label: string, message: string): void {
+    this.titleEl.textContent = label;
+    this.body.innerHTML = "";
+    const status = document.createElement("div");
+    status.id = "diff-empty";
+    status.textContent = message;
+    this.body.appendChild(status);
+  }
+
   render(hunks: Hunk[], label: string): void {
     this.titleEl.textContent = label;
     this.body.innerHTML = "";

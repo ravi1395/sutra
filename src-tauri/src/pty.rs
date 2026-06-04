@@ -1,18 +1,20 @@
 // Pseudo-terminal sessions backed by portable-pty. Each session keeps its master
 // handle + writer in shared state so the UI can toggle a terminal panel off and
 // back on without killing the underlying shell (output keeps streaming via events).
+use crate::agent_tracker::AgentTrackerState;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -35,6 +37,7 @@ struct PtyExit {
 pub fn pty_spawn(
     app: AppHandle,
     state: State<'_, PtyState>,
+    tracker: State<'_, AgentTrackerState>,
     id: String,
     cwd: Option<String>,
     rows: u16,
@@ -52,6 +55,11 @@ pub fn pty_spawn(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell);
+    let registered_cwd = cwd
+        .as_ref()
+        .filter(|dir| std::path::Path::new(dir).is_dir())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
     if let Some(dir) = cwd {
         if std::path::Path::new(&dir).is_dir() {
             cmd.cwd(dir);
@@ -60,6 +68,10 @@ pub fn pty_spawn(
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let pid = child.process_id();
+    if let (Some(pid), Some(cwd)) = (pid, registered_cwd) {
+        tracker.register_shell(pid, cwd);
+    }
     drop(pair.slave); // parent no longer needs the slave fd
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -68,6 +80,7 @@ pub fn pty_spawn(
     // Stream output off-thread; emit base64 chunks tagged with the session id.
     let app2 = app.clone();
     let id2 = id.clone();
+    let pid2 = pid;
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -86,6 +99,9 @@ pub fn pty_spawn(
                 Err(_) => break,
             }
         }
+        if let Some(pid) = pid2 {
+            app2.state::<AgentTrackerState>().unregister_shell(pid);
+        }
         let _ = app2.emit("pty-exit", PtyExit { id: id2.clone() });
     });
 
@@ -95,6 +111,7 @@ pub fn pty_spawn(
             master: pair.master,
             writer,
             child,
+            pid,
         },
     );
     Ok(())
@@ -132,8 +149,15 @@ pub fn pty_resize(
 }
 
 #[tauri::command]
-pub fn pty_kill(state: State<'_, PtyState>, id: String) -> Result<(), String> {
+pub fn pty_kill(
+    state: State<'_, PtyState>,
+    tracker: State<'_, AgentTrackerState>,
+    id: String,
+) -> Result<(), String> {
     if let Some(mut session) = state.0.lock().unwrap().remove(&id) {
+        if let Some(pid) = session.pid {
+            tracker.unregister_shell(pid);
+        }
         let _ = session.child.kill();
     }
     Ok(())

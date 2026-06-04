@@ -1,8 +1,10 @@
 // Filesystem commands: directory listing with VS Code-style compact folders,
 // plus text read/write and mtime probing for external-edit tracking.
+use crate::agent_tracker::{capture_paths, AgentTrackerState};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tauri::State;
 
 #[derive(Serialize)]
 pub struct Entry {
@@ -81,11 +83,19 @@ pub fn read_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn write_file(path: String, content: String) -> Result<(), String> {
+pub fn write_file(
+    tracker: State<'_, AgentTrackerState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let tracked_path = PathBuf::from(&path);
+    let before = capture_paths(&[tracked_path.clone()]);
     if let Some(parent) = Path::new(&path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, content).map_err(|e| e.to_string())
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    tracker.record_sutra_mutation(before, &[tracked_path]);
+    Ok(())
 }
 
 /// Millis since epoch of last modification — used to poll open files for
@@ -101,38 +111,63 @@ pub fn file_mtime(path: String) -> Result<u128, String> {
 
 /// Rename a file or folder within the same directory.
 #[tauri::command]
-pub fn rename_path(path: String, new_name: String) -> Result<(), String> {
+pub fn rename_path(
+    tracker: State<'_, AgentTrackerState>,
+    path: String,
+    new_name: String,
+) -> Result<(), String> {
     let p = Path::new(&path);
     let parent = p.parent().ok_or("No parent directory")?;
     let new_path = parent.join(&new_name);
     if new_path.exists() {
         return Err("Destination already exists".to_string());
     }
-    std::fs::rename(&path, &new_path).map_err(|e| e.to_string())
+    let old_path = PathBuf::from(&path);
+    let before = capture_paths(&[old_path.clone(), new_path.clone()]);
+    std::fs::rename(&path, &new_path).map_err(|e| e.to_string())?;
+    tracker.record_sutra_mutation(before, &[old_path, new_path]);
+    Ok(())
 }
 
 /// Move or rename a file/folder to a new path; reject if destination exists.
 #[tauri::command]
-pub fn move_path(from: String, to: String) -> Result<(), String> {
+pub fn move_path(
+    tracker: State<'_, AgentTrackerState>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
     if Path::new(&to).exists() {
         return Err("Destination already exists".to_string());
     }
-    std::fs::rename(&from, &to).map_err(|e| e.to_string())
+    let from_path = PathBuf::from(&from);
+    let to_path = PathBuf::from(&to);
+    let before = capture_paths(&[from_path.clone(), to_path.clone()]);
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    tracker.record_sutra_mutation(before, &[from_path, to_path]);
+    Ok(())
 }
 
 /// Delete a file or folder (recursive for directories).
 #[tauri::command]
-pub fn delete_path(path: String) -> Result<(), String> {
+pub fn delete_path(tracker: State<'_, AgentTrackerState>, path: String) -> Result<(), String> {
     let p = Path::new(&path);
+    let tracked_path = PathBuf::from(&path);
+    let before = capture_paths(&[tracked_path.clone()]);
     if p.is_dir() {
-        fs::remove_dir_all(&path).map_err(|e| e.to_string())
+        fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
     } else {
-        fs::remove_file(&path).map_err(|e| e.to_string())
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
+    tracker.record_sutra_mutation(before, &[tracked_path]);
+    Ok(())
 }
 
 /// Create a new directory (including parents).
 #[tauri::command]
-pub fn create_dir(path: String) -> Result<(), String> {
-    fs::create_dir_all(&path).map_err(|e| e.to_string())
+pub fn create_dir(tracker: State<'_, AgentTrackerState>, path: String) -> Result<(), String> {
+    let tracked_path = PathBuf::from(&path);
+    let before = capture_paths(&[tracked_path.clone()]);
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    tracker.record_sutra_mutation(before, &[tracked_path]);
+    Ok(())
 }

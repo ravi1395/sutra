@@ -66,6 +66,32 @@ export const gitBranches = (root: string) =>
 export const gitCheckout = (root: string, branch: string) =>
   invoke<void>("git_checkout", { root, branch });
 
+export interface AgentChange extends ChangedFile {
+  humanTouched: boolean;
+  binary: boolean;
+}
+
+export interface AgentTrackingStatus {
+  enabled: boolean;
+  agentActive: boolean;
+  changes: AgentChange[];
+}
+
+export interface AgentRevertResult {
+  revertedPaths: string[];
+  unsafePaths: string[];
+  errors: string[];
+}
+
+export const agentTrackingPoll = (root: string) =>
+  invoke<AgentTrackingStatus>("agent_tracking_poll", { root });
+export const agentTrackingBegin = (root: string) =>
+  invoke<AgentTrackingStatus>("agent_tracking_begin", { root });
+export const agentTrackingAccept = (root: string) =>
+  invoke<AgentTrackingStatus>("agent_tracking_accept", { root });
+export const agentTrackingRevert = (root: string) =>
+  invoke<AgentRevertResult>("agent_tracking_revert", { root });
+
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
 
