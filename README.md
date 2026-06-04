@@ -68,6 +68,8 @@ runtime font network request.
   focused group. Closing the last right-group terminal collapses the right group.
 - **Toggle** the panel with `⌘J` to reclaim editor space; the shell keeps
   running and the session **resumes** on reopen (it is never killed by toggling).
+- Terminal columns refit while resizing the folder tree or terminal height, and
+  the app layout is hard-clipped to the current window bounds.
 - Opening a folder resets terminal sessions so the active shell starts in that
   folder. New terminals inherit the same folder cwd, and terminal split state
   resets to one group.
@@ -109,7 +111,7 @@ runtime font network request.
   external tools (Claude, Codex, formatters, etc.).
 - When an external edit lands, the file opens in **diff mode** (baseline = your
   pre-edit buffer, current = the new on-disk content) so you can review it, and
-  a banner offers:
+  a banner above the terminal offers:
   - **Keep AI changes** — accept the edit; gutter reverts to normal git diff.
   - **Revert to mine** — write your buffer back to disk, discarding the edit.
   - Per-hunk **Revert** also works in this mode.
@@ -163,7 +165,7 @@ and takes a minute or two; later builds are incremental.
 | TS: split drop | `src/split-drop.ts` | shared drag payloads, side detection, drop hint classes |
 | TS: terminal groups | `src/terminal-groups.ts` | pure left/right terminal group movement helpers |
 | TS: terminal | `src/terminal.ts` | xterm front-ends, multi-session, terminal split groups, refit |
-| TS: layout | `src/layout.ts` | drag-resize splitters |
+| TS: layout | `src/layout.ts` | drag-resize splitters; terminal height shrinks within app bounds |
 | TS: main | `src/main.ts` | wiring, toggles, shortcuts, save, AI tracker |
 
 PTY output is shipped to the UI as base64-encoded raw bytes and decoded to a

@@ -118,22 +118,13 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     });
   }
 
-  // ---- render switcher (pill + add) ----
+  // ---- render switcher (pill) ----
   wsEl.innerHTML = "";
   const pill = document.createElement("button");
   pill.className = "ws-pill";
   pill.title = "Switch workspace";
-  const addBtn = document.createElement("button");
-  addBtn.className = "ws-add";
-  addBtn.title = "Add folder to workspace";
-  addBtn.setAttribute("aria-label", "Add folder");
-  addBtn.innerHTML = icon("folderAdd", 15);
-  addBtn.onclick = () => {
-    closeAll();
-    actions.addFolder();
-  };
   pill.onclick = () => openSwitcher();
-  wsEl.append(pill, addBtn);
+  wsEl.append(pill);
 
   function renderPill(): void {
     const name = current ? (current.split("/").pop() || current) : "No folder";

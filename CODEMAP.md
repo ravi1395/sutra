@@ -26,7 +26,7 @@ Main boot flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App bootstrap, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, global shortcuts, tree-file drag-to-pane drops, AI edit polling | `$` (DOM query helper — 39 callers), `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner`, `mountWorkspaceBar` |
+| `src/main.ts` | App bootstrap, workspace open, menu-bar mount + actions, tab rendering, save/save-as/save-all, panel + icon toggles, terminal refit on sidebar/window resize, global shortcuts, tree-file drag-to-pane drops, AI edit polling | `$` (DOM query helper — 39 callers), `renderTabs`, `confirmWorkspaceClose`, `saveTab`, `openWorkspace`, `openFolderDialog`, `closeActiveTab`, `setTerminal`, `setDiff`, `setSidebar`, `setTracking`, `checkExternal`, `onExternalEdit`, `showAiBanner`, `mountWorkspaceBar` |
 | `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and recents | `mountMenuBar`, `MenuActions`, `MenuBarHandle`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
@@ -46,8 +46,8 @@ Main boot flow:
 | `src/workspace.ts` | Workspace path membership helpers + recents store (pure logic + localStorage adapters) | `pathBelongsToRoot` (7 callers), `normalizePath` (5 callers), `filterWorkspaceTabs`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
 | `src/preview.ts` | Markdown/HTML live preview in split pane; Markdown via `marked` + `DOMPurify`; HTML via static preview server | `PreviewController` |
 | `src/ipc.ts` | Typed Tauri command/event boundary (87 LOC) | `listDir`, `readFile`, `writeFile`, `fileMtime` (4 callers), `renamePath`, `movePath`, `deletePath`, `createDir`, `gitStatus`, `gitHeadContent`, `gitBranch`, `gitAheadBehind`, `gitChangedFiles`, `gitWorktrees`, `searchDir`, `previewServerUrl`, `ptySpawn`, `ptyWrite`, `ptyResize`, `ptyKill`, `onPtyOutput`, `onPtyExit` |
-| `src/layout.ts` | Drag resize behavior for vertical and horizontal splitters | `vResizer`, `hResizer` |
-| `src/styles.css` | Graphite/emerald UI tokens, vendored `@font-face` (Hanken Grotesk + Spline Sans Mono), chrome (menu bar · switcher · icon tools · popover primitive), panes, tabs, tree, diff gutter/viewer, terminal, AI banner | CSS selectors only |
+| `src/layout.ts` | Drag resize behavior for vertical and horizontal splitters; horizontal targets may shrink to remain inside app bounds | `vResizer`, `hResizer` |
+| `src/styles.css` | Graphite/emerald UI tokens, viewport-clipped app root, vendored `@font-face` (Hanken Grotesk + Spline Sans Mono), chrome (menu bar · switcher · icon tools · popover primitive), panes, tabs, tree, diff gutter/viewer, terminal, AI banner | CSS selectors only |
 | `src/assets/fonts/` | Vendored OFL variable woff2 (latin) — no runtime font network request | `HankenGrotesk-Variable.woff2`, `SplineSansMono-Variable.woff2` |
 
 ## Rust Map
@@ -92,13 +92,13 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 `FileTree.makeRow` marks rows with `FILE_DRAG_TYPE`/`TREE_ENTRY_DRAG_TYPE`; editor tabs use `beginSplitPointerDrag` (avoids WKWebView HTML drag routing). Releasing over `#panes` → `EditorManager.moveTabToSide`, collapses empty right pane.
 
 **Terminal:**
-`setTerminal(true)` or `term-add` → `TerminalManager.create` (focused group) → `ipc.ptySpawn` with cwd → Rust `pty_spawn` → background reader emits `pty-output` base64 → `onPtyOutput` → `b64ToBytes` → xterm write. Folder open → `TerminalManager.reset(dir)` kills all PTYs, clears groups, respawns in new cwd.
+`setTerminal(true)` or `term-add` → `TerminalManager.create` (focused group) → `ipc.ptySpawn` with cwd → Rust `pty_spawn` → background reader emits `pty-output` base64 → `onPtyOutput` → `b64ToBytes` → xterm write. Folder open → `TerminalManager.reset(dir)` kills all PTYs, clears groups, respawns in new cwd. Sidebar, terminal-height, and window resize → `TerminalManager.refit`.
 
 **Terminal split:**
 `TerminalManager.renderTabs` uses `beginSplitPointerDrag`. Releasing over `#terminal-area` → moves live `Term` + xterm DOM into selected group. Right-side drop creates/uses right group.
 
 **AI/external edit tracking:**
-`setTracking(true)` → poll `fileMtime` every 1.5s → `readFile` when mtime advances → compare to tab buffer → `onExternalEdit` sets `tab.override` baseline → diff mode banner.
+`setTracking(true)` → poll `fileMtime` every 1.5s → `readFile` when mtime advances → compare to tab buffer → `onExternalEdit` sets `tab.override` baseline → diff mode banner between editor and terminal.
 
 ## Commands
 

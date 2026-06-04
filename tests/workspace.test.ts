@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   detectLanguage,
@@ -38,6 +39,29 @@ interface TabLike {
   name: string;
   path: string | null;
 }
+
+test("app layout keeps notifications above terminal and inside webview bounds", () => {
+  const html = readFileSync("index.html", "utf8");
+  const css = readFileSync("src/styles.css", "utf8");
+  const layout = readFileSync("src/layout.ts", "utf8");
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const mainStart = html.indexOf('<div id="main">');
+  const mainEnd = html.indexOf("\n        </div>\n      </div>", mainStart);
+  const main = html.slice(mainStart, mainEnd);
+
+  assert.ok(mainEnd > mainStart);
+  assert.ok(main.indexOf('id="editor-area"') < main.indexOf('id="ai-banner"'));
+  assert.ok(main.indexOf('id="ai-banner"') < main.indexOf('id="terminal-area"'));
+  assert.match(css, /#app\s*\{[^}]*height:\s*100%;[^}]*width:\s*100%;/s);
+  assert.match(css, /#app\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /#body\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /#main\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /#terminal-area\s*\{[^}]*flex:\s*0 1 40%;/s);
+  assert.match(css, /#terminal-area\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/s);
+  assert.match(css, /#term-host\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/s);
+  assert.match(layout, /target\.style\.flex = `0 1 \$\{h\}px`;/);
+  assert.match(mainTs, /vResizer\(vres, sidebar, \{[^}]*onResize:\s*\(\) => terminals\.refit\(\)/s);
+});
 
 test("pathBelongsToRoot rejects sibling path prefixes", () => {
   assert.equal(pathBelongsToRoot("/tmp/project/src/main.ts", "/tmp/project"), true);

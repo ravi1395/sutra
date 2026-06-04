@@ -65,8 +65,11 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  width: 100vw;
+  height: 100%;
+  width: 100%;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
 
 /* ---- chrome (titlebar: menu bar · spacer · switcher · view tools) ---- */
@@ -163,25 +166,6 @@ button:hover {
   color: var(--fg-dim);
   flex: 0 0 auto;
 }
-.ws-add {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--r-md);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--fg-dim);
-  cursor: pointer;
-  padding: 0;
-}
-.ws-add:hover {
-  color: var(--em);
-  border-color: var(--em-dim);
-  background: var(--bg-3);
-}
-
 /* git status bar */
 #gitbar {
   display: flex;
@@ -389,6 +373,7 @@ button:hover {
   flex: 1;
   display: flex;
   min-height: 0;
+  overflow: hidden;
 }
 #sidebar {
   flex: 0 0 15%;
@@ -445,6 +430,7 @@ button:hover {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 #editor-area {
   flex: 1;
@@ -498,10 +484,12 @@ button:hover {
   position: relative;
 }
 #terminal-area {
-  flex: 0 0 40%;
+  flex: 0 1 40%;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
   position: relative;
   background: #181818;
   border-top: 1px solid var(--border);
@@ -923,8 +911,10 @@ button:hover {
 /* ---- terminal ---- */
 #term-host {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
+  overflow: hidden;
 }
 .term-group {
   flex: 1;

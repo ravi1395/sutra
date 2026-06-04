@@ -455,7 +455,7 @@ function showErrorBanner(message: string): void {
 }
 
 // ---- resizers ----
-vResizer(vres, sidebar, { min: 120, max: 600 });
+vResizer(vres, sidebar, { min: 120, max: 600, onResize: () => terminals.refit() });
 hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.refit() });
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
 vResizer(browserRes, browserArea, { min: 220, fromEnd: true });

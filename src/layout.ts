@@ -34,7 +34,7 @@ export function hResizer(handle: HTMLElement, target: HTMLElement, opts: ResizeO
       const dy = ev.clientY - startY;
       let h = opts.fromEnd ? startH - dy : startH + dy;
       h = Math.max(opts.min, opts.max ? Math.min(opts.max, h) : h);
-      target.style.flex = `0 0 ${h}px`;
+      target.style.flex = `0 1 ${h}px`;
       opts.onResize?.();
     };
     const up = () => {
