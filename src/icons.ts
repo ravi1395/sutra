@@ -15,7 +15,9 @@ export type IconName =
   | "search"
   | "refresh"
   | "play"
-  | "plus";
+  | "plus"
+  | "expand"
+  | "compress";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -34,6 +36,8 @@ const paths: Record<IconName, string> = {
   refresh: '<path d="M4 12a8 8 0 0 1 14.93-4H15m4 0V4"/><path d="M20 12a8 8 0 0 1-14.93 4H9m-4 0v4"/>',
   play: '<path d="M8 5v14l11-7z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
+  compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

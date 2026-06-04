@@ -1265,6 +1265,23 @@ button:hover {
 .term-tab[data-side="right"] {
   border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--border));
 }
+/* Maximized terminal: hide editor and resizer, let terminal fill #main */
+#main.terminal-maximized #editor-area  { display: none; }
+#main.terminal-maximized #hresizer     { display: none; }
+#main.terminal-maximized #terminal-area { flex: 1; }
+.term-maximize {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-bar);
+  padding: 0 8px;
+  cursor: pointer;
+  color: var(--fg-faint);
+  display: flex;
+  align-items: center;
+}
+.term-maximize:hover {
+  color: var(--em);
+}
 /* ---- in-file search panel (VS Code style) ---- */
 .sf-panel {
   background: #252526;

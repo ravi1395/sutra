@@ -55,7 +55,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
-const terminals = new TerminalManager($("term-host"), $("terminal-area"));
+const terminals = new TerminalManager($("term-host"), $("terminal-area"), $("main"));
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
   $<HTMLInputElement>("search-input"),

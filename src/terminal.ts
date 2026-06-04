@@ -18,6 +18,7 @@ import {
   type TerminalGroupSide,
   type TerminalGroups,
 } from "./terminal-groups";
+import { icon } from "./icons";
 
 interface Term {
   id: string;
@@ -58,6 +59,10 @@ export class TerminalManager {
   private groups: TerminalGroups<Term> = { left: [], right: [] };
   private activeByGroup: Record<TerminalGroupSide, Term | null> = { left: null, right: null };
   private focusedGroup: TerminalGroupSide = "left";
+  private mainEl: HTMLElement;
+  private maximized = false;
+  private savedFlex = '';
+  private maximizeBtns: Partial<Record<TerminalGroupSide, HTMLButtonElement>> = {};
   private terms: Term[] = [];
   private active: Term | null = null;
   private seq = 0;
@@ -65,7 +70,8 @@ export class TerminalManager {
   onTabsChanged?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
 
-  constructor(host: HTMLElement, area: HTMLElement) {
+  constructor(host: HTMLElement, area: HTMLElement, mainEl: HTMLElement) {
+    this.mainEl = mainEl;
     this.host = host;
     this.area = area;
 
@@ -86,7 +92,14 @@ export class TerminalManager {
       addBtn.textContent = "+";
       addBtn.onclick = () => void this.create(side);
 
-      tabsBar.append(tabList, addBtn);
+      const maxBtn = document.createElement("button");
+      maxBtn.className = "term-maximize";
+      maxBtn.title = "Maximize terminal";
+      maxBtn.innerHTML = icon("expand", 14, 1.6);
+      maxBtn.onclick = () => this.toggleMaximize();
+      this.maximizeBtns[side] = maxBtn;
+
+      tabsBar.append(tabList, addBtn, maxBtn);
 
       const body = document.createElement("div");
       body.className = "term-group-body";
@@ -518,6 +531,32 @@ export class TerminalManager {
       } catch {
         /* host not measurable while hidden */
       }
+    }
+  }
+
+  /** Toggle the terminal panel between maximized (fills #main) and normal. */
+  toggleMaximize(): void {
+    this.maximized = !this.maximized;
+    if (this.maximized) {
+      // Save any inline flex set by the hresizer drag — it would override the CSS class.
+      this.savedFlex = this.area.style.flex;
+      this.area.style.flex = '';
+      this.mainEl.classList.add('terminal-maximized');
+    } else {
+      this.mainEl.classList.remove('terminal-maximized');
+      this.area.style.flex = this.savedFlex;
+    }
+    this.renderMaximizeButtons();
+    this.refit();
+  }
+
+  /** Update both groups' maximize button icons to reflect current maximized state. */
+  private renderMaximizeButtons(): void {
+    for (const side of ['left', 'right'] as const) {
+      const btn = this.maximizeBtns[side];
+      if (!btn) continue;
+      btn.title = this.maximized ? 'Minimize terminal' : 'Maximize terminal';
+      btn.innerHTML = icon(this.maximized ? 'compress' : 'expand', 14, 1.6);
     }
   }
 
