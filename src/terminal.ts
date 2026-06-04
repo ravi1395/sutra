@@ -38,10 +38,12 @@ const THEME = {
   selectionBackground: "#264f78",
 };
 
-// Process-lifetime PTY id counter. Never reset (unlike the per-workspace display
-// counter), so a recycled "zsh N" title can't collide with a killed PTY's id and
-// pick up its stale pty-exit event.
-let ptyIdSeq = 0;
+// Random PTY ids survive HMR reloads — the Rust process keeps running across hot
+// reloads, so a counter reset would re-issue the same id and pick up the old
+// session's stale pty-exit event when the HashMap insert drops the old Session.
+function newPtyId(): string {
+  return `pty-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -60,7 +62,7 @@ export class TerminalManager {
   private activeByGroup: Record<TerminalGroupSide, Term | null> = { left: null, right: null };
   private focusedGroup: TerminalGroupSide = "left";
   private mainEl: HTMLElement;
-  private maximized = false;
+  private maximizedGroup: TerminalGroupSide | null = null;
   private savedFlex = '';
   private maximizeBtns: Partial<Record<TerminalGroupSide, HTMLButtonElement>> = {};
   private terms: Term[] = [];
@@ -96,7 +98,7 @@ export class TerminalManager {
       maxBtn.className = "term-maximize";
       maxBtn.title = "Maximize terminal";
       maxBtn.innerHTML = icon("expand", 14, 1.6);
-      maxBtn.onclick = () => this.toggleMaximize();
+      maxBtn.onclick = () => this.toggleMaximize(side);
       this.maximizeBtns[side] = maxBtn;
 
       tabsBar.append(tabList, addBtn, maxBtn);
@@ -174,7 +176,21 @@ export class TerminalManager {
     this.syncGroupHosts();
     const hasRight = this.groups.right.length > 0;
     this.host.classList.toggle("terminal-split", hasRight);
-    this.groupHosts.right.classList.toggle("hidden", !hasRight);
+    // When one group is maximized in split view, keep the other hidden
+    if (this.maximizedGroup && hasRight) {
+      const other = this.maximizedGroup === 'left' ? 'right' : 'left';
+      this.groupHosts[this.maximizedGroup].classList.remove('hidden');
+      this.groupHosts[other].classList.add('hidden');
+    } else {
+      this.groupHosts.right.classList.toggle("hidden", !hasRight);
+    }
+    // If all right tabs closed while right was maximized, reset maximize state
+    if (!hasRight && this.maximizedGroup === 'right') {
+      this.maximizedGroup = null;
+      this.mainEl.classList.remove('terminal-maximized');
+      this.area.style.flex = this.savedFlex;
+      this.renderMaximizeButtons();
+    }
     this.groupHosts.left.classList.toggle("focused", this.focusedGroup === "left");
     this.groupHosts.right.classList.toggle("focused", this.focusedGroup === "right");
   }
@@ -192,7 +208,7 @@ export class TerminalManager {
 
   async create(sideArg?: TerminalGroupSide): Promise<void> {
     const num = ++this.seq; // display number, resets per workspace
-    const id = `pty${++ptyIdSeq}`; // globally unique, never reused
+    const id = newPtyId();
     const term = new Terminal({
       theme: THEME,
       fontFamily: '"SF Mono", Menlo, monospace',
@@ -534,29 +550,50 @@ export class TerminalManager {
     }
   }
 
-  /** Toggle the terminal panel between maximized (fills #main) and normal. */
-  toggleMaximize(): void {
-    this.maximized = !this.maximized;
-    if (this.maximized) {
-      // Save any inline flex set by the hresizer drag — it would override the CSS class.
+  /** Toggle maximize for a specific group; in split view only that group expands. */
+  toggleMaximize(side: TerminalGroupSide): void {
+    const inSplit = this.groups.right.length > 0;
+    const isAlreadyMaximized = this.maximizedGroup === side;
+
+    if (isAlreadyMaximized) {
+      // Restore
+      this.maximizedGroup = null;
+      this.mainEl.classList.remove('terminal-maximized');
+      this.area.style.flex = this.savedFlex;
+      if (inSplit) {
+        // Unhide the other group
+        const other = side === 'left' ? 'right' : 'left';
+        this.groupHosts[other].classList.remove('hidden');
+      }
+    } else {
+      // Maximize this group
+      if (this.maximizedGroup !== null) {
+        // Un-hide previously hidden group before switching
+        const prev = this.maximizedGroup === 'left' ? 'right' : 'left';
+        this.groupHosts[prev].classList.remove('hidden');
+      }
+      this.maximizedGroup = side;
+      // Save inline flex set by drag-resizer before applying CSS class
       this.savedFlex = this.area.style.flex;
       this.area.style.flex = '';
       this.mainEl.classList.add('terminal-maximized');
-    } else {
-      this.mainEl.classList.remove('terminal-maximized');
-      this.area.style.flex = this.savedFlex;
+      if (inSplit) {
+        const other = side === 'left' ? 'right' : 'left';
+        this.groupHosts[other].classList.add('hidden');
+      }
     }
     this.renderMaximizeButtons();
     this.refit();
   }
 
-  /** Update both groups' maximize button icons to reflect current maximized state. */
+  /** Update maximize button icons per group based on current maximized state. */
   private renderMaximizeButtons(): void {
     for (const side of ['left', 'right'] as const) {
       const btn = this.maximizeBtns[side];
       if (!btn) continue;
-      btn.title = this.maximized ? 'Minimize terminal' : 'Maximize terminal';
-      btn.innerHTML = icon(this.maximized ? 'compress' : 'expand', 14, 1.6);
+      const isMax = this.maximizedGroup === side;
+      btn.title = isMax ? 'Restore terminal' : 'Maximize terminal';
+      btn.innerHTML = icon(isMax ? 'compress' : 'expand', 14, 1.6);
     }
   }
 
