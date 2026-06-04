@@ -6,7 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { ptySpawn, ptyWrite, ptyResize, ptyKill, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin } from "./ipc";
+import { ptySpawn, ptyWrite, ptyResize, ptyKill, ptyIsBusy, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin } from "./ipc";
 import { isIntegratedAgentCommand } from "./agent-tracking";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
 import { beginSplitPointerDrag } from "./split-drop";
@@ -336,6 +336,40 @@ export class TerminalManager {
       term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`),
     );
     this.activate(t);
+  }
+
+  /** Strict busy check for one terminal (kernel foreground-pgrp; errors read as idle). */
+  private isBusy(t: Term): Promise<boolean> {
+    return ptyIsBusy(t.id).catch(() => false);
+  }
+
+  /** True when there is no terminal or the active one has a foreground child running. */
+  async isActiveBusy(): Promise<boolean> {
+    return this.active ? this.isBusy(this.active) : true;
+  }
+
+  /**
+   * Run a shell command in a free terminal: reuse the active one when it's idle at a
+   * prompt, otherwise spawn a fresh terminal (e.g. the only terminal has claude live).
+   * Returns the target terminal id so callers can poll its busy state, or null if nothing ran.
+   */
+  async runCommand(command: string): Promise<string | null> {
+    const cmd = command.trim();
+    if (!cmd) return null;
+    if (!this.active || (await this.isBusy(this.active))) {
+      await this.create(); // spawns + activates a new terminal
+    } else {
+      this.activate(this.active);
+    }
+    const target = this.active;
+    if (!target) return null;
+    await ptyWrite(target.id, cmd + "\r").catch(() => {});
+    return target.id;
+  }
+
+  /** Strict busy check for an arbitrary terminal id (used to poll a running automation). */
+  isBusyById(id: string): Promise<boolean> {
+    return ptyIsBusy(id).catch(() => false);
   }
 
   /** Open find overlay with SearchAddon wired to find controls. */

@@ -162,3 +162,18 @@ pub fn pty_kill(
     }
     Ok(())
 }
+
+/// Strict "is this terminal busy" via the foreground process group. portable-pty
+/// spawns the shell as its own session leader, so the shell's pid == its pgid; when
+/// it sits at a prompt that pgid is the tty's foreground group. A running child
+/// (claude, vim, a build) becomes a different foreground group. Busy ⇔ leader != pid.
+/// `process_group_leader()` wraps `tcgetpgrp`; None (e.g. Windows) reads as not-busy.
+#[tauri::command]
+pub fn pty_is_busy(state: State<'_, PtyState>, id: String) -> Result<bool, String> {
+    let map = state.0.lock().unwrap();
+    let session = map.get(&id).ok_or("no such terminal")?;
+    Ok(match (session.master.process_group_leader(), session.pid) {
+        (Some(leader), Some(pid)) => leader as u32 != pid,
+        _ => false,
+    })
+}

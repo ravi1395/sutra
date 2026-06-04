@@ -36,6 +36,17 @@ import { agentBannerText, firstViewableAgentChange, mergeChangedFiles } from "./
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
+import {
+  mountAutomationBar,
+  loadAutomations,
+  saveAutomations,
+  makeAutomation,
+  upsertAutomation,
+  validateName,
+  validateCommand,
+  type Automation,
+  type AutomationBarHandle,
+} from "./automations";
 import { icon } from "./icons";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
@@ -71,6 +82,8 @@ const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
+let automationBar: AutomationBarHandle; // assigned at boot
+let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
 
@@ -235,6 +248,8 @@ async function openWorkspace(dir: string): Promise<void> {
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void gitBar.refresh(dir);
+  automations = await loadAutomations(dir);
+  automationBar.setAutomations(automations);
   startAgentTrackingPoll();
   void pollAgentChanges();
 }
@@ -601,6 +616,128 @@ gitBar = createGitBar($("gitbar"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
+// ---- automations ----
+automationBar = mountAutomationBar($("automations"), {
+  run: (a) => void runAutomation(a),
+  openCreate: () => openCreatePanel(),
+});
+
+// Run an automation in a free terminal; mark the bar "running" until that terminal idles.
+async function runAutomation(a: Automation): Promise<void> {
+  setTerminal(true);
+  const termId = await terminals.runCommand(a.command).catch(() => null);
+  if (!termId) return;
+  automationBar.setRunning(true);
+  const poll = async (): Promise<void> => {
+    const busy = await terminals.isBusyById(termId).catch(() => false);
+    if (busy) window.setTimeout(() => void poll(), 1000);
+    else automationBar.setRunning(false);
+  };
+  window.setTimeout(() => void poll(), 800); // let the command take the foreground first
+}
+
+// Persist a new/edited automation and refresh the picker.
+async function persistAutomation(a: Automation): Promise<void> {
+  if (!currentRoot) return;
+  automations = upsertAutomation(automations, a);
+  try {
+    await saveAutomations(currentRoot, automations);
+  } catch (e) {
+    showErrorBanner(`Could not save automation: ${e}`);
+    return;
+  }
+  automationBar.setAutomations(automations);
+}
+
+// Full-width "New automation" drawer fused under the titlebar (Variant 3).
+function openCreatePanel(): void {
+  if (!currentRoot) {
+    showErrorBanner("Open a folder before saving automations.");
+    return;
+  }
+  document.getElementById("auto-drawer")?.remove();
+
+  const drawer = document.createElement("div");
+  drawer.id = "auto-drawer";
+  drawer.className = "auto-drawer";
+
+  const row = document.createElement("div");
+  row.className = "auto-drawer-row";
+
+  const title = document.createElement("span");
+  title.className = "auto-drawer-title";
+  title.innerHTML = `${icon("plus", 14)}<span>New automation</span>`;
+
+  const nameField = document.createElement("label");
+  nameField.className = "auto-field name";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "Build";
+  nameInput.spellcheck = false;
+  nameField.innerHTML = "<span>Name</span>";
+  nameField.appendChild(nameInput);
+
+  const cmdField = document.createElement("label");
+  cmdField.className = "auto-field cmd";
+  const cmdInput = document.createElement("input");
+  cmdInput.type = "text";
+  cmdInput.placeholder = "npm run tauri build";
+  cmdInput.spellcheck = false;
+  cmdField.innerHTML = "<span>Command</span>";
+  cmdField.appendChild(cmdInput);
+
+  const err = document.createElement("span");
+  err.className = "auto-drawer-err";
+
+  const acts = document.createElement("div");
+  acts.className = "auto-drawer-acts";
+  const cancel = document.createElement("button");
+  cancel.className = "cancel";
+  cancel.textContent = "Cancel";
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "save";
+  saveBtn.textContent = "Save";
+  acts.append(cancel, saveBtn);
+
+  row.append(title, nameField, cmdField, err, acts);
+  drawer.appendChild(row);
+  $("titlebar").after(drawer);
+  requestAnimationFrame(() => terminals.refit());
+  nameInput.focus();
+
+  const close = (): void => {
+    drawer.remove();
+    document.removeEventListener("keydown", onKey);
+    requestAnimationFrame(() => terminals.refit());
+  };
+  function onKey(e: KeyboardEvent): void {
+    if (e.key === "Escape") close();
+  }
+  document.addEventListener("keydown", onKey);
+
+  const submit = (): void => {
+    const nameErr = validateName(nameInput.value, automations);
+    const cmdErr = validateCommand(cmdInput.value);
+    if (nameErr || cmdErr) {
+      err.textContent = nameErr ?? cmdErr ?? "";
+      (nameErr ? nameInput : cmdInput).focus();
+      return;
+    }
+    void persistAutomation(makeAutomation(nameInput.value, cmdInput.value)).then(close);
+  };
+
+  cancel.onclick = close;
+  saveBtn.onclick = submit;
+  for (const input of [nameInput, cmdInput]) {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+  }
+}
+
 // Checkout a branch in place, then re-baseline open tabs against the new HEAD.
 async function switchBranch(branch: string): Promise<void> {
   if (!currentRoot) return;
@@ -635,6 +772,7 @@ palette = mountPalette([
     else editor.openSplit();
   }, shortcut: "⌘\\" },
   { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
+  { id: "new-automation", title: "New Automation…", run: () => openCreatePanel() },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
     search.focus();

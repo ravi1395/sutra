@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "esbuild tests/workspace.test.ts --bundle --platform=node --format=esm --outfile=/tmp/sutra-workspace.test.mjs && node --test /tmp/sutra-workspace.test.mjs",
+    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=/tmp/sutra-tests && node --test /tmp/sutra-tests/*.test.js",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

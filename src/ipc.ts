@@ -101,6 +101,8 @@ export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", 
 export const ptyResize = (id: string, rows: number, cols: number) =>
   invoke<void>("pty_resize", { id, rows, cols });
 export const ptyKill = (id: string) => invoke<void>("pty_kill", { id });
+// Strict busy check: true when a foreground child (claude, build, vim) holds the tty.
+export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });
 
 export interface PtyOutput {
   id: string;
