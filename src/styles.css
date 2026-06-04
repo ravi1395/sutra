@@ -235,6 +235,9 @@ button:hover {
 
 /* ---- automations picker (titlebar, Variant C) ---- */
 #automations {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
 }
