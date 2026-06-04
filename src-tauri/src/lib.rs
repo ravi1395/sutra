@@ -2,6 +2,7 @@ mod agent_tracker;
 mod fs_cmds;
 mod git;
 mod mcp_config;
+mod mcp;
 mod preview_server;
 mod pty;
 mod search;
