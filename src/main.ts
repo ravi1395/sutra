@@ -302,6 +302,8 @@ async function openWorkspace(dir: string): Promise<void> {
   automationBar.setAutomations(automations);
   startAgentTrackingPoll();
   void pollAgentChanges();
+  stopGitPoll();
+  startGitPoll();
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -428,6 +430,38 @@ let pollTimer: number | undefined;
 function startAgentTrackingPoll(): void {
   if (pollTimer !== undefined) return;
   pollTimer = window.setInterval(pollAgentChanges, 1500);
+}
+
+// ---- git-index mtime watcher — refreshes tree badges after terminal git ops ----
+let gitIndexMtime = 0;
+let gitPollTimer: number | undefined;
+
+function startGitPoll(): void {
+  if (gitPollTimer !== undefined) return;
+  gitPollTimer = window.setInterval(() => void pollGitIndex(), 3000);
+}
+
+function stopGitPoll(): void {
+  if (gitPollTimer !== undefined) {
+    clearInterval(gitPollTimer);
+    gitPollTimer = undefined;
+    gitIndexMtime = 0;
+  }
+}
+
+async function pollGitIndex(): Promise<void> {
+  if (!currentRoot) return;
+  const indexPath = `${currentRoot}/.git/index`;
+  try {
+    const mtime = await fileMtime(indexPath);
+    if (gitIndexMtime !== 0 && mtime !== gitIndexMtime) {
+      void tree.refresh();
+      void refreshGitState(currentRoot);
+    }
+    gitIndexMtime = mtime;
+  } catch {
+    // Not a git repo or .git/index absent — ignore.
+  }
 }
 
 async function pollAgentChanges(): Promise<void> {
