@@ -29,6 +29,9 @@ import {
   movePath,
   gitChangedFiles,
   gitCheckout,
+  onPreviewOpen,
+  mcpSetRoot,
+  mcpWriteAgentConfig,
   type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
@@ -77,6 +80,13 @@ terminals.onLinkActivate = (url: string) => {
   browser.show();
   browser.open(url);
 };
+
+// Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
+void onPreviewOpen((p) => {
+  void editor.showAgentPreview(p).catch((e) =>
+    console.error("agent preview failed", e),
+  );
+});
 
 const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
@@ -239,6 +249,10 @@ async function openWorkspace(dir: string): Promise<void> {
   editor.closeTabsOutsideWorkspace(dir);
   editor.setWorkspaceRoot(dir);
   currentRoot = dir;
+  void mcpSetRoot(dir);
+  void mcpWriteAgentConfig(dir).then((warnings) => {
+    for (const w of warnings) console.warn("MCP config:", w);
+  });
   agentStatus = { enabled: false, agentActive: false, changes: [] };
   tree.setActive(editor.active?.path ?? null);
   await tree.setRoot(dir);

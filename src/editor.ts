@@ -371,16 +371,34 @@ export class Pane {
     if (!kind) return;
     this.previewSource = source;
     this.previewCtl = new PreviewController(this.previewEl, kind);
-    this.previewCtl.render(text);
+    void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
   }
 
+  /** Enter preview mode showing agent-supplied content (no source file tab). */
+  async showAgentPreview(
+    kind: import("./preview").PreviewKind,
+    text: string,
+    label: string,
+  ): Promise<void> {
+    const { PreviewController } = await import("./preview");
+    // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
+    this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
+    this.previewCtl = new PreviewController(this.previewEl, kind);
+    void this.previewCtl.render(text);
+    this.hostEl.classList.add("hidden");
+    this.view.dom.style.display = "none";
+    this.welcomeEl.classList.add("hidden");
+    this.previewEl.classList.remove("hidden");
+    this.renderTabs();
+  }
+
   /** Re-render the preview from updated source text (no-op if not previewing). */
   refreshPreview(text: string): void {
-    this.previewCtl?.render(text);
+    void this.previewCtl?.render(text);
   }
 
   /** Leave preview mode, restoring the editor (or welcome if empty). */
@@ -851,6 +869,18 @@ export class EditorManager {
     if (!this.isSplit) this.openSplit("preview");
     const target = this.panes[1];
     await target.showPreview(source, text);
+    this.renderAllTabs();
+  }
+
+  /** Show agent-supplied preview content in the right-hand preview pane. */
+  async showAgentPreview(payload: {
+    kind: "html" | "md" | "diagram";
+    url?: string;
+    source?: string;
+  }): Promise<void> {
+    const text = payload.kind === "html" ? (payload.url ?? "") : (payload.source ?? "");
+    const target = this.ensureRightPane();
+    await target.showAgentPreview(payload.kind, text, "(agent)");
     this.renderAllTabs();
   }
 
