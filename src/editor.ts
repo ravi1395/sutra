@@ -1004,6 +1004,33 @@ export class EditorManager {
     this.renderAllTabs();
   }
 
+  /** Refresh clean open tabs after Git HEAD or disk content changes externally. */
+  async refreshCleanGitBaselines(): Promise<void> {
+    let changed = false;
+    for (const tab of this.tabs) {
+      if (!tab.path || tab.dirty || tab.override != null) continue;
+      const content = await readFile(tab.path).catch(() => null);
+      if (content == null) continue;
+      const gitHead = await gitHeadContent(tab.path).catch(() => null);
+      const mtime = await fileMtime(tab.path).catch(() => tab.lastMtime);
+      if (content !== tab.savedContent) {
+        this.setTabContent(tab, content);
+        tab.savedContent = content;
+        changed = true;
+      }
+      if (gitHead !== tab.gitHead) {
+        tab.gitHead = gitHead;
+        changed = true;
+      }
+      if (mtime !== tab.lastMtime) tab.lastMtime = mtime;
+      tab.dirty = false;
+    }
+    if (!changed) return;
+    this.recomputeDiff();
+    this.renderAllTabs();
+    this.onTabsChanged?.();
+  }
+
   /** Mark a tab clean after a successful save. */
   markSaved(tab: Tab, path: string, name: string, mtime: number | null): void {
     const pane = this.paneOf(tab);

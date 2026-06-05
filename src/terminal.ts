@@ -289,14 +289,6 @@ export class TerminalManager {
         return true; // Let SIGINT through
       }
 
-      // Cmd+V: paste from clipboard.
-      if (isMod && event.key === "v") {
-        void clipboardRead()
-          .then((text) => void ptyWrite(id, text).catch(() => {}))
-          .catch(() => {});
-        return false;
-      }
-
       // Cmd+F: open find overlay.
       if (isMod && event.key === "f") {
         this.openFindOverlay(search);
@@ -343,7 +335,7 @@ export class TerminalManager {
           label: "Paste",
           action: () => {
             void clipboardRead()
-              .then((text) => void ptyWrite(id, text).catch(() => {}))
+              .then((text) => term.paste(text))
               .catch(() => {});
           },
         },

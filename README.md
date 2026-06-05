@@ -67,6 +67,8 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   focused group. Closing the last right-group terminal collapses the right group.
 - **Toggle** the panel with `⌘J` to reclaim editor space; the shell keeps
   running and the session **resumes** on reopen (it is never killed by toggling).
+- Terminal paste follows the native xterm/Edit-menu path so one `⌘V` inserts
+  once, not multiple times.
 - Terminal columns refit while resizing the folder tree or terminal height, and
   the app layout is hard-clipped to the current window bounds.
 - Opening a folder resets terminal sessions so the active shell starts in that

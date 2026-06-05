@@ -273,7 +273,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
     tree.setActive(path);
   }
   void tree.refresh();
-  if (currentRoot) void gitBar.refresh(currentRoot);
+  if (currentRoot) void refreshGitState(currentRoot);
   editor.recomputeDiff();
 }
 
@@ -297,7 +297,7 @@ async function openWorkspace(dir: string): Promise<void> {
   hideBanner();
   await terminals.reset(dir, !termArea.classList.contains("hidden"));
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
-  void gitBar.refresh(dir);
+  void refreshGitState(dir);
   automations = await loadAutomations(dir);
   automationBar.setAutomations(automations);
   startAgentTrackingPoll();
@@ -333,8 +333,12 @@ btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
+  const root = currentRoot;
   try {
-    const gitFiles = await gitChangedFiles(currentRoot);
+    await editor.refreshCleanGitBaselines();
+    if (currentRoot !== root) return;
+    const gitFiles = await gitChangedFiles(root);
+    if (currentRoot !== root) return;
     const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
     diffViewer.renderFileList(files, activePath, (path: string) => {
@@ -666,6 +670,11 @@ gitBar = createGitBar($("gitbar"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
+async function refreshGitState(root: string): Promise<void> {
+  await editor.refreshCleanGitBaselines();
+  await gitBar.refresh(root);
+}
+
 // ---- automations ----
 automationBar = mountAutomationBar($("automations"), {
   run: (a) => void runAutomation(a),
@@ -799,7 +808,7 @@ async function switchBranch(branch: string): Promise<void> {
   }
   await editor.reloadAllFromDisk();
   void tree.refresh();
-  void gitBar.refresh(currentRoot);
+  void refreshGitState(currentRoot);
   editor.recomputeDiff();
   hideBanner();
 }

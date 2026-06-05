@@ -95,7 +95,7 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 `FileTree.makeRow` marks rows with `FILE_DRAG_TYPE`/`TREE_ENTRY_DRAG_TYPE`; editor tabs use `beginSplitPointerDrag` (avoids WKWebView HTML drag routing). Releasing over `#panes` → `EditorManager.moveTabToSide`, collapses empty right pane.
 
 **Terminal:**
-`setTerminal(true)` or `term-add` → `TerminalManager.create` (focused group) → `ipc.ptySpawn` with cwd → Rust `pty_spawn` → background reader emits `pty-output` base64 → `onPtyOutput` → `b64ToBytes` → xterm write. Folder open → `TerminalManager.reset(dir)` kills all PTYs, clears groups, respawns in new cwd. Sidebar, terminal-height, and window resize → `TerminalManager.refit`.
+`setTerminal(true)` or `term-add` → `TerminalManager.create` (focused group) → `ipc.ptySpawn` with cwd → Rust `pty_spawn` → background reader emits `pty-output` base64 → `onPtyOutput` → `b64ToBytes` → xterm write. Keyboard/menu paste stays on xterm's native paste path; context-menu paste calls `term.paste(...)` too, so one shortcut produces one terminal insert. Folder open → `TerminalManager.reset(dir)` kills all PTYs, clears groups, respawns in new cwd. Sidebar, terminal-height, and window resize → `TerminalManager.refit`.
 
 **Terminal split:**
 `TerminalManager.renderTabs` uses `beginSplitPointerDrag`. Releasing over `#terminal-area` → moves live `Term` + xterm DOM into selected group. Right-side drop creates/uses right group.
@@ -141,6 +141,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rus
 - Safe revert compares current bytes with the last observed candidate state; later external edits become manual-review-only.
 - MCP UI-only reads depend on the frontend event loop replying within 2s; blocked UI returns a timeout instead of hanging, and stale pending entries must be removed.
 - Direct command hint closes the first-poll race for plain `claude`/`codex`; aliases/wrappers rely on process command-line ancestry detection.
+- Terminal paste should stay on xterm/native Edit responders; adding a parallel `Mod+V` writer path duplicates input.
 - Terminal split moves existing `Term` + xterm DOM between group hosts; no PTY re-spawn on group move.
 - Folder switch kills all PTYs; next visible terminal starts in opened cwd.
 - `read_file` rejects non-UTF-8 files as `"binary file"`.

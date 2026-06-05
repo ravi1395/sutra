@@ -170,6 +170,12 @@ test("native Edit menu restores standard editing shortcuts", () => {
   }
 });
 
+test("terminal paste relies on xterm native paste path, not a duplicate Mod+V handler", () => {
+  const terminalTs = readFileSync("src/terminal.ts", "utf8");
+
+  assert.doesNotMatch(terminalTs, /event\.key === "v"/);
+});
+
 test("agent changes merge into git file list without duplicates", () => {
   const agent: AgentChange[] = [
     { path: "/repo/new.ts", status: "A", humanTouched: false, binary: false },
