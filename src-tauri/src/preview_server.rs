@@ -19,6 +19,20 @@ struct ErrorBody {
 }
 
 impl PreviewServerState {
+    /// Public: canonicalize `file` under `root`, ensure it is a file, and return
+    /// the local preview-server URL. Shared by the `preview_server_url` command
+    /// and the MCP handlers.
+    pub fn url_for(&self, root: &Path, file: &Path) -> Result<String, String> {
+        let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+        let file = fs::canonicalize(file).map_err(|e| e.to_string())?;
+        if !file.is_file() {
+            return Err("preview path is not a file".to_string());
+        }
+        let url_path = file_url_path(&root, &file)?;
+        let port = self.port_for_root(root)?;
+        Ok(format!("http://127.0.0.1:{port}{url_path}"))
+    }
+
     fn port_for_root(&self, root: PathBuf) -> Result<u16, String> {
         let key = root.to_string_lossy().into_owned();
         let mut servers = self.servers.lock().map_err(|e| e.to_string())?;
@@ -43,14 +57,7 @@ pub fn preview_server_url(
     root: String,
     path: String,
 ) -> Result<String, String> {
-    let root = fs::canonicalize(&root).map_err(|e| e.to_string())?;
-    let file = fs::canonicalize(&path).map_err(|e| e.to_string())?;
-    if !file.is_file() {
-        return Err("preview path is not a file".to_string());
-    }
-    let url_path = file_url_path(&root, &file)?;
-    let port = state.port_for_root(root)?;
-    Ok(format!("http://127.0.0.1:{port}{url_path}"))
+    state.url_for(Path::new(&root), Path::new(&path))
 }
 
 fn serve(listener: TcpListener, root: PathBuf) {
@@ -246,6 +253,18 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_for_builds_localhost_url() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("page.html");
+        fs::write(&file, "<p>hi</p>").unwrap();
+        let state = PreviewServerState::default();
+        let url = state.url_for(dir.path(), &file).unwrap();
+        assert!(url.starts_with("http://127.0.0.1:"));
+        assert!(url.ends_with("/page.html"));
+    }
 
     #[test]
     fn file_url_path_encodes_nested_relative_paths() {
