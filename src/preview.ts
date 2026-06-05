@@ -1,7 +1,7 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
-export type PreviewKind = "md" | "html";
+export type PreviewKind = "md" | "html" | "diagram";
 
 export function previewKind(name: string): PreviewKind | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -55,19 +55,27 @@ export class PreviewController {
     private kind: PreviewKind,
   ) {}
 
-  render(text: string): void {
+  async render(text: string): Promise<void> {
     if (this.kind === "md") {
       const raw = marked.parse(text) as string;
       const safe = DOMPurify.sanitize(raw);
       this.el.innerHTML = `<style>${MD_STYLE}</style><div class="sutra-md-preview">${safe}</div>`;
-    } else {
-      if (!this.frame) {
-        this.el.innerHTML = "";
-        this.frame = document.createElement("iframe");
-        this.frame.style.cssText = "width:100%;height:100%;border:none;";
-        this.el.appendChild(this.frame);
-      }
-      this.frame.src = text;
+      return;
     }
+    if (this.kind === "diagram") {
+      const mermaid = (await import("mermaid")).default;
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
+      const { svg } = await mermaid.render("sutra-diagram", text);
+      this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
+      return;
+    }
+    // html: text is a preview-server URL
+    if (!this.frame) {
+      this.el.innerHTML = "";
+      this.frame = document.createElement("iframe");
+      this.frame.style.cssText = "width:100%;height:100%;border:none;";
+      this.el.appendChild(this.frame);
+    }
+    this.frame.src = text;
   }
 }
