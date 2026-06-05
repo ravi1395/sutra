@@ -464,9 +464,10 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-function bannerBtn(text: string, fn: () => void): HTMLButtonElement {
+function bannerBtn(text: string, fn: () => void, tone = "secondary"): HTMLButtonElement {
   const b = document.createElement("button");
   b.textContent = text;
+  b.className = `ai-banner-btn ${tone}`;
   b.onclick = fn;
   return b;
 }
@@ -474,15 +475,28 @@ function bannerBtn(text: string, fn: () => void): HTMLButtonElement {
 function showAgentBanner(changes: AgentChange[]): void {
   banner.innerHTML = "";
   banner.dataset.kind = "agent";
-  const span = document.createElement("span");
-  span.textContent = agentBannerText(changes);
-  banner.append(
-    span,
+  const mark = document.createElement("span");
+  mark.className = "ai-banner-mark";
+  mark.innerHTML = icon("trackAI", 16, 1.7);
+
+  const copy = document.createElement("span");
+  copy.className = "ai-banner-copy";
+  const kicker = document.createElement("span");
+  kicker.className = "ai-banner-kicker";
+  kicker.textContent = "Agent review";
+  const message = document.createElement("span");
+  message.className = "ai-banner-message";
+  message.textContent = agentBannerText(changes);
+  copy.append(kicker, message);
+
+  const actions = document.createElement("span");
+  actions.className = "ai-banner-actions";
+  actions.append(
     bannerBtn("View", () => {
       const change = firstViewableAgentChange(changes);
       if (change) void viewChangedPath(change.path);
-    }),
-    bannerBtn("Keep AI changes", () => {
+    }, "primary"),
+    bannerBtn("Keep", () => {
       if (!currentRoot) return;
       void agentTrackingAccept(currentRoot).then((status) => {
         agentStatus = status;
@@ -490,7 +504,7 @@ function showAgentBanner(changes: AgentChange[]): void {
         void refreshDiffFileList();
       });
     }),
-    bannerBtn("Revert agent changes", () => {
+    bannerBtn("Revert", () => {
       if (!currentRoot) return;
       void agentTrackingRevert(currentRoot).then(async (result) => {
         await tree.refresh();
@@ -504,7 +518,12 @@ function showAgentBanner(changes: AgentChange[]): void {
           alert(`${unsafe}${errors}`.trim());
         }
       }).catch((e) => alert(`Revert failed: ${e}`));
-    }),
+    }, "danger"),
+  );
+  banner.append(
+    mark,
+    copy,
+    actions,
   );
   banner.classList.remove("hidden");
 }

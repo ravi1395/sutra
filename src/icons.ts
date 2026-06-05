@@ -16,6 +16,9 @@ export type IconName =
   | "refresh"
   | "play"
   | "plus"
+  | "arrowDown"
+  | "arrowUp"
+  | "x"
   | "expand"
   | "compress";
 
@@ -36,6 +39,9 @@ const paths: Record<IconName, string> = {
   refresh: '<path d="M4 12a8 8 0 0 1 14.93-4H15m4 0V4"/><path d="M20 12a8 8 0 0 1-14.93 4H9m-4 0v4"/>',
   play: '<path d="M8 5v14l11-7z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  arrowDown: '<path d="M12 5v14M7 14l5 5 5-5"/>',
+  arrowUp: '<path d="M12 19V5M7 10l5-5 5 5"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
 };

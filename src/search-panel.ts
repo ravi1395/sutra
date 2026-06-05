@@ -11,6 +11,7 @@ import {
   selectMatches,
   closeSearchPanel,
 } from "@codemirror/search";
+import { icon } from "./icons";
 
 const MAX_MATCHES = 1000;
 
@@ -18,6 +19,7 @@ function btn(text: string, title: string, cls = "sf-btn"): HTMLButtonElement {
   const b = document.createElement("button");
   b.textContent = text;
   b.title = title;
+  b.ariaLabel = title;
   b.className = cls;
   b.type = "button";
   return b;
@@ -111,10 +113,13 @@ export function buildSearchPanel(view: EditorView): Panel {
   replaceInput.spellcheck = false;
   replaceInput.className = "sf-input";
 
-  const nextBtn = btn("↓", "Next match (Enter)");
-  const prevBtn = btn("↑", "Previous match (Shift-Enter)");
+  const nextBtn = btn("", "Next match (Enter)", "sf-btn sf-icon-btn");
+  nextBtn.innerHTML = icon("arrowDown", 14, 1.9);
+  const prevBtn = btn("", "Previous match (Shift-Enter)", "sf-btn sf-icon-btn");
+  prevBtn.innerHTML = icon("arrowUp", 14, 1.9);
   const allBtn = btn("All", "Select all matches");
-  const closeBtn = btn("×", "Close (Escape)", "sf-btn sf-close");
+  const closeBtn = btn("", "Close (Escape)", "sf-btn sf-close sf-icon-btn");
+  closeBtn.innerHTML = icon("x", 14, 2);
   const replaceBtn = btn("Replace", "Replace next match");
   const replaceAllBtn = btn("Replace All", "Replace all matches");
 
@@ -160,10 +165,16 @@ export function buildSearchPanel(view: EditorView): Panel {
 
   const findRow = document.createElement("div");
   findRow.className = "sf-row";
+  const navGroup = document.createElement("div");
+  navGroup.className = "sf-group";
+  navGroup.append(nextBtn, prevBtn);
+  const modeGroup = document.createElement("div");
+  modeGroup.className = "sf-group";
+  modeGroup.append(caseBtn, reBtn, wordBtn);
   const findInputWrap = document.createElement("div");
   findInputWrap.className = "sf-input-wrap";
   findInputWrap.append(findInput, countEl);
-  findRow.append(findInputWrap, nextBtn, prevBtn, allBtn, caseBtn, reBtn, wordBtn, closeBtn);
+  findRow.append(findInputWrap, navGroup, allBtn, modeGroup, closeBtn);
 
   const replaceRow = document.createElement("div");
   replaceRow.className = "sf-row";

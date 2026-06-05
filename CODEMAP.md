@@ -35,6 +35,7 @@ Main boot flow:
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, language highlighting, dirty state, Git HEAD diff gutter, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk` |
 | `src/diff.ts` | Line diff classification, hunk viewer, changed-file list, deleted/binary status rendering | `computeLineDiff`, `hunkIndexAtLine`, `DiffViewer.render`, `DiffViewer.renderStatus`, `DiffViewer.renderFileList` |
 | `src/conflict.ts` | Merge conflict resolution UI — parses conflict markers in editor buffer, provides accept-ours/accept-theirs actions | conflict resolution classes and helpers |
+| `src/automations.ts` | Named shell automations — CRUD for workspace `.sutra/automations.json`, bar UI, run-state tracking | `mountAutomationBar`, `loadAutomations`, `saveAutomations`, `upsertAutomation`, `removeAutomation`, `makeAutomation`, `validateCommand`, `validateName`, `parseAutomationsFile`, `serializeAutomations`, `renderBar`, `setRunning`, `automationsPath` |
 | `src/gitbar.ts` | Git status bar — branch name, ahead/behind counts, changed-files list, commit dialog; driven by periodic `git_status` + `git_branch` calls | `mountGitBar`, `refreshGitBar`, `closeDropdown` |
 | `src/browser.ts` | Embedded browser pane (webview panel for external URLs or HTML preview navigation) | `BrowserPane` (lines 3–96) |
 | `src/tree.ts` | Lazy folder tree rendering, active-file highlighting, MCP reveal expansion, file drag source, tree move payloads, file-type badge metadata | `FileTree`, `setRoot`, `setActive`, `reveal`, `render`, `renderDir`, `makeRow`, `refresh`, `fileTypeMeta` (6 callers), `cssEscape` |
@@ -59,8 +60,9 @@ Main boot flow:
 | `src-tauri/src/agent_tracker.rs` | Git-only integrated-agent session detection, git-ignore-aware byte snapshots, candidate changes, Sutra mutation suppression, safe revert | `AgentTrackerState`, `agent_tracking_begin`, `agent_tracking_poll`, `agent_tracking_accept`, `agent_tracking_revert`, `compare_snapshots`, `has_agent_descendant` |
 | `src-tauri/src/main.rs` | Native binary entrypoint | `main` |
 | `src-tauri/src/fs_cmds.rs` | Directory listing, compact folders, text file read/write, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
-| `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo` |
+| `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
 | `src-tauri/src/mcp.rs` | In-process MCP server exposing display, drive, and read tools plus agent config writers and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
+| `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON and TOML patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `ensure_gitignore` |
 | `src-tauri/src/preview_server.rs` | Session-local static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
 | `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
 | `src-tauri/src/search.rs` | Project-wide ripgrep-style file search | `search_dir`; structs: `SearchMatch`, `SearchResult` |
@@ -133,6 +135,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rus
 
 ## Risks
 
+- `agent_tracker.rs::TrackingSession`, `Tracker.reconcile_session`, `session_status`, `inactive_changes_become_the_next_agent_sessions_baseline` — **risk 0.7, security-relevant** (graph). These four sites control when an agent session transitions, which files become candidates, and what the safe-revert baseline is. Errors here silently corrupt revert history or miss agent changes.
 - `pty.rs::Session` — **risk 0.7, security-relevant, untested** (graph). PTY output is raw bytes base64-encoded; xterm reassembles UTF-8 after decode. Never spawn/kill a PTY during split drag.
 - `computeLineDiff` / `revertHunk` — line/newline-sensitive; small off-by-one causes silent wrong reverts.
 - `EditorManager` stores one live `EditorView`; inactive tabs depend on `EditorState` checkpointing during activation.
@@ -150,6 +153,8 @@ Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rus
 - `list_dir` compacts single-directory chains; tree labels may not equal final filesystem basename.
 - `vite.config.ts` requires port `1420` with `strictPort: true`.
 - `main.ts::$` called by 39 sites — DOM query helper; behavior changes affect entire frontend.
+- `editor.ts::EditorManager.renderAllTabs` — **risk 0.6** (graph). Rebuilds all tab DOM; side effects on inactive `EditorState` checkpoints; test before touching tab lifecycle.
+- `mcp.rs::SutraMcp.active_root` — **risk 0.6** (graph). Root used by all path-validation in drive tools; changing it mid-session lets drive tools escape the previous root scope.
 
 ## When Updating This Map
 

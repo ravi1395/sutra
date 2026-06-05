@@ -955,6 +955,7 @@ button:hover {
 }
 .pane-host .cm-editor {
   height: 100%;
+  position: relative; /* anchor for the floating in-file search panel */
 }
 /* keep code mono even though the chrome (root) font is now sans */
 .pane-host .cm-editor,
@@ -1282,84 +1283,137 @@ button:hover {
 .term-maximize:hover {
   color: var(--em);
 }
-/* ---- in-file search panel (VS Code style) ---- */
+/* ---- in-file search panel ---- */
+/* Float the panel over the editor's top-right instead of docking full-width.
+   CM6 mounts panels as flex children of .cm-editor that reserve layout height;
+   absolute-positioning lifts it out of flow so the editor text never shifts. */
+.pane-host .cm-editor > .cm-panels {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  left: auto;
+  bottom: auto;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  z-index: 12;
+  border: 0;
+  background: transparent;
+}
 .sf-panel {
-  background: #252526;
-  border-top: 1px solid #3c3c3c;
-  padding: 4px 8px;
+  background:
+    linear-gradient(180deg, rgba(52, 211, 153, 0.06), transparent 40%),
+    var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow:
+    0 14px 36px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 color-mix(in srgb, var(--em) 16%, transparent);
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 6px;
   user-select: none;
+  overflow-x: auto;
 }
 .sf-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: min-content;
 }
 .sf-input-wrap {
   position: relative;
   display: flex;
   align-items: center;
+  min-width: 180px;
+}
+.sf-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
 }
 .sf-input {
-  background: #1e1e1e;
-  border: 1px solid #3c3c3c;
-  border-radius: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   color: var(--fg);
   font-size: 12px;
-  font-family: inherit;
-  padding: 2px 52px 2px 6px;
-  height: 22px;
-  width: 220px;
+  font-family: var(--mono);
+  padding: 4px 70px 4px 8px;
+  height: 28px;
+  width: clamp(220px, 28vw, 320px);
   outline: none;
   box-sizing: border-box;
 }
 .sf-input:focus {
-  border-color: #007fd4;
-  box-shadow: 0 0 0 1px #007fd440;
+  border-color: var(--em-dim);
+  box-shadow: 0 0 0 2px var(--em-wash);
 }
 .sf-input.sf-error {
-  border-color: #f44747;
+  border-color: var(--deleted);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--deleted) 18%, transparent);
 }
 #sf-count {
   position: absolute;
-  right: 6px;
+  right: 8px;
   font-size: 10px;
-  color: #858585;
+  color: var(--fg-dim);
   white-space: nowrap;
   pointer-events: none;
+  font-family: var(--ui);
 }
 .sf-btn {
-  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-2);
   border: 1px solid transparent;
-  border-radius: 3px;
-  color: #cccccc;
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
   font-size: 11px;
-  font-family: inherit;
-  padding: 2px 6px;
-  height: 22px;
+  font-family: var(--ui);
+  font-weight: 600;
+  padding: 0 8px;
+  height: 24px;
+  min-width: 28px;
   cursor: pointer;
   white-space: nowrap;
   outline: none;
 }
+.sf-icon-btn {
+  width: 24px;
+  min-width: 24px;
+  padding: 0;
+}
 .sf-btn:hover {
-  background: #2a2d2e;
-  border-color: #3c3c3c;
+  background: var(--bg-3);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.sf-panel > .sf-row > .sf-btn:not(.sf-close) {
+  background: var(--bg-1);
+  border-color: var(--line-soft);
+}
+.sf-group .sf-btn {
+  background: transparent;
+  border-color: transparent;
 }
 .sf-btn:active {
-  background: #37373d;
+  background: color-mix(in srgb, var(--em) 12%, var(--bg-3));
 }
 .sf-toggle.active {
-  background: #0e639c;
-  border-color: #1177bb;
-  color: #ffffff;
+  background: var(--em-wash);
+  border-color: color-mix(in srgb, var(--em) 42%, var(--line));
+  color: var(--em);
 }
 .sf-close {
-  font-size: 14px;
-  padding: 0 5px;
   margin-left: auto;
-  color: #858585;
+  color: var(--fg-faint);
+  background: transparent;
 }
 .sf-close:hover {
   color: var(--fg);
@@ -1370,17 +1424,96 @@ button:hover {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
-  background: #4d3b00;
-  border-top: 1px solid #6b5300;
-  color: #ffe9a8;
+  gap: 9px;
+  padding: 8px 10px;
+  background:
+    linear-gradient(90deg, rgba(227, 179, 65, 0.14), transparent 42%),
+    var(--bg-2);
+  border-top: 1px solid color-mix(in srgb, var(--added) 22%, var(--line));
+  box-shadow:
+    inset 3px 0 0 var(--added),
+    inset 0 1px 0 color-mix(in srgb, var(--added) 20%, transparent);
+  color: var(--fg);
   font-size: 12px;
+  min-width: 0;
 }
-#ai-banner button {
-  background: #6b5300;
-  border-color: #806400;
-  color: #fff;
+.ai-banner-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  height: 26px;
+  border: 1px solid color-mix(in srgb, var(--added) 38%, var(--line));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--added) 13%, transparent);
+  color: var(--added);
+}
+.ai-banner-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.ai-banner-kicker {
+  color: var(--added);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.ai-banner-message {
+  color: var(--fg);
+  font-weight: 560;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+#ai-banner .ai-banner-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  border-color: var(--line);
+  color: var(--fg);
+  font-weight: 650;
+}
+#ai-banner .ai-banner-btn:hover {
+  border-color: color-mix(in srgb, var(--added) 50%, var(--line));
+}
+#ai-banner .ai-banner-btn.primary {
+  background: color-mix(in srgb, var(--added) 15%, transparent);
+  border-color: color-mix(in srgb, var(--added) 45%, var(--line));
+  color: var(--added);
+}
+#ai-banner .ai-banner-btn.danger:hover {
+  border-color: color-mix(in srgb, var(--deleted) 55%, var(--line));
+  color: #ffd6d3;
+}
+@media (max-width: 720px) {
+  .ai-banner-copy {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .ai-banner-actions {
+    gap: 3px;
+  }
+  .ai-banner-message {
+    width: 100%;
+  }
+  #ai-banner .ai-banner-btn {
+    padding: 0 8px;
+  }
 }
 
 /* Git status badges in file tree */

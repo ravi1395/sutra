@@ -111,9 +111,9 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   under an integrated terminal. Changed files need not be open in the editor.
 - **View** opens the selected text file and compares latest disk content with
   Git `HEAD`. Deleted and binary files show a clear non-editor review status.
-- **Keep AI changes** clears the notification; changes remain visible against
+- **Keep** clears the notification; changes remain visible against
   Git `HEAD` until committed.
-- **Revert agent changes** restores safe agent-only changes. Files edited in
+- **Revert** restores safe agent-only changes. Files edited in
   Sutra, or changed externally after the last agent observation, are preserved
   and require manual/per-hunk review.
 - Non-Git workspaces and Claude/Codex processes launched outside Sutra are not
