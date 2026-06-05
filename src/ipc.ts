@@ -95,6 +95,43 @@ export const agentTrackingRevert = (root: string) =>
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
 
+export const mcpServerUrl = () => invoke<string>("mcp_server_url");
+export const mcpSetRoot = (root: string) => invoke<void>("mcp_set_root", { root });
+export const mcpWriteAgentConfig = (root: string) =>
+  invoke<string[]>("mcp_write_agent_config", { root });
+
+export type PreviewOpenKind = "html" | "md" | "diagram";
+export interface PreviewOpenPayload {
+  kind: PreviewOpenKind;
+  url?: string; // present for file-backed (html)
+  source?: string; // present for inline (md, diagram)
+}
+export const onPreviewOpen = (
+  cb: (p: PreviewOpenPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<PreviewOpenPayload>("sutra://preview/open", (e) => cb(e.payload));
+
+export interface DrivePayload {
+  action: "openFile" | "revealTree" | "showDiff" | "openTerminal";
+  path?: string;
+  line?: number;
+  cwd?: string;
+}
+/** Listen for MCP drive commands emitted by the Rust server. */
+export const onDrive = (cb: (p: DrivePayload) => void): Promise<UnlistenFn> =>
+  listen<DrivePayload>("sutra://drive", (e) => cb(e.payload));
+
+export interface UiRequest {
+  id: number;
+  query: "openTabs" | "selection";
+}
+/** Listen for MCP UI-state read requests from Rust. */
+export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>
+  listen<UiRequest>("sutra://ui/request", (e) => cb(e.payload));
+/** Reply to a pending MCP UI-state request. */
+export const mcpUiReply = (id: number, payload: unknown) =>
+  invoke<void>("mcp_ui_reply", { id, payload });
+
 export const ptySpawn = (id: string, cwd: string | null, rows: number, cols: number) =>
   invoke<void>("pty_spawn", { id, cwd, rows, cols });
 export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", { id, data });

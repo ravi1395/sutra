@@ -41,6 +41,21 @@ export function fileTypeMeta(name: string, isDir = false): FileTypeMeta {
   return fileTypeByExt[ext] ?? { icon: "TXT", className: "type-file" };
 }
 
+/** Return absolute path prefixes needed to expand ancestors for `path`. */
+export function ancestorPathsForReveal(path: string): string[] {
+  const out: string[] = [];
+  let prefix = "";
+  for (const seg of path.split("/")) {
+    if (!seg) {
+      prefix = "/";
+      continue;
+    }
+    prefix = prefix === "/" || prefix === "" ? `/${seg}` : `${prefix}/${seg}`;
+    out.push(prefix);
+  }
+  return out;
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 
@@ -108,6 +123,16 @@ export class FileTree {
     this.el.innerHTML = "";
     if (!this.root) return;
     await this.renderDir(this.root, 0, this.el);
+  }
+
+  /** Expand every ancestor of `path`, activate it, and re-render the tree. */
+  async reveal(path: string): Promise<void> {
+    if (!this.root) return;
+    for (const ancestor of ancestorPathsForReveal(path)) {
+      this.expanded.add(ancestor);
+    }
+    await this.render();
+    this.setActive(path);
   }
 
   private async renderDir(path: string, depth: number, container: HTMLElement): Promise<void> {

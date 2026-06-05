@@ -29,6 +29,12 @@ import {
   movePath,
   gitChangedFiles,
   gitCheckout,
+  onPreviewOpen,
+  onDrive,
+  onUiRequest,
+  mcpUiReply,
+  mcpSetRoot,
+  mcpWriteAgentConfig,
   type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
@@ -77,6 +83,46 @@ terminals.onLinkActivate = (url: string) => {
   browser.show();
   browser.open(url);
 };
+
+// Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
+void onPreviewOpen((p) => {
+  void editor.showAgentPreview(p).catch((e) =>
+    console.error("agent preview failed", e),
+  );
+});
+
+// Subscribe to MCP drive events emitted by the Rust MCP server tools.
+void onDrive((d) => {
+  switch (d.action) {
+    case "openFile":
+      if (d.path) void editor.openFile(d.path, d.line);
+      break;
+    case "revealTree":
+      if (d.path) void tree.reveal(d.path);
+      break;
+    case "showDiff":
+      if (d.path) {
+        const path = d.path;
+        void editor.openFile(path).then(() => {
+          const line = editor.firstHunkLine(path);
+          if (line != null) editor.revealLine(line);
+        });
+      }
+      break;
+    case "openTerminal":
+      void terminals.create(undefined, d.cwd);
+      break;
+  }
+});
+
+// Subscribe to MCP UI-state requests and reply through the typed IPC command.
+void onUiRequest((r) => {
+  const payload =
+    r.query === "openTabs"
+      ? { tabs: editor.getOpenTabs() }
+      : editor.getSelection();
+  void mcpUiReply(r.id, payload);
+});
 
 const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
@@ -239,6 +285,10 @@ async function openWorkspace(dir: string): Promise<void> {
   editor.closeTabsOutsideWorkspace(dir);
   editor.setWorkspaceRoot(dir);
   currentRoot = dir;
+  void mcpSetRoot(dir);
+  void mcpWriteAgentConfig(dir).then((warnings) => {
+    for (const w of warnings) console.warn("MCP config:", w);
+  });
   agentStatus = { enabled: false, agentActive: false, changes: [] };
   tree.setActive(editor.active?.path ?? null);
   await tree.setRoot(dir);

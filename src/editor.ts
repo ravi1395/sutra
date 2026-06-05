@@ -60,6 +60,15 @@ export interface Tab {
   hunks: Hunk[];
 }
 
+/** Return the first changed hunk line for `path` as 1-based, or null. */
+export function firstHunkLineFromTabs(
+  tabs: readonly { path: string | null; hunks: readonly { newFrom: number }[] }[],
+  path: string,
+): number | null {
+  const first = tabs.find((tab) => tab.path === path)?.hunks[0];
+  return first ? first.newFrom + 1 : null;
+}
+
 const setDiffMarks = StateEffect.define<readonly LineMark[]>();
 
 class DiffMarker extends GutterMarker {
@@ -371,16 +380,34 @@ export class Pane {
     if (!kind) return;
     this.previewSource = source;
     this.previewCtl = new PreviewController(this.previewEl, kind);
-    this.previewCtl.render(text);
+    void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
   }
 
+  /** Enter preview mode showing agent-supplied content (no source file tab). */
+  async showAgentPreview(
+    kind: import("./preview").PreviewKind,
+    text: string,
+    label: string,
+  ): Promise<void> {
+    const { PreviewController } = await import("./preview");
+    // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
+    this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
+    this.previewCtl = new PreviewController(this.previewEl, kind);
+    void this.previewCtl.render(text);
+    this.hostEl.classList.add("hidden");
+    this.view.dom.style.display = "none";
+    this.welcomeEl.classList.add("hidden");
+    this.previewEl.classList.remove("hidden");
+    this.renderTabs();
+  }
+
   /** Re-render the preview from updated source text (no-op if not previewing). */
   refreshPreview(text: string): void {
-    this.previewCtl?.render(text);
+    void this.previewCtl?.render(text);
   }
 
   /** Leave preview mode, restoring the editor (or welcome if empty). */
@@ -572,6 +599,33 @@ export class EditorManager {
   setContent(text: string): void {
     this.focused.setContent(text);
   }
+  /** All open tabs across panes with MCP-facing active and dirty state. */
+  getOpenTabs(): { path: string | null; name: string; active: boolean; dirty: boolean }[] {
+    const out: { path: string | null; name: string; active: boolean; dirty: boolean }[] = [];
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        out.push({ path: tab.path, name: tab.name, active: pane.active === tab, dirty: tab.dirty });
+      }
+    }
+    return out;
+  }
+
+  /** Current focused editor selection with file path, text, and 1-based line. */
+  getSelection(): { path: string | null; text: string; line: number } {
+    const view = this.focused.view;
+    const sel = view.state.selection.main;
+    return {
+      path: this.focused.active?.path ?? null,
+      text: view.state.sliceDoc(sel.from, sel.to),
+      line: view.state.doc.lineAt(sel.head).number,
+    };
+  }
+
+  /** First changed git hunk line for `path`, as a 1-based editor line. */
+  firstHunkLine(path: string): number | null {
+    return firstHunkLineFromTabs(this.tabs, path);
+  }
+
   tabByPath(path: string): Tab | undefined {
     for (const p of this.panes) {
       const t = p.tabByPath(path);
@@ -851,6 +905,18 @@ export class EditorManager {
     if (!this.isSplit) this.openSplit("preview");
     const target = this.panes[1];
     await target.showPreview(source, text);
+    this.renderAllTabs();
+  }
+
+  /** Show agent-supplied preview content in the right-hand preview pane. */
+  async showAgentPreview(payload: {
+    kind: "html" | "md" | "diagram";
+    url?: string;
+    source?: string;
+  }): Promise<void> {
+    const text = payload.kind === "html" ? (payload.url ?? "") : (payload.source ?? "");
+    const target = this.ensureRightPane();
+    await target.showAgentPreview(payload.kind, text, "(agent)");
     this.renderAllTabs();
   }
 

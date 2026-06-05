@@ -1,6 +1,10 @@
+use tauri::Manager;
+
 mod agent_tracker;
 mod fs_cmds;
 mod git;
+mod mcp;
+mod mcp_config;
 mod preview_server;
 mod pty;
 mod search;
@@ -28,6 +32,19 @@ pub fn run() {
         .manage(agent_tracker::AgentTrackerState::default())
         .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
+        .manage(mcp::McpState::default())
+        .setup(|app| {
+            let state = app.state::<mcp::McpState>();
+            let port = mcp::start(
+                app.handle().clone(),
+                state.root.clone(),
+                state.pending.clone(),
+                state.next_id.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            *state.port.lock().unwrap() = Some(port);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             agent_tracker::agent_tracking_begin,
             agent_tracker::agent_tracking_poll,
@@ -50,6 +67,10 @@ pub fn run() {
             git::git_branches,
             git::git_checkout,
             preview_server::preview_server_url,
+            mcp::mcp_server_url,
+            mcp::mcp_set_root,
+            mcp::mcp_write_agent_config,
+            mcp::mcp_ui_reply,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
