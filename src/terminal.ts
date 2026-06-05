@@ -206,7 +206,8 @@ export class TerminalManager {
     if (this.focusedGroup === "right" && this.groups.right.length === 0) this.focusedGroup = "left";
   }
 
-  async create(sideArg?: TerminalGroupSide): Promise<void> {
+  /** Create and activate a terminal in the requested group, optionally overriding cwd. */
+  async create(sideArg?: TerminalGroupSide, cwd?: string): Promise<void> {
     const num = ++this.seq; // display number, resets per workspace
     const id = newPtyId();
     const term = new Terminal({
@@ -361,7 +362,7 @@ export class TerminalManager {
     // fit() can report 0 before first paint; fall back to a sane size.
     const rows = term.rows || 24;
     const cols = term.cols || 80;
-    await ptySpawn(id, this.cwd, rows, cols).catch((e) =>
+    await ptySpawn(id, cwd ?? this.cwd, rows, cols).catch((e) =>
       term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`),
     );
     this.activate(t);

@@ -30,6 +30,9 @@ import {
   gitChangedFiles,
   gitCheckout,
   onPreviewOpen,
+  onDrive,
+  onUiRequest,
+  mcpUiReply,
   mcpSetRoot,
   mcpWriteAgentConfig,
   type AgentChange,
@@ -86,6 +89,39 @@ void onPreviewOpen((p) => {
   void editor.showAgentPreview(p).catch((e) =>
     console.error("agent preview failed", e),
   );
+});
+
+// Subscribe to MCP drive events emitted by the Rust MCP server tools.
+void onDrive((d) => {
+  switch (d.action) {
+    case "openFile":
+      if (d.path) void editor.openFile(d.path, d.line);
+      break;
+    case "revealTree":
+      if (d.path) void tree.reveal(d.path);
+      break;
+    case "showDiff":
+      if (d.path) {
+        const path = d.path;
+        void editor.openFile(path).then(() => {
+          const line = editor.firstHunkLine(path);
+          if (line != null) editor.revealLine(line);
+        });
+      }
+      break;
+    case "openTerminal":
+      void terminals.create(undefined, d.cwd);
+      break;
+  }
+});
+
+// Subscribe to MCP UI-state requests and reply through the typed IPC command.
+void onUiRequest((r) => {
+  const payload =
+    r.query === "openTabs"
+      ? { tabs: editor.getOpenTabs() }
+      : editor.getSelection();
+  void mcpUiReply(r.id, payload);
 });
 
 const banner = $("ai-banner");

@@ -60,6 +60,15 @@ export interface Tab {
   hunks: Hunk[];
 }
 
+/** Return the first changed hunk line for `path` as 1-based, or null. */
+export function firstHunkLineFromTabs(
+  tabs: readonly { path: string | null; hunks: readonly { newFrom: number }[] }[],
+  path: string,
+): number | null {
+  const first = tabs.find((tab) => tab.path === path)?.hunks[0];
+  return first ? first.newFrom + 1 : null;
+}
+
 const setDiffMarks = StateEffect.define<readonly LineMark[]>();
 
 class DiffMarker extends GutterMarker {
@@ -590,6 +599,33 @@ export class EditorManager {
   setContent(text: string): void {
     this.focused.setContent(text);
   }
+  /** All open tabs across panes with MCP-facing active and dirty state. */
+  getOpenTabs(): { path: string | null; name: string; active: boolean; dirty: boolean }[] {
+    const out: { path: string | null; name: string; active: boolean; dirty: boolean }[] = [];
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        out.push({ path: tab.path, name: tab.name, active: pane.active === tab, dirty: tab.dirty });
+      }
+    }
+    return out;
+  }
+
+  /** Current focused editor selection with file path, text, and 1-based line. */
+  getSelection(): { path: string | null; text: string; line: number } {
+    const view = this.focused.view;
+    const sel = view.state.selection.main;
+    return {
+      path: this.focused.active?.path ?? null,
+      text: view.state.sliceDoc(sel.from, sel.to),
+      line: view.state.doc.lineAt(sel.head).number,
+    };
+  }
+
+  /** First changed git hunk line for `path`, as a 1-based editor line. */
+  firstHunkLine(path: string): number | null {
+    return firstHunkLineFromTabs(this.tabs, path);
+  }
+
   tabByPath(path: string): Tab | undefined {
     for (const p of this.panes) {
       const t = p.tabByPath(path);

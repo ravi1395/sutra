@@ -31,9 +31,8 @@ ignore = "0.4"
 regex = "1"
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8"
-tokio = { version = "1", features = ["rt", "net"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
-

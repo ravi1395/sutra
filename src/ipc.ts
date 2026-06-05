@@ -111,6 +111,27 @@ export const onPreviewOpen = (
 ): Promise<UnlistenFn> =>
   listen<PreviewOpenPayload>("sutra://preview/open", (e) => cb(e.payload));
 
+export interface DrivePayload {
+  action: "openFile" | "revealTree" | "showDiff" | "openTerminal";
+  path?: string;
+  line?: number;
+  cwd?: string;
+}
+/** Listen for MCP drive commands emitted by the Rust server. */
+export const onDrive = (cb: (p: DrivePayload) => void): Promise<UnlistenFn> =>
+  listen<DrivePayload>("sutra://drive", (e) => cb(e.payload));
+
+export interface UiRequest {
+  id: number;
+  query: "openTabs" | "selection";
+}
+/** Listen for MCP UI-state read requests from Rust. */
+export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>
+  listen<UiRequest>("sutra://ui/request", (e) => cb(e.payload));
+/** Reply to a pending MCP UI-state request. */
+export const mcpUiReply = (id: number, payload: unknown) =>
+  invoke<void>("mcp_ui_reply", { id, payload });
+
 export const ptySpawn = (id: string, cwd: string | null, rows: number, cols: number) =>
   invoke<void>("pty_spawn", { id, cwd, rows, cols });
 export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", { id, data });

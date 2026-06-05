@@ -261,8 +261,13 @@ mod tests {
         let file = dir.path().join("page.html");
         fs::write(&file, "<p>hi</p>").unwrap();
         let state = PreviewServerState::default();
+        let key = fs::canonicalize(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        state.servers.lock().unwrap().insert(key, 1420);
         let url = state.url_for(dir.path(), &file).unwrap();
-        assert!(url.starts_with("http://127.0.0.1:"));
+        assert!(url.starts_with("http://127.0.0.1:1420"));
         assert!(url.ends_with("/page.html"));
     }
 

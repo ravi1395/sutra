@@ -3,8 +3,8 @@ use tauri::Manager;
 mod agent_tracker;
 mod fs_cmds;
 mod git;
-mod mcp_config;
 mod mcp;
+mod mcp_config;
 mod preview_server;
 mod pty;
 mod search;
@@ -35,8 +35,13 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .setup(|app| {
             let state = app.state::<mcp::McpState>();
-            let root = state.root.clone();
-            let port = mcp::start(app.handle().clone(), root).map_err(|e| e.to_string())?;
+            let port = mcp::start(
+                app.handle().clone(),
+                state.root.clone(),
+                state.pending.clone(),
+                state.next_id.clone(),
+            )
+            .map_err(|e| e.to_string())?;
             *state.port.lock().unwrap() = Some(port);
             Ok(())
         })
@@ -65,6 +70,7 @@ pub fn run() {
             mcp::mcp_server_url,
             mcp::mcp_set_root,
             mcp::mcp_write_agent_config,
+            mcp::mcp_ui_reply,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

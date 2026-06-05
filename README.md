@@ -162,7 +162,7 @@ into `.mcp.json` (claude) and `.codex/config.toml` (codex) — both gitignored �
 pointing at the live server. Existing entries in those files are preserved; a
 malformed file is skipped rather than overwritten.
 
-**Tools**
+### Display tools (P1)
 
 | Tool | Argument | Effect |
 |---|---|---|
@@ -171,15 +171,37 @@ malformed file is skipped rather than overwritten.
 | `render_diagram` | `mermaid` | Renders a Mermaid diagram (`securityLevel: strict`). |
 | `open_preview` | `path` | Opens an existing workspace `.html`/`.md` file in the preview pane. |
 
+### Drive tools (P2)
+
+| Tool | Argument | Effect |
+|---|---|---|
+| `open_file` | `path`, `line?` | Opens a workspace file, optionally scrolling to a line. |
+| `reveal_in_tree` | `path` | Expands the file tree to the path and highlights it. |
+| `show_diff` | `path` | Opens the file and jumps to its first changed git hunk. |
+| `open_terminal` | `cwd?` | Opens a new integrated terminal, optionally at a directory. |
+
+### Read tools (P3)
+
+| Tool | Argument | Returns |
+|---|---|---|
+| `get_git_status` | — | Branch, ahead/behind, changed files. |
+| `get_tracked_changes` | — | AI-vs-human pending changes from the agent tracker. |
+| `search` | `query`, `caseInsensitive?` | Matching file/line/text results. |
+| `get_open_tabs` | — | Open tab paths, names, active/dirty flags (live, via UI round-trip). |
+| `get_selection` | — | Active file path, selected text, line (live, via UI round-trip). |
+
 Ephemeral HTML is written to `<root>/.sutra/preview/` (newest 10 retained,
-pruned on each render). All tools target the **active workspace root**.
+pruned on each render). All path-taking tools target the **active workspace
+root** and reject paths outside it. Live reads (`get_open_tabs`,
+`get_selection`) round-trip to the frontend with a 2s timeout; other reads are
+served directly from Rust.
 
 ## Architecture
 
 | Layer | Path | Responsibility |
 |---|---|---|
 | Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
-| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, 4 preview tools, agent-config commands |
+| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, 13 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |
