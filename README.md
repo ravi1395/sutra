@@ -109,6 +109,9 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 ### Integrated-agent workspace tracking
 - In Git workspaces, Sutra tracks the whole workspace while Claude or Codex runs
   under an integrated terminal. Changed files need not be open in the editor.
+- Claude edits are attributed through a per-edit `PostToolUse` report hook;
+  Codex uses the older process/window heuristic fallback. The banner opens only
+  for AI-attributed changes, not for Sutra/user-only writes.
 - **View** opens the selected text file and compares latest disk content with
   Git `HEAD`. Deleted and binary files show a clear non-editor review status.
 - **Keep** clears the notification; changes remain visible against
@@ -160,9 +163,10 @@ and takes a minute or two; later builds are incremental.
 Sutra runs a local Model Context Protocol server (`http://127.0.0.1:<port>/mcp`)
 so a `claude`/`codex` agent in the integrated terminal can render output into
 Sutra's preview pane. On opening a workspace, Sutra merge-writes a `sutra` entry
-into `.mcp.json` (claude) and `.codex/config.toml` (codex) — both gitignored —
-pointing at the live server. Existing entries in those files are preserved; a
-malformed file is skipped rather than overwritten.
+into `.mcp.json` (claude) and `.codex/config.toml` (codex), writes a Claude
+edit-report hook under `.sutra/hooks/`, and merges that hook into
+`.claude/settings.json`. Generated config paths are gitignored. Existing
+entries are preserved; a malformed file is skipped rather than overwritten.
 
 ### Display tools (P1)
 
@@ -203,8 +207,8 @@ served directly from Rust.
 | Layer | Path | Responsibility |
 |---|---|---|
 | Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
-| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, 13 MCP tools, agent-config commands, UI-read reply registry |
-| Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.gitignore` |
+| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 13 MCP tools, agent-config commands, UI-read reply registry |
+| Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |
 | Rust: pty | `src-tauri/src/pty.rs` | spawn/write/resize/kill PTYs, stream output events |

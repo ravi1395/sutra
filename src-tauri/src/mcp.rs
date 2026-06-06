@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::extract::State as AxumState;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::Json;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -92,6 +96,90 @@ pub struct McpState {
     pub root: Arc<Mutex<Option<PathBuf>>>,
     pub pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     pub next_id: Arc<AtomicU64>,
+}
+
+/// Shared context for the loopback edit-ingest route.
+#[derive(Clone)]
+struct IngestCtx {
+    app: AppHandle,
+    root: Arc<Mutex<Option<PathBuf>>>,
+}
+
+/// Body of `POST /ingest/edit`.
+#[derive(serde::Deserialize)]
+struct IngestBody {
+    path: String,
+}
+
+/// Record an agent-reported edit. Validates the path stays inside the active
+/// workspace root (`resolve_in_root`); otherwise rejects. Loopback-only,
+/// best-effort.
+async fn ingest_edit(
+    AxumState(ctx): AxumState<IngestCtx>,
+    Json(body): Json<IngestBody>,
+) -> StatusCode {
+    let Some(root) = ctx.root.lock().ok().and_then(|guard| guard.clone()) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let Ok(path) = resolve_in_root(&root, &body.path) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let app = ctx.app.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        app.state::<crate::agent_tracker::AgentTrackerState>()
+            .record_agent_report(&root, path);
+    })
+    .await;
+    StatusCode::NO_CONTENT
+}
+
+/// Write the live ingest base URL to `<root>/.sutra/endpoint` for hook scripts.
+/// Note: callers pass the workspace root exactly as the frontend supplied it, so
+/// the file matches the root the tracker keys its baseline on.
+fn write_endpoint_file(root: &Path, port: u16) -> Result<(), String> {
+    let dir = root.join(".sutra");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("endpoint"), format!("http://127.0.0.1:{port}"))
+        .map_err(|e| e.to_string())
+}
+
+/// POSIX-sh hook body: reads Claude PostToolUse JSON on stdin, extracts the
+/// edited file path with node, and reports it to Sutra's ingest endpoint.
+const REPORT_EDIT_SH: &str = r#"#!/bin/sh
+# Sutra agent-edit reporter. Best-effort; never blocks the agent.
+endpoint_file="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/../endpoint"
+[ -f "$endpoint_file" ] || exit 0
+path="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).tool_input||{}).file_path||"")}catch(e){}})')"
+[ -n "$path" ] || exit 0
+body="$(node -e 'process.stdout.write(JSON.stringify({path:process.argv[1]}))' "$path")"
+curl -s -m 1 "$(cat "$endpoint_file")/ingest/edit" -H 'content-type: application/json' --data-raw "$body" >/dev/null 2>&1 || true
+"#;
+
+fn hook_script_path(root: &Path) -> PathBuf {
+    root.join(".sutra").join("hooks").join("report-edit.sh")
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    format!("'{}'", text.replace('\'', r#"'\''"#))
+}
+
+/// Write the report hook script to `<root>/.sutra/hooks/report-edit.sh`,
+/// executable. Returns its absolute path.
+fn write_hook_script(root: &Path) -> Result<PathBuf, String> {
+    let script = hook_script_path(root);
+    let dir = script
+        .parent()
+        .ok_or_else(|| "invalid hook script path".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&script, REPORT_EDIT_SH).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(script)
 }
 
 /// Discriminated payload emitted to the frontend preview listener.
@@ -529,6 +617,10 @@ pub fn start(
                     Ok(l) => l,
                     Err(_) => return,
                 };
+                let ingest_ctx = IngestCtx {
+                    app: app.clone(),
+                    root: root.clone(),
+                };
                 let template = SutraMcp::new(app, root, pending, next_id);
                 let service: StreamableHttpService<SutraMcp, LocalSessionManager> =
                     StreamableHttpService::new(
@@ -536,7 +628,10 @@ pub fn start(
                         Default::default(),
                         StreamableHttpServerConfig::default(),
                     );
-                let router = axum::Router::new().nest_service("/mcp", service);
+                let router = axum::Router::new()
+                    .nest_service("/mcp", service)
+                    .route("/ingest/edit", post(ingest_edit))
+                    .with_state(ingest_ctx);
                 let _ = axum::serve(listener, router).await;
             });
         })
@@ -560,7 +655,11 @@ pub fn mcp_server_url(state: tauri::State<McpState>) -> Result<String, String> {
 /// Set the active workspace root the MCP tools target.
 #[tauri::command]
 pub fn mcp_set_root(state: tauri::State<McpState>, root: String) -> Result<(), String> {
-    *state.root.lock().map_err(|e| e.to_string())? = Some(PathBuf::from(root));
+    let root_path = PathBuf::from(&root);
+    *state.root.lock().map_err(|e| e.to_string())? = Some(root_path.clone());
+    if let Some(port) = *state.port.lock().map_err(|e| e.to_string())? {
+        let _ = write_endpoint_file(&root_path, port);
+    }
     Ok(())
 }
 
@@ -570,9 +669,13 @@ pub fn mcp_set_root(state: tauri::State<McpState>, root: String) -> Result<(), S
 #[tauri::command]
 pub fn mcp_write_agent_config(
     state: tauri::State<McpState>,
+    tracker: tauri::State<crate::agent_tracker::AgentTrackerState>,
     root: String,
 ) -> Result<Vec<String>, String> {
-    use crate::mcp_config::{ensure_gitignore, merge_codex_toml, merge_mcp_json};
+    use crate::agent_tracker::capture_paths;
+    use crate::mcp_config::{
+        ensure_gitignore, merge_claude_settings, merge_codex_toml, merge_mcp_json,
+    };
     let port = state
         .port
         .lock()
@@ -582,33 +685,77 @@ pub fn mcp_write_agent_config(
     let root = PathBuf::from(root);
     let mut warnings = Vec::new();
 
-    // claude .mcp.json
     let mcp_path = root.join(".mcp.json");
-    let existing = std::fs::read_to_string(&mcp_path).ok();
-    match merge_mcp_json(existing.as_deref(), &url) {
-        Ok(out) => std::fs::write(&mcp_path, out).map_err(|e| e.to_string())?,
-        Err(e) => warnings.push(format!(".mcp.json skipped: {e}")),
-    }
-
-    // codex .codex/config.toml
-    let codex_dir = root.join(".codex");
-    let codex_path = codex_dir.join("config.toml");
-    let existing = std::fs::read_to_string(&codex_path).ok();
-    match merge_codex_toml(existing.as_deref(), &url) {
-        Ok(out) => {
-            std::fs::create_dir_all(&codex_dir).map_err(|e| e.to_string())?;
-            std::fs::write(&codex_path, out).map_err(|e| e.to_string())?;
-        }
-        Err(e) => warnings.push(format!("config.toml skipped: {e}")),
-    }
-
-    // .gitignore
+    let codex_path = root.join(".codex").join("config.toml");
     let gi_path = root.join(".gitignore");
-    let existing = std::fs::read_to_string(&gi_path).ok();
-    if let Some(out) = ensure_gitignore(existing.as_deref(), &[".mcp.json", ".codex/", ".sutra/"]) {
-        std::fs::write(&gi_path, out).map_err(|e| e.to_string())?;
-    }
-    Ok(warnings)
+    let claude_path = root.join(".claude").join("settings.json");
+    let hook_path = hook_script_path(&root);
+
+    let tracked = vec![
+        hook_path.clone(),
+        mcp_path.clone(),
+        codex_path.clone(),
+        gi_path.clone(),
+        claude_path.clone(),
+    ];
+    let before = capture_paths(&tracked);
+
+    let result = (|| {
+        let hook_script = match write_hook_script(&root) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                warnings.push(format!("hook script skipped: {e}"));
+                None
+            }
+        };
+
+        // claude .mcp.json
+        match merge_mcp_json(std::fs::read_to_string(&mcp_path).ok().as_deref(), &url) {
+            Ok(out) => std::fs::write(&mcp_path, out).map_err(|e| e.to_string())?,
+            Err(e) => warnings.push(format!(".mcp.json skipped: {e}")),
+        }
+
+        // codex .codex/config.toml
+        match merge_codex_toml(std::fs::read_to_string(&codex_path).ok().as_deref(), &url) {
+            Ok(out) => {
+                if let Some(parent) = codex_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&codex_path, out).map_err(|e| e.to_string())?;
+            }
+            Err(e) => warnings.push(format!("config.toml skipped: {e}")),
+        }
+
+        // claude .claude/settings.json PostToolUse hook
+        if let Some(script) = &hook_script {
+            let command = shell_quote_path(script);
+            match merge_claude_settings(
+                std::fs::read_to_string(&claude_path).ok().as_deref(),
+                &command,
+            ) {
+                Ok(out) => {
+                    if let Some(parent) = claude_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    std::fs::write(&claude_path, out).map_err(|e| e.to_string())?;
+                }
+                Err(e) => warnings.push(format!("settings.json skipped: {e}")),
+            }
+        }
+
+        // .gitignore
+        if let Some(out) = ensure_gitignore(
+            std::fs::read_to_string(&gi_path).ok().as_deref(),
+            &[".mcp.json", ".codex/", ".sutra/", ".claude/"],
+        ) {
+            std::fs::write(&gi_path, out).map_err(|e| e.to_string())?;
+        }
+
+        Ok(warnings)
+    })();
+
+    tracker.record_sutra_mutation(before, &tracked);
+    result
 }
 
 /// Core UI-reply delivery used by the Tauri command and unit tests.
@@ -659,6 +806,35 @@ mod tests {
         }
         let count = std::fs::read_dir(preview_dir(dir.path())).unwrap().count();
         assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn endpoint_file_written_with_url() {
+        let dir = tempdir().unwrap();
+        write_endpoint_file(dir.path(), 5123).unwrap();
+        let got = std::fs::read_to_string(dir.path().join(".sutra").join("endpoint")).unwrap();
+        assert_eq!(got, "http://127.0.0.1:5123");
+    }
+
+    #[test]
+    fn hook_script_written_executable_and_nonempty() {
+        let dir = tempdir().unwrap();
+        let script = write_hook_script(dir.path()).unwrap();
+        assert!(script.ends_with("report-edit.sh"));
+        let body = std::fs::read_to_string(&script).unwrap();
+        assert!(body.contains("/ingest/edit"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0);
+        }
+    }
+
+    #[test]
+    fn hook_command_path_is_shell_quoted() {
+        let command = shell_quote_path(Path::new("/tmp/sutra test/it's/report-edit.sh"));
+        assert_eq!(command, r#"'/tmp/sutra test/it'\''s/report-edit.sh'"#);
     }
 
     #[test]

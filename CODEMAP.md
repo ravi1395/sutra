@@ -27,7 +27,7 @@ Main boot flow:
 | Path | Owns | Key functions/classes |
 |---|---|---|
 | `src/main.ts` | App bootstrap, workspace open, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, integrated-agent polling/banner/review flow | `$`, `saveTab`, `openWorkspace`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `showAgentBanner` |
-| `src/agent-tracking.ts` | Pure integrated-agent presentation helpers and direct terminal command hint | `mergeChangedFiles`, `agentBannerText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
+| `src/agent-tracking.ts` | Pure integrated-agent presentation helpers and direct terminal command hint | `mergeChangedFiles`, `aiChanges`, `agentBannerText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
 | `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and recents | `mountMenuBar`, `MenuActions`, `MenuBarHandle`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
@@ -61,8 +61,8 @@ Main boot flow:
 | `src-tauri/src/main.rs` | Native binary entrypoint | `main` |
 | `src-tauri/src/fs_cmds.rs` | Directory listing, compact folders, text file read/write, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
 | `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
-| `src-tauri/src/mcp.rs` | In-process MCP server exposing display, drive, and read tools plus agent config writers and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
-| `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON and TOML patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `ensure_gitignore` |
+| `src-tauri/src/mcp.rs` | In-process MCP server exposing display, drive, read tools, loopback edit ingest, agent config writers, and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `ingest_edit`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
+| `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON/TOML/Claude settings patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `merge_claude_settings`, `ensure_gitignore` |
 | `src-tauri/src/preview_server.rs` | Session-local static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
 | `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
 | `src-tauri/src/search.rs` | Project-wide ripgrep-style file search | `search_dir`; structs: `SearchMatch`, `SearchResult` |
@@ -103,10 +103,10 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 `TerminalManager.renderTabs` uses `beginSplitPointerDrag`. Releasing over `#terminal-area` → moves live `Term` + xterm DOM into selected group. Right-side drop creates/uses right group.
 
 **Integrated-agent workspace tracking:**
-Direct `claude`/`codex` terminal command → `agentTrackingBegin` captures pre-execution state. `pty_spawn` registers shell PID → `agentTrackingPoll` checks full process ancestry and scans the Git workspace every 1.5s → candidate files merge into diff list/banner. Sutra filesystem commands report known human mutations. View uses Git `HEAD`; safe revert restores only non-human-touched candidates.
+Direct `claude`/`codex` terminal command → `agentTrackingBegin` captures pre-execution state. `pty_spawn` registers shell PID → `agentTrackingPoll` checks full process ancestry every 1.5s. Claude runs in report mode: `.sutra/hooks/report-edit.sh` posts edited paths to `/ingest/edit`, which records only reported paths as AI changes. Codex runs in discovery mode and keeps the workspace diff fallback. Sutra filesystem/config commands report known human mutations. The banner shows only when at least one non-human-touched AI change exists. View uses Git `HEAD`; safe revert restores only non-human-touched candidates.
 
 **MCP drive/read control plane:**
-Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rust `mcp.rs` validates path-taking drive tools with `resolve_in_root` → emits `sutra://drive` → `main.ts` routes to `EditorManager.openFile`/`firstHunkLine`, `FileTree.reveal`, or `TerminalManager.create`. Rust-native read tools call `git.rs`, `agent_tracker.rs`, or `search.rs` directly. UI-only reads emit `sutra://ui/request` with a pending oneshot id → `main.ts` replies via `mcp_ui_reply` with open-tabs or selection JSON; Rust times out after 2s and removes stale pending entries.
+Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rust `mcp.rs` validates path-taking drive tools with `resolve_in_root` → emits `sutra://drive` → `main.ts` routes to `EditorManager.openFile`/`firstHunkLine`, `FileTree.reveal`, or `TerminalManager.create`. The same local server exposes `/ingest/edit` for Claude edit reports and writes `<root>/.sutra/endpoint` when the root is set. Rust-native read tools call `git.rs`, `agent_tracker.rs`, or `search.rs` directly. UI-only reads emit `sutra://ui/request` with a pending oneshot id → `main.ts` replies via `mcp_ui_reply` with open-tabs or selection JSON; Rust times out after 2s and removes stale pending entries.
 
 ## Commands
 
@@ -125,7 +125,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rus
 
 - Workspace tab filtering, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups, native Edit menu structure: `npm test`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
-- MCP path, preview, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
+- MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
 - Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`
 - Type-only frontend: `npm exec tsc -- --noEmit`
 - Rust command changes: `cargo check --manifest-path src-tauri/Cargo.toml`
@@ -140,7 +140,8 @@ Integrated-terminal agent calls local `sutra` MCP tools over `127.0.0.1` → Rus
 - `computeLineDiff` / `revertHunk` — line/newline-sensitive; small off-by-one causes silent wrong reverts.
 - `EditorManager` stores one live `EditorView`; inactive tabs depend on `EditorState` checkpointing during activation.
 - Workspace snapshots retain ignored-aware file bytes for exact safe revert; large repositories can consume significant memory.
-- Filesystem events lack writer PID. Attribution is conservative: changes during a detected integrated Claude/Codex session are candidates; unrelated external writes during that window may appear.
+- Filesystem events lack writer PID. Claude attribution depends on hook reports; missed hook posts mean no banner. Codex attribution remains conservative: unrelated external writes during a detected Codex window may appear.
+- Claude report hooks currently shell out to `node` and `curl` from `.sutra/hooks/report-edit.sh`; systems without either tool silently lose Claude edit attribution.
 - Safe revert compares current bytes with the last observed candidate state; later external edits become manual-review-only.
 - MCP UI-only reads depend on the frontend event loop replying within 2s; blocked UI returns a timeout instead of hanging, and stale pending entries must be removed.
 - Direct command hint closes the first-poll race for plain `claude`/`codex`; aliases/wrappers rely on process command-line ancestry detection.

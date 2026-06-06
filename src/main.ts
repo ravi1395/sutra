@@ -38,7 +38,7 @@ import {
   type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
-import { agentBannerText, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
+import { agentBannerText, aiChanges, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -471,7 +471,7 @@ async function pollAgentChanges(): Promise<void> {
     const next = await agentTrackingPoll(currentRoot);
     if (currentRoot !== root) return;
     agentStatus = next;
-    if (next.changes.length > 0) showAgentBanner(next.changes);
+    if (aiChanges(next.changes).length > 0) showAgentBanner(next.changes);
     else hideAgentBanner();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
