@@ -190,6 +190,7 @@ impl Tracker {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return;
         };
+        session.report_mode = true;
         let current = fs::read(&path).ok();
         let baseline = session.baseline.get(&path).cloned();
         if current == baseline {
@@ -486,11 +487,6 @@ fn agent_command_kind(command: &str) -> Option<AgentKind> {
     None
 }
 
-/// True when the command line is any known integrated agent.
-fn is_agent_process_command(command: &str) -> bool {
-    agent_command_kind(command).is_some()
-}
-
 /// Return the kind of integrated agent that descends from one of `shells`,
 /// preferring Claude when both are present.
 fn agent_descendant_kind(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> Option<AgentKind> {
@@ -524,11 +520,6 @@ fn agent_descendant_kind(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> Op
         }
     }
     found
-}
-
-/// True when any integrated agent descends from one of `shells`.
-fn has_agent_descendant(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> bool {
-    agent_descendant_kind(shells, processes).is_some()
 }
 
 fn git_head_id(root: &Path) -> Option<String> {
@@ -726,12 +717,9 @@ mod tests {
         );
         let shells = [100].into_iter().collect();
 
-        assert!(has_agent_descendant(&shells, &processes));
-        assert!(!has_agent_descendant(
-            &[999].into_iter().collect(),
-            &processes
-        ));
-        assert!(!is_agent_process_command("rg codex"));
+        assert!(agent_descendant_kind(&shells, &processes).is_some());
+        assert!(agent_descendant_kind(&[999].into_iter().collect(), &processes).is_none());
+        assert!(agent_command_kind("rg codex").is_none());
     }
 
     #[test]
@@ -888,6 +876,14 @@ mod tests {
         tracker.poll(dir.path(), false, true).unwrap();
 
         assert!(!tracker.session.as_ref().unwrap().pending.contains_key(&manual));
+    }
+
+    #[test]
+    fn record_agent_report_without_session_is_noop() {
+        let dir = tempdir().unwrap();
+        let mut tracker = Tracker::default();
+        tracker.record_agent_report(dir.path(), dir.path().join("x.txt"));
+        assert!(tracker.session.is_none());
     }
 
     #[test]
