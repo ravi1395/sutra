@@ -60,6 +60,12 @@ struct Tracker {
 #[derive(Default)]
 pub struct AgentTrackerState(Mutex<Tracker>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentKind {
+    Claude,
+    Codex,
+}
+
 #[derive(Clone, Debug)]
 struct ProcessInfo {
     pid: u32,
@@ -68,7 +74,25 @@ struct ProcessInfo {
 }
 
 impl Tracker {
-    fn poll(&mut self, root: &Path, agent_active: bool) -> Result<AgentTrackingStatus, String> {
+    fn poll(
+        &mut self,
+        root: &Path,
+        agent_active: bool,
+        discover: bool,
+    ) -> Result<AgentTrackingStatus, String> {
+        // In report mode the agent delivers changes explicitly; skip the git-head
+        // check (which would reset the session) and just refresh known pending paths.
+        if !discover {
+            if let Some(session) = self.session.as_ref().filter(|s| s.root == root) {
+                let _ = session; // borrow ends here
+                self.refresh_pending();
+                return Ok(session_status(
+                    self.session.as_ref().expect("session present"),
+                ));
+            }
+            return Ok(disabled_status());
+        }
+
         let head = match git_head_id(root) {
             Some(head) => head,
             None => {
@@ -159,22 +183,72 @@ impl Tracker {
         Ok(())
     }
 
-    fn active_agent_for_root(&self, root: &Path) -> bool {
+    /// Record a path an agent reported editing as an AI change. Drops it if the
+    /// file is back at the baseline.
+    fn record_agent_report(&mut self, root: &Path, path: PathBuf) {
+        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+            return;
+        };
+        let current = fs::read(&path).ok();
+        let baseline = session.baseline.get(&path).cloned();
+        if current == baseline {
+            session.pending.remove(&path);
+            return;
+        }
+        let status = match (baseline.as_ref(), current.as_ref()) {
+            (None, Some(_)) => "A",
+            (Some(_), None) => "D",
+            _ => "M",
+        };
+        session.pending.insert(
+            path,
+            PendingChange {
+                status: status.to_string(),
+                human_touched: false,
+                observed: current,
+            },
+        );
+    }
+
+    /// Recompute status of already-known pending paths and drop any back at
+    /// baseline. Does NOT discover new paths (report mode).
+    fn refresh_pending(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        for path in session.pending.keys().cloned().collect::<Vec<_>>() {
+            let current = fs::read(&path).ok();
+            let baseline = session.baseline.get(&path).cloned();
+            if current == baseline {
+                session.pending.remove(&path);
+                continue;
+            }
+            if let Some(change) = session.pending.get_mut(&path) {
+                change.status = match (baseline.as_ref(), current.as_ref()) {
+                    (None, Some(_)) => "A",
+                    (Some(_), None) => "D",
+                    _ => "M",
+                }
+                .to_string();
+            }
+        }
+    }
+
+    /// Detect which integrated agent (if any) is active for `root`.
+    fn agent_kind_for_root(&self, root: &Path) -> Option<AgentKind> {
         let shells = self
             .shells
             .iter()
             .filter_map(|(pid, cwd)| cwd.starts_with(root).then_some(*pid))
             .collect::<HashSet<_>>();
         if shells.is_empty() {
-            return false;
+            return None;
         }
-        let Ok(output) = Command::new("ps")
+        let output = Command::new("ps")
             .args(["-axo", "pid=,ppid=,command="])
             .output()
-        else {
-            return false;
-        };
-        has_agent_descendant(
+            .ok()?;
+        agent_descendant_kind(
             &shells,
             &parse_process_table(&String::from_utf8_lossy(&output.stdout)),
         )
@@ -249,6 +323,11 @@ impl AgentTrackerState {
             .lock()
             .unwrap()
             .record_sutra_mutation(before, after_roots);
+    }
+
+    /// Record an agent-reported edit path against the active session.
+    pub fn record_agent_report(&self, root: &Path, path: PathBuf) {
+        self.0.lock().unwrap().record_agent_report(root, path);
     }
 }
 
@@ -377,52 +456,78 @@ fn parse_process_table(output: &str) -> Vec<ProcessInfo> {
         .collect()
 }
 
-fn is_agent_process_command(command: &str) -> bool {
+/// Classify a process command line as a known integrated agent, if any.
+fn agent_command_kind(command: &str) -> Option<AgentKind> {
     let mut tokens = command.split_whitespace();
     let executable = tokens.next().unwrap_or("");
-    let is_agent_name = |token: &str| {
-        let name = Path::new(token)
+    let name_of = |token: &str| {
+        Path::new(token)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("")
             .trim_end_matches(".js")
-            .to_ascii_lowercase();
-        name == "claude" || name == "codex"
+            .to_ascii_lowercase()
     };
-    if is_agent_name(executable) {
-        return true;
+    let kind_of = |name: &str| match name {
+        "claude" => Some(AgentKind::Claude),
+        "codex" => Some(AgentKind::Codex),
+        _ => None,
+    };
+    if let Some(kind) = kind_of(&name_of(executable)) {
+        return Some(kind);
     }
-    let runtime = Path::new(executable)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    matches!(runtime.as_str(), "node" | "bun" | "deno")
-        && tokens.next().map(is_agent_name).unwrap_or(false)
+    let runtime = name_of(executable);
+    if matches!(runtime.as_str(), "node" | "bun" | "deno") {
+        if let Some(arg) = tokens.next() {
+            return kind_of(&name_of(arg));
+        }
+    }
+    None
 }
 
-fn has_agent_descendant(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> bool {
+/// True when the command line is any known integrated agent.
+fn is_agent_process_command(command: &str) -> bool {
+    agent_command_kind(command).is_some()
+}
+
+/// Return the kind of integrated agent that descends from one of `shells`,
+/// preferring Claude when both are present.
+fn agent_descendant_kind(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> Option<AgentKind> {
     let parents = processes
         .iter()
         .map(|process| (process.pid, process.ppid))
         .collect::<HashMap<_, _>>();
-    processes.iter().any(|process| {
-        if !is_agent_process_command(&process.command) {
-            return false;
-        }
+    let mut found: Option<AgentKind> = None;
+    for process in processes {
+        let Some(kind) = agent_command_kind(&process.command) else {
+            continue;
+        };
         let mut pid = process.ppid;
         let mut seen = HashSet::new();
+        let mut descends = false;
         while seen.insert(pid) {
             if shells.contains(&pid) {
-                return true;
-            }
-            let Some(parent) = parents.get(&pid) else {
+                descends = true;
                 break;
-            };
-            pid = *parent;
+            }
+            match parents.get(&pid) {
+                Some(parent) => pid = *parent,
+                None => break,
+            }
         }
-        false
-    })
+        if descends {
+            if kind == AgentKind::Claude {
+                return Some(AgentKind::Claude);
+            }
+            found = Some(AgentKind::Codex);
+        }
+    }
+    found
+}
+
+/// True when any integrated agent descends from one of `shells`.
+fn has_agent_descendant(shells: &HashSet<u32>, processes: &[ProcessInfo]) -> bool {
+    agent_descendant_kind(shells, processes).is_some()
 }
 
 fn git_head_id(root: &Path) -> Option<String> {
@@ -487,7 +592,7 @@ pub fn agent_tracking_begin(
     state: State<'_, AgentTrackerState>,
     root: String,
 ) -> Result<AgentTrackingStatus, String> {
-    state.0.lock().unwrap().poll(Path::new(&root), true)
+    state.0.lock().unwrap().poll(Path::new(&root), true, true)
 }
 
 #[tauri::command]
@@ -497,8 +602,10 @@ pub fn agent_tracking_poll(
 ) -> Result<AgentTrackingStatus, String> {
     let mut tracker = state.0.lock().unwrap();
     let root = Path::new(&root);
-    let agent_active = tracker.active_agent_for_root(root);
-    tracker.poll(root, agent_active)
+    let kind = tracker.agent_kind_for_root(root);
+    let agent_active = kind.is_some();
+    let discover = !matches!(kind, Some(AgentKind::Claude));
+    tracker.poll(root, agent_active, discover)
 }
 
 #[tauri::command]
@@ -678,13 +785,89 @@ mod tests {
         };
 
         fs::write(&path, "outside-agent").unwrap();
-        tracker.poll(dir.path(), true).unwrap();
+        tracker.poll(dir.path(), true, true).unwrap();
 
         assert!(tracker.session.as_ref().unwrap().pending.is_empty());
         assert_eq!(
             tracker.session.as_ref().unwrap().baseline[&path],
             b"outside-agent"
         );
+    }
+
+    #[test]
+    fn record_agent_report_inserts_ai_change_and_drops_on_baseline_return() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let mut tracker = Tracker {
+            session: Some(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                baseline: scan_workspace(dir.path()).unwrap(),
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+            }),
+            ..Tracker::default()
+        };
+
+        fs::write(&path, "agent").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        let change = &tracker.session.as_ref().unwrap().pending[&path];
+        assert_eq!(change.status, "M");
+        assert!(!change.human_touched);
+
+        fs::write(&path, "base").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(tracker.session.as_ref().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn report_mode_poll_does_not_discover_unreported_changes() {
+        let dir = tempdir().unwrap();
+        let reported = dir.path().join("ai.txt");
+        let manual = dir.path().join("human.txt");
+        fs::write(&reported, "base").unwrap();
+        fs::write(&manual, "base").unwrap();
+        let mut tracker = Tracker {
+            session: Some(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                baseline: scan_workspace(dir.path()).unwrap(),
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+            }),
+            ..Tracker::default()
+        };
+
+        fs::write(&reported, "agent").unwrap();
+        tracker.record_agent_report(dir.path(), reported.clone());
+        fs::write(&manual, "human-edit").unwrap();
+
+        // discover = false (report mode): the manual edit must NOT appear.
+        tracker.poll(dir.path(), true, false).unwrap();
+        let pending = &tracker.session.as_ref().unwrap().pending;
+        assert!(pending.contains_key(&reported));
+        assert!(!pending.contains_key(&manual));
+    }
+
+    #[test]
+    fn agent_descendant_kind_prefers_claude() {
+        let processes = parse_process_table(
+            "100 1 zsh\n101 100 node /usr/local/lib/codex\n102 100 node /usr/local/lib/claude\n",
+        );
+        let shells = [100].into_iter().collect();
+        assert!(matches!(
+            agent_descendant_kind(&shells, &processes),
+            Some(AgentKind::Claude)
+        ));
+
+        let codex_only = parse_process_table("100 1 zsh\n101 100 codex\n");
+        assert!(matches!(
+            agent_descendant_kind(&shells, &codex_only),
+            Some(AgentKind::Codex)
+        ));
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
