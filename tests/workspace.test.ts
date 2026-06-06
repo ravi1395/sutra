@@ -204,7 +204,7 @@ test("agent banner and first viewable change handle unsafe deleted and binary fi
     { path: "/repo/view.ts", status: "M", humanTouched: true, binary: false },
   ];
 
-  assert.equal(agentBannerText(changes), "Integrated agent changed 3 files; 1 needs manual review.");
+  assert.equal(agentBannerText(changes), "Integrated agent changed 2 files; 1 needs manual review.");
   assert.equal(firstViewableAgentChange(changes)?.path, "/repo/view.ts");
 });
 

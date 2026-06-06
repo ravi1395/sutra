@@ -23,10 +23,7 @@ pub fn merge_mcp_json(existing: Option<&str>, url: &str) -> Result<String, Strin
     let servers = servers
         .as_object_mut()
         .ok_or_else(|| "mcpServers is not an object".to_string())?;
-    servers.insert(
-        "sutra".to_string(),
-        json!({ "type": "http", "url": url }),
-    );
+    servers.insert("sutra".to_string(), json!({ "type": "http", "url": url }));
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
@@ -34,9 +31,9 @@ pub fn merge_mcp_json(existing: Option<&str>, url: &str) -> Result<String, Strin
 /// Returns Err if `existing` is present but not valid TOML.
 pub fn merge_codex_toml(existing: Option<&str>, url: &str) -> Result<String, String> {
     let mut root: toml::Value = match existing {
-        Some(text) if !text.trim().is_empty() => {
-            text.parse().map_err(|e| format!("invalid config.toml: {e}"))?
-        }
+        Some(text) if !text.trim().is_empty() => text
+            .parse()
+            .map_err(|e| format!("invalid config.toml: {e}"))?,
         _ => toml::Value::Table(toml::value::Table::new()),
     };
     let table = root
@@ -100,8 +97,10 @@ pub fn merge_claude_settings(existing: Option<&str>, command: &str) -> Result<St
 /// missing (no write needed), else the full new file content.
 pub fn ensure_gitignore(existing: Option<&str>, entries: &[&str]) -> Option<String> {
     let text = existing.unwrap_or("");
-    let present: std::collections::HashSet<&str> =
-        text.lines().map(|l| l.trim_end_matches('/').trim()).collect();
+    let present: std::collections::HashSet<&str> = text
+        .lines()
+        .map(|l| l.trim_end_matches('/').trim())
+        .collect();
     let missing: Vec<&str> = entries
         .iter()
         .copied()
@@ -168,7 +167,10 @@ mod tests {
 
     #[test]
     fn gitignore_appends_only_missing() {
-        let out = ensure_gitignore(Some(".sutra/\nnode_modules\n"), &[".mcp.json", ".codex/", ".sutra/"]);
+        let out = ensure_gitignore(
+            Some(".sutra/\nnode_modules\n"),
+            &[".mcp.json", ".codex/", ".sutra/"],
+        );
         let out = out.expect("two entries missing");
         assert!(out.contains(".mcp.json"));
         assert!(out.contains(".codex/"));
@@ -177,7 +179,11 @@ mod tests {
 
     #[test]
     fn gitignore_none_when_all_present() {
-        assert!(ensure_gitignore(Some(".mcp.json\n.codex/\n.sutra/\n"), &[".mcp.json", ".codex/", ".sutra/"]).is_none());
+        assert!(ensure_gitignore(
+            Some(".mcp.json\n.codex/\n.sutra/\n"),
+            &[".mcp.json", ".codex/", ".sutra/"]
+        )
+        .is_none());
     }
 
     #[test]
@@ -186,7 +192,10 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         let entry = &v["hooks"]["PostToolUse"][0];
         assert_eq!(entry["matcher"], "Write|Edit|MultiEdit");
-        assert_eq!(entry["hooks"][0]["command"], "/ws/.sutra/hooks/report-edit.sh");
+        assert_eq!(
+            entry["hooks"][0]["command"],
+            "/ws/.sutra/hooks/report-edit.sh"
+        );
     }
 
     #[test]
@@ -196,7 +205,8 @@ mod tests {
             "/ws/.sutra/hooks/report-edit.sh",
         )
         .unwrap();
-        let second = merge_claude_settings(Some(&first), "/ws/.sutra/hooks/report-edit.sh").unwrap();
+        let second =
+            merge_claude_settings(Some(&first), "/ws/.sutra/hooks/report-edit.sh").unwrap();
         let v: Value = serde_json::from_str(&second).unwrap();
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
@@ -215,6 +225,9 @@ mod tests {
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 2);
         assert_eq!(post[0]["hooks"][0]["command"], "/other.sh");
-        assert_eq!(post[1]["hooks"][0]["command"], "/ws/.sutra/hooks/report-edit.sh");
+        assert_eq!(
+            post[1]["hooks"][0]["command"],
+            "/ws/.sutra/hooks/report-edit.sh"
+        );
     }
 }

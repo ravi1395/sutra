@@ -875,7 +875,12 @@ mod tests {
         tracker.poll(dir.path(), false, true).unwrap();
         tracker.poll(dir.path(), false, true).unwrap();
 
-        assert!(!tracker.session.as_ref().unwrap().pending.contains_key(&manual));
+        assert!(!tracker
+            .session
+            .as_ref()
+            .unwrap()
+            .pending
+            .contains_key(&manual));
     }
 
     #[test]

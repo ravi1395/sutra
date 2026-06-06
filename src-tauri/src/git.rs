@@ -202,10 +202,7 @@ pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
         match repo.resolve_reference_from_short_name(ref_name) {
             Ok(r) => {
                 if let Some(target_oid) = r.target() {
-                    if let Ok(tree) = repo
-                        .find_commit(target_oid)
-                        .and_then(|c| c.tree())
-                    {
+                    if let Ok(tree) = repo.find_commit(target_oid).and_then(|c| c.tree()) {
                         base_tree = Some(tree);
                         break;
                     }
@@ -218,15 +215,10 @@ pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
     // Fallback to HEAD tree if no base ref found
     let base_tree = match base_tree {
         Some(t) => t,
-        None => {
-            match repo
-                .find_commit(head_oid)
-                .and_then(|c| c.tree())
-            {
-                Ok(t) => t,
-                Err(_) => return Ok(vec![]),
-            }
-        }
+        None => match repo.find_commit(head_oid).and_then(|c| c.tree()) {
+            Ok(t) => t,
+            Err(_) => return Ok(vec![]),
+        },
     };
 
     // Diff tree to workdir (includes untracked)
@@ -329,7 +321,11 @@ pub fn git_worktrees(root: String) -> Result<Vec<WorktreeInfo>, String> {
         // Friendly name: HEAD shorthand of the main tree, else "main".
         let name = Repository::open(&mp)
             .ok()
-            .and_then(|r| r.head().ok().and_then(|h| h.shorthand().map(String::from).ok()))
+            .and_then(|r| {
+                r.head()
+                    .ok()
+                    .and_then(|h| h.shorthand().map(String::from).ok())
+            })
             .unwrap_or_else(|| "main".to_string());
         worktrees.push(WorktreeInfo {
             name,
@@ -446,7 +442,11 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let wts = git_worktrees(root).unwrap();
-        assert_eq!(wts.len(), 1, "main working tree present even with no linked worktrees");
+        assert_eq!(
+            wts.len(),
+            1,
+            "main working tree present even with no linked worktrees"
+        );
         assert!(wts[0].is_current, "root is the current worktree");
         assert_eq!(wts[0].name, "main");
     }
