@@ -124,9 +124,12 @@ async fn ingest_edit(
     let Ok(path) = resolve_in_root(&root, &body.path) else {
         return StatusCode::BAD_REQUEST;
     };
-    ctx.app
-        .state::<crate::agent_tracker::AgentTrackerState>()
-        .record_agent_report(&root, path);
+    let app = ctx.app.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        app.state::<crate::agent_tracker::AgentTrackerState>()
+            .record_agent_report(&root, path);
+    })
+    .await;
     StatusCode::NO_CONTENT
 }
 
