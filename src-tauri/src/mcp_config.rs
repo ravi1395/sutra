@@ -206,4 +206,15 @@ mod tests {
     fn claude_settings_rejects_malformed() {
         assert!(merge_claude_settings(Some("{ not json"), "/x").is_err());
     }
+
+    #[test]
+    fn claude_settings_preserves_a_pre_existing_different_hook() {
+        let existing = r#"{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/other.sh"}]}]}}"#;
+        let out = merge_claude_settings(Some(existing), "/ws/.sutra/hooks/report-edit.sh").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let post = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 2);
+        assert_eq!(post[0]["hooks"][0]["command"], "/other.sh");
+        assert_eq!(post[1]["hooks"][0]["command"], "/ws/.sutra/hooks/report-edit.sh");
+    }
 }
