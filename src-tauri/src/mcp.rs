@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::extract::State as AxumState;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::Json;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -92,6 +96,48 @@ pub struct McpState {
     pub root: Arc<Mutex<Option<PathBuf>>>,
     pub pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     pub next_id: Arc<AtomicU64>,
+}
+
+/// Shared context for the loopback edit-ingest route.
+#[derive(Clone)]
+struct IngestCtx {
+    app: AppHandle,
+    root: Arc<Mutex<Option<PathBuf>>>,
+}
+
+/// Body of `POST /ingest/edit`.
+#[derive(serde::Deserialize)]
+struct IngestBody {
+    path: String,
+}
+
+/// Record an agent-reported edit. Validates the path stays inside the active
+/// workspace root (`resolve_in_root`); otherwise rejects. Loopback-only,
+/// best-effort.
+async fn ingest_edit(
+    AxumState(ctx): AxumState<IngestCtx>,
+    Json(body): Json<IngestBody>,
+) -> StatusCode {
+    let Some(root) = ctx.root.lock().ok().and_then(|guard| guard.clone()) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let Ok(path) = resolve_in_root(&root, &body.path) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    ctx.app
+        .state::<crate::agent_tracker::AgentTrackerState>()
+        .record_agent_report(&root, path);
+    StatusCode::NO_CONTENT
+}
+
+/// Write the live ingest base URL to `<root>/.sutra/endpoint` for hook scripts.
+/// Note: callers pass the workspace root exactly as the frontend supplied it, so
+/// the file matches the root the tracker keys its baseline on.
+fn write_endpoint_file(root: &Path, port: u16) -> Result<(), String> {
+    let dir = root.join(".sutra");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("endpoint"), format!("http://127.0.0.1:{port}"))
+        .map_err(|e| e.to_string())
 }
 
 /// Discriminated payload emitted to the frontend preview listener.
@@ -529,6 +575,10 @@ pub fn start(
                     Ok(l) => l,
                     Err(_) => return,
                 };
+                let ingest_ctx = IngestCtx {
+                    app: app.clone(),
+                    root: root.clone(),
+                };
                 let template = SutraMcp::new(app, root, pending, next_id);
                 let service: StreamableHttpService<SutraMcp, LocalSessionManager> =
                     StreamableHttpService::new(
@@ -536,7 +586,10 @@ pub fn start(
                         Default::default(),
                         StreamableHttpServerConfig::default(),
                     );
-                let router = axum::Router::new().nest_service("/mcp", service);
+                let router = axum::Router::new()
+                    .nest_service("/mcp", service)
+                    .route("/ingest/edit", post(ingest_edit))
+                    .with_state(ingest_ctx);
                 let _ = axum::serve(listener, router).await;
             });
         })
@@ -560,7 +613,11 @@ pub fn mcp_server_url(state: tauri::State<McpState>) -> Result<String, String> {
 /// Set the active workspace root the MCP tools target.
 #[tauri::command]
 pub fn mcp_set_root(state: tauri::State<McpState>, root: String) -> Result<(), String> {
-    *state.root.lock().map_err(|e| e.to_string())? = Some(PathBuf::from(root));
+    let root_path = PathBuf::from(&root);
+    *state.root.lock().map_err(|e| e.to_string())? = Some(root_path.clone());
+    if let Some(port) = *state.port.lock().map_err(|e| e.to_string())? {
+        let _ = write_endpoint_file(&root_path, port);
+    }
     Ok(())
 }
 
@@ -659,6 +716,14 @@ mod tests {
         }
         let count = std::fs::read_dir(preview_dir(dir.path())).unwrap().count();
         assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn endpoint_file_written_with_url() {
+        let dir = tempdir().unwrap();
+        write_endpoint_file(dir.path(), 5123).unwrap();
+        let got = std::fs::read_to_string(dir.path().join(".sutra").join("endpoint")).unwrap();
+        assert_eq!(got, "http://127.0.0.1:5123");
     }
 
     #[test]
