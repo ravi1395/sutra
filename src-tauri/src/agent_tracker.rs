@@ -49,6 +49,7 @@ struct TrackingSession {
     pending: BTreeMap<PathBuf, PendingChange>,
     agent_active: bool,
     settle_polls: u8,
+    report_mode: bool,
 }
 
 #[derive(Default)]
@@ -80,19 +81,6 @@ impl Tracker {
         agent_active: bool,
         discover: bool,
     ) -> Result<AgentTrackingStatus, String> {
-        // In report mode the agent delivers changes explicitly; skip the git-head
-        // check (which would reset the session) and just refresh known pending paths.
-        if !discover {
-            if let Some(session) = self.session.as_ref().filter(|s| s.root == root) {
-                let _ = session; // borrow ends here
-                self.refresh_pending();
-                return Ok(session_status(
-                    self.session.as_ref().expect("session present"),
-                ));
-            }
-            return Ok(disabled_status());
-        }
-
         let head = match git_head_id(root) {
             Some(head) => head,
             None => {
@@ -113,10 +101,19 @@ impl Tracker {
                 pending: BTreeMap::new(),
                 agent_active: false,
                 settle_polls: 0,
+                report_mode: false,
             });
         }
 
         let session = self.session.as_mut().expect("session initialized");
+        // A session touched by a report-capable agent (Claude) stays in report
+        // mode until it resets, so a later heuristic poll never blind-discovers
+        // the user's own mid-session edits.
+        if !discover {
+            session.report_mode = true;
+        }
+        let effective_discover = discover && !session.report_mode;
+
         if agent_active && !session.agent_active && session.settle_polls == 0 {
             let current = scan_workspace(root)?;
             let pending_paths = session.pending.keys().cloned().collect::<BTreeSet<_>>();
@@ -143,8 +140,12 @@ impl Tracker {
         } else {
             false
         };
-        if should_scan {
-            self.reconcile_session()?;
+        if effective_discover {
+            if should_scan {
+                self.reconcile_session()?;
+            }
+        } else {
+            self.refresh_pending();
         }
         Ok(session_status(
             self.session.as_ref().expect("session initialized"),
@@ -746,6 +747,7 @@ mod tests {
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 2,
+                report_mode: false,
             }),
             ..Tracker::default()
         };
@@ -780,6 +782,7 @@ mod tests {
                 pending: BTreeMap::new(),
                 agent_active: false,
                 settle_polls: 0,
+                report_mode: false,
             }),
             ..Tracker::default()
         };
@@ -807,6 +810,7 @@ mod tests {
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 0,
+                report_mode: false,
             }),
             ..Tracker::default()
         };
@@ -829,14 +833,17 @@ mod tests {
         let manual = dir.path().join("human.txt");
         fs::write(&reported, "base").unwrap();
         fs::write(&manual, "base").unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let head = commit_all(&repo, "initial");
         let mut tracker = Tracker {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
-                head: "head".into(),
+                head,
                 baseline: scan_workspace(dir.path()).unwrap(),
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 0,
+                report_mode: true,
             }),
             ..Tracker::default()
         };
@@ -845,11 +852,42 @@ mod tests {
         tracker.record_agent_report(dir.path(), reported.clone());
         fs::write(&manual, "human-edit").unwrap();
 
-        // discover = false (report mode): the manual edit must NOT appear.
         tracker.poll(dir.path(), true, false).unwrap();
         let pending = &tracker.session.as_ref().unwrap().pending;
         assert!(pending.contains_key(&reported));
         assert!(!pending.contains_key(&manual));
+    }
+
+    #[test]
+    fn report_mode_sticks_so_agent_exit_does_not_discover_manual_edits() {
+        let dir = tempdir().unwrap();
+        let manual = dir.path().join("human.txt");
+        fs::write(&manual, "base").unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let head = commit_all(&repo, "initial");
+        let mut tracker = Tracker {
+            session: Some(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head,
+                baseline: scan_workspace(dir.path()).unwrap(),
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: false,
+            }),
+            ..Tracker::default()
+        };
+
+        // Claude active (report mode) engages stickiness.
+        tracker.poll(dir.path(), true, false).unwrap();
+        // User edits a file by hand during the session.
+        fs::write(&manual, "human-edit").unwrap();
+        // Claude exits: poll now runs with discover=true (heuristic), but the
+        // session is sticky report-mode, so the manual edit must NOT be discovered.
+        tracker.poll(dir.path(), false, true).unwrap();
+        tracker.poll(dir.path(), false, true).unwrap();
+
+        assert!(!tracker.session.as_ref().unwrap().pending.contains_key(&manual));
     }
 
     #[test]
