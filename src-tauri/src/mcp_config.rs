@@ -54,6 +54,48 @@ pub fn merge_codex_toml(existing: Option<&str>, url: &str) -> Result<String, Str
     toml::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
+/// Merge a Sutra `PostToolUse` hook (matching `Write|Edit|MultiEdit`, running
+/// `command`) into a claude `.claude/settings.json`. Idempotent: an existing
+/// entry with the same command is not duplicated. Err on malformed JSON.
+pub fn merge_claude_settings(existing: Option<&str>, command: &str) -> Result<String, String> {
+    let mut root: Value = match existing {
+        Some(text) if !text.trim().is_empty() => {
+            serde_json::from_str(text).map_err(|e| format!("invalid settings.json: {e}"))?
+        }
+        _ => Value::Object(Map::new()),
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "settings.json root is not an object".to_string())?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "hooks is not an object".to_string())?;
+    let post = hooks
+        .entry("PostToolUse")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "PostToolUse is not an array".to_string())?;
+    let present = post.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hs| {
+                hs.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
+            })
+            .unwrap_or(false)
+    });
+    if !present {
+        post.push(json!({
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [ { "type": "command", "command": command } ],
+        }));
+    }
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
 /// Append any missing `entries` to a `.gitignore`. Returns None when nothing is
 /// missing (no write needed), else the full new file content.
 pub fn ensure_gitignore(existing: Option<&str>, entries: &[&str]) -> Option<String> {
@@ -136,5 +178,32 @@ mod tests {
     #[test]
     fn gitignore_none_when_all_present() {
         assert!(ensure_gitignore(Some(".mcp.json\n.codex/\n.sutra/\n"), &[".mcp.json", ".codex/", ".sutra/"]).is_none());
+    }
+
+    #[test]
+    fn claude_settings_inserts_hook_into_empty() {
+        let out = merge_claude_settings(None, "/ws/.sutra/hooks/report-edit.sh").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let entry = &v["hooks"]["PostToolUse"][0];
+        assert_eq!(entry["matcher"], "Write|Edit|MultiEdit");
+        assert_eq!(entry["hooks"][0]["command"], "/ws/.sutra/hooks/report-edit.sh");
+    }
+
+    #[test]
+    fn claude_settings_is_idempotent_and_preserves_other_keys() {
+        let first = merge_claude_settings(
+            Some(r#"{"model":"opus","hooks":{"PostToolUse":[]}}"#),
+            "/ws/.sutra/hooks/report-edit.sh",
+        )
+        .unwrap();
+        let second = merge_claude_settings(Some(&first), "/ws/.sutra/hooks/report-edit.sh").unwrap();
+        let v: Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn claude_settings_rejects_malformed() {
+        assert!(merge_claude_settings(Some("{ not json"), "/x").is_err());
     }
 }
