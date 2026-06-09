@@ -82,6 +82,30 @@ pub fn read_file(path: String) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "binary file".to_string())
 }
 
+/// Write `content` to `path` via a same-directory temp file + rename, so a
+/// crash mid-write can never leave the destination truncated. Same-directory
+/// keeps the rename on one filesystem, which is what makes it atomic.
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or("no parent directory")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or("no file name")?;
+    let tmp = parent.join(format!(
+        ".{name}.sutra-tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
 #[tauri::command]
 pub fn write_file(
     tracker: State<'_, AgentTrackerState>,
@@ -90,10 +114,7 @@ pub fn write_file(
 ) -> Result<(), String> {
     let tracked_path = PathBuf::from(&path);
     let before = capture_paths(&[tracked_path.clone()]);
-    if let Some(parent) = Path::new(&path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&path, content).map_err(|e| e.to_string())?;
+    atomic_write(Path::new(&path), &content)?;
     tracker.record_sutra_mutation(before, &[tracked_path]);
     Ok(())
 }
@@ -170,4 +191,39 @@ pub fn create_dir(tracker: State<'_, AgentTrackerState>, path: String) -> Result
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     tracker.record_sutra_mutation(before, &[tracked_path]);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_creates_file_with_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("a.txt");
+        atomic_write(&target, "one").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "one");
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a.txt");
+        atomic_write(&target, "one").unwrap();
+        atomic_write(&target, "two").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "two");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a.txt");
+        atomic_write(&target, "one").unwrap();
+        atomic_write(&target, "two").unwrap();
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(names, vec!["a.txt"], "temp files left behind: {names:?}");
+    }
 }

@@ -17,48 +17,44 @@ export function parseConflicts(text: string): ConflictRegion[] {
   while (i < lines.length) {
     if (lines[i].startsWith("<<<<<<<")) {
       const oursStart = i;
-      let oursEnd = i + 1;
-      let theirsStart = -1;
-      let theirsEnd = -1;
-      let theirsMarkerLine = -1;
+      i++;
 
-      // Skip to separator (======= or |||||||)
-      while (i < lines.length && !lines[i].startsWith("=======")) {
+      // Ours content runs until the diff3 base marker (|||||||) or the separator.
+      while (
+        i < lines.length &&
+        !lines[i].startsWith("=======") &&
+        !lines[i].startsWith("|||||||")
+      ) {
+        i++;
+      }
+      const oursEnd = i; // first marker line after ours content
+
+      // Skip a diff3 base section (||||||| ... ) up to the separator.
+      if (i < lines.length && lines[i].startsWith("|||||||")) {
+        while (i < lines.length && !lines[i].startsWith("=======")) {
+          i++;
+        }
+      }
+      if (i >= lines.length) {
+        i = oursStart + 1;
+        continue;
+      }
+      const theirsStart = i; // ======= marker line
+
+      while (i < lines.length && !lines[i].startsWith(">>>>>>>")) {
         i++;
       }
       if (i >= lines.length) {
         i = oursStart + 1;
         continue;
       }
-      oursEnd = i; // Line before the separator
-      theirsStart = i; // = marker line
-
-      // Skip base section if present (|||||||)
-      while (i < lines.length && !lines[i].startsWith(">>>>>>>")) {
-        if (lines[i].startsWith("|||||||")) {
-          // Move past base marker; find the end marker
-          while (i < lines.length && !lines[i].startsWith(">>>>>>>")) {
-            i++;
-          }
-        } else {
-          i++;
-        }
-      }
-
-      if (i >= lines.length) {
-        i = oursStart + 1;
-        continue;
-      }
-
-      theirsEnd = i; // Line number of the >>>>>>> marker (exclusive for theirs content)
-      theirsMarkerLine = i;
 
       regions.push({
         oursStart,
         oursEnd,
         theirsStart,
-        theirsEnd,
-        theirsMarkerLine,
+        theirsEnd: i, // >>>>>>> marker line (exclusive end of theirs content)
+        theirsMarkerLine: i,
       });
 
       i++;
@@ -92,6 +88,24 @@ export function acceptTheirs(text: string, region: ConflictRegion): string {
   const before = lines.slice(0, region.oursStart);
   const after = lines.slice(region.theirsMarkerLine + 1);
   return [...before, ...theirLines, ...after].join("\n");
+}
+
+export type ConflictChoice = "ours" | "theirs" | "both";
+
+/// Re-parse `text` and resolve the conflict at `index`. Returns null when the
+/// index no longer matches a region (stale UI) so callers never apply stale
+/// line ranges to a changed document.
+export function resolveConflictAtIndex(
+  text: string,
+  index: number,
+  choice: ConflictChoice,
+): string | null {
+  const regions = parseConflicts(text);
+  const region = regions[index];
+  if (!region) return null;
+  if (choice === "ours") return acceptOurs(text, region);
+  if (choice === "theirs") return acceptTheirs(text, region);
+  return acceptBoth(text, region);
 }
 
 /// Return the document with both ours and theirs content, removing conflict markers.

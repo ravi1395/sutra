@@ -1,7 +1,8 @@
 // App entry: instantiates the tree / editor / terminal / diff modules and wires
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FileTree } from "./tree";
 import {
   FILE_DRAG_TYPE,
@@ -10,7 +11,7 @@ import {
   setSplitDropHint,
   splitSideFromClientX,
 } from "./split-drop";
-import { EditorManager, type Tab } from "./editor";
+import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer } from "./diff";
@@ -58,6 +59,16 @@ import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+
+/** Native confirm via the dialog plugin — window.confirm is unreliable in WKWebView. */
+function confirmNative(msg: string): Promise<boolean> {
+  return ask(msg, { title: "Sutra", kind: "warning" });
+}
+
+/** Native alert via the dialog plugin — window.alert is unreliable in WKWebView. */
+async function alertNative(msg: string): Promise<void> {
+  await message(msg, { title: "Sutra", kind: "warning" });
+}
 
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
@@ -141,7 +152,7 @@ editor.onGutterClick = (idx) => {
 };
 editor.onActiveTabChanged = (tab) => tree.setActive(tab?.path ?? null);
 editor.confirmCloseTab = (tab) =>
-  !tab.dirty || confirm(`Discard unsaved changes to ${tab.name}?`);
+  tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
 diffViewer.onRevert = (h) => editor.revertHunk(h);
 
 tree.onOpenFile = async (path) => {
@@ -149,36 +160,36 @@ tree.onOpenFile = async (path) => {
     await editor.openFile(path);
     tree.setActive(path);
   } catch (e) {
-    alert(`Cannot open ${path}: ${e}`);
+    void alertNative(`Cannot open ${path}: ${e}`);
   }
 };
 tree.onOpenFileInPane = (path, side) => {
   void editor
     .openFileInSide(path, side)
     .then(() => tree.setActive(path))
-    .catch((e) => alert(`Cannot open ${path}: ${e}`));
+    .catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
 };
 
 // Tree context menu actions
 tree.onRename = async (path: string, newName: string) => {
   try {
     await renamePath(path, newName);
-    // Update open tabs with renamed path
+    // Update open tabs with renamed path — keep dirty state, the bytes moved unchanged
     const parent = path.split("/").slice(0, -1).join("/");
     const newPath = parent ? parent + "/" + newName : newName;
     for (const tab of editor.tabs) {
       if (tab.path === path) {
-        editor.markSaved(tab, newPath, newName, null);
+        editor.retargetTab(tab, newPath, newName);
       }
     }
     await tree.refresh();
   } catch (e) {
-    alert(`Rename failed: ${e}`);
+    void alertNative(`Rename failed: ${e}`);
   }
 };
 
 tree.onDelete = async (path: string) => {
-  if (!confirm(`Delete "${path.split("/").pop()}"?`)) return;
+  if (!(await confirmNative(`Delete "${path.split("/").pop()}"?`))) return;
   try {
     await deletePath(path);
     // Close any open tabs for deleted path and its children
@@ -190,7 +201,7 @@ tree.onDelete = async (path: string) => {
     }
     await tree.refresh();
   } catch (e) {
-    alert(`Delete failed: ${e}`);
+    void alertNative(`Delete failed: ${e}`);
   }
 };
 
@@ -208,7 +219,7 @@ tree.onCreate = async (parentDir: string, isDir: boolean) => {
     }
     await tree.refresh();
   } catch (e) {
-    alert(`Create ${type} failed: ${e}`);
+    void alertNative(`Create ${type} failed: ${e}`);
   }
 };
 
@@ -218,21 +229,21 @@ tree.onMove = async (src: string, destDir: string) => {
     const srcBaseName = src.split("/").pop() || src;
     const destPath = destDir + "/" + srcBaseName;
     await movePath(src, destPath);
-    // Update open tabs with moved path
+    // Update open tabs with moved path — keep dirty state, the bytes moved unchanged
     const srcPrefix = src.endsWith("/") ? src : src + "/";
     for (const tab of editor.tabs.slice()) {
       if (tab.path === src) {
-        editor.markSaved(tab, destPath, srcBaseName, null);
+        editor.retargetTab(tab, destPath, srcBaseName);
       } else if (tab.path && tab.path.startsWith(srcPrefix)) {
         // Move children: /old/child -> /new/child
         const relPath = tab.path.slice(srcPrefix.length);
         const newPath = destPath + "/" + relPath;
-        editor.markSaved(tab, newPath, tab.name, null);
+        editor.retargetTab(tab, newPath, tab.name);
       }
     }
     await tree.refresh();
   } catch (e) {
-    alert(`Move failed: ${e}`);
+    void alertNative(`Move failed: ${e}`);
   }
 };
 
@@ -241,13 +252,13 @@ function basename(p: string): string {
   return p.split("/").pop() ?? p;
 }
 
-function confirmWorkspaceClose(dir: string): boolean {
+async function confirmWorkspaceClose(dir: string): Promise<boolean> {
   const dirtyTabs = editor.tabsOutsideWorkspace(dir).filter((tab) => tab.dirty);
   if (dirtyTabs.length === 0) return true;
 
   const names = dirtyTabs.slice(0, 5).map((tab) => tab.name).join(", ");
   const more = dirtyTabs.length > 5 ? `, +${dirtyTabs.length - 5} more` : "";
-  return confirm(`Discard unsaved changes outside this folder? ${names}${more}`);
+  return confirmNative(`Discard unsaved changes outside this folder? ${names}${more}`);
 }
 
 async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
@@ -258,11 +269,22 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
     if (!chosen) return;
     path = chosen;
   }
+  // Saving back to the loaded path: if the file changed on disk since load
+  // (agent edit, git checkout), confirm before overwriting those changes.
+  if (path === prevPath) {
+    const diskMtime = await fileMtime(path).catch(() => null);
+    if (externalEditDetected(tab.lastMtime, diskMtime)) {
+      const overwrite = await confirmNative(
+        `${basename(path)} changed on disk after it was loaded. Overwrite the disk version?`,
+      );
+      if (!overwrite) return;
+    }
+  }
   const content = editor.contentOf(tab);
   try {
     await writeFile(path, content);
   } catch (e) {
-    alert(`Save failed: ${e}`);
+    void alertNative(`Save failed: ${e}`);
     return;
   }
   const mt = await fileMtime(path).catch(() => null);
@@ -281,7 +303,7 @@ editor.saveHandler = saveTab;
 
 // ---- workspace open (single path shared by switcher rows, File menu, dialogs) ----
 async function openWorkspace(dir: string): Promise<void> {
-  if (!confirmWorkspaceClose(dir)) return;
+  if (!(await confirmWorkspaceClose(dir))) return;
   editor.closeTabsOutsideWorkspace(dir);
   editor.setWorkspaceRoot(dir);
   currentRoot = dir;
@@ -311,10 +333,12 @@ async function openFolderDialog(): Promise<void> {
   if (typeof dir === "string") await openWorkspace(dir);
 }
 
-function closeActiveTab(): void {
+async function closeActiveTab(): Promise<void> {
   const a = editor.active;
   if (!a) return;
-  if (!a.dirty || confirm(`Discard unsaved changes to ${a.name}?`)) editor.closeTab(a);
+  if (!a.dirty || (await confirmNative(`Discard unsaved changes to ${a.name}?`))) {
+    editor.closeTab(a);
+  }
 }
 
 // ---- terminal toggle ----
@@ -389,7 +413,7 @@ function setSidebar(on: boolean): void {
 function togglePreview(): void {
   void editor
     .togglePreview()
-    .catch((e) => alert(`Preview failed: ${e instanceof Error ? e.message : e}`));
+    .catch((e) => void alertNative(`Preview failed: ${e instanceof Error ? e.message : e}`));
 }
 
 // ---- search view toggle ----
@@ -549,9 +573,9 @@ function showAgentBanner(changes: AgentChange[]): void {
             ? `${result.unsafePaths.length} human-touched file(s) need manual review.`
             : "";
           const errors = result.errors.length ? ` ${result.errors.join("; ")}` : "";
-          alert(`${unsafe}${errors}`.trim());
+          void alertNative(`${unsafe}${errors}`.trim());
         }
-      }).catch((e) => alert(`Revert failed: ${e}`));
+      }).catch((e) => void alertNative(`Revert failed: ${e}`));
     }, "danger"),
   );
   banner.append(
@@ -635,7 +659,7 @@ window.addEventListener("keydown", (e) => {
     void openFolderDialog();
   } else if (mod && e.code === "KeyW") {
     e.preventDefault();
-    closeActiveTab();
+    void closeActiveTab();
   } else if (mod && e.code === "KeyS") {
     e.preventDefault();
     if (e.altKey) {
@@ -656,7 +680,7 @@ window.addEventListener("keydown", (e) => {
     palette.open();
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
-    if (editor.isSplit) editor.closeSplit();
+    if (editor.isSplit) void editor.closeSplit();
     else editor.openSplit();
   } else if (isPreviewShortcut(e)) {
     e.preventDefault();
@@ -694,7 +718,7 @@ const actions = {
     for (const t of editor.tabs) if (t.dirty) void saveTab(t);
   },
   openFolder: () => void openFolderDialog(),
-  closeTab: () => closeActiveTab(),
+  closeTab: () => void closeActiveTab(),
   toggleTerminal: () => setTerminal(termArea.classList.contains("hidden")),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
@@ -880,7 +904,7 @@ palette = mountPalette([
   { id: "open-in-browser", title: "Open in Browser…", run: actions.openInBrowser },
   { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: "⌘B" },
   { id: "toggle-split", title: "Toggle Split", run: () => {
-    if (editor.isSplit) editor.closeSplit();
+    if (editor.isSplit) void editor.closeSplit();
     else editor.openSplit();
   }, shortcut: "⌘\\" },
   { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
@@ -938,6 +962,19 @@ function promptInput(message: string): Promise<string | null> {
     input.focus();
   });
 }
+
+// ---- quit guard ----
+// Prompt before the window closes while unsaved buffers exist. Registering a
+// close-requested listener defers the close to JS; without preventDefault the
+// wrapper destroys the window (needs core:window:allow-destroy capability).
+void getCurrentWindow().onCloseRequested(async (event) => {
+  const dirtyTabs = editor.tabs.filter((t) => t.dirty);
+  if (dirtyTabs.length === 0) return;
+  const names = dirtyTabs.slice(0, 5).map((t) => t.name).join(", ");
+  const more = dirtyTabs.length > 5 ? `, +${dirtyTabs.length - 5} more` : "";
+  const quit = await confirmNative(`Quit and discard unsaved changes? ${names}${more}`);
+  if (!quit) event.preventDefault();
+});
 
 // ---- boot ----
 editor.renderAllTabs();

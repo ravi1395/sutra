@@ -43,7 +43,7 @@ import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { readFile, gitHeadContent, fileMtime } from "./ipc";
 import { previewServerUrl } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
-import { parseConflicts, acceptOurs, acceptTheirs, acceptBoth, type ConflictRegion } from "./conflict";
+import { parseConflicts, resolveConflictAtIndex, type ConflictChoice } from "./conflict";
 import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 
@@ -58,6 +58,18 @@ export interface Tab {
   savedContent: string;
   lastMtime: number | null;
   hunks: Hunk[];
+}
+
+/**
+ * True when the file on disk changed since the buffer last loaded/saved it.
+ * Null baseline (never stamped) or null disk mtime (unreadable) read as "no
+ * conflict" — those paths are handled by the save error itself.
+ */
+export function externalEditDetected(
+  lastMtime: number | null,
+  diskMtime: number | null,
+): boolean {
+  return lastMtime != null && diskMtime != null && diskMtime !== lastMtime;
 }
 
 /** Return the first changed hunk line for `path` as 1-based, or null. */
@@ -295,19 +307,23 @@ export class Pane {
     this.tabs.push(tab);
   }
 
+  // Remove all conflict banners from this pane's host.
+  private clearConflictBanners(): void {
+    this.hostEl.querySelectorAll(".conflict-banner").forEach((e) => e.remove());
+  }
+
   // Detect merge conflicts in the active tab and render inline controls.
+  // Always clears stale banners first so switching tabs or resolving the last
+  // conflict never leaves controls bound to an old document.
   detectAndRenderConflicts(): void {
+    this.clearConflictBanners();
     if (!this.active) return;
     const docText = this.view.state.doc.toString();
     const regions = parseConflicts(docText);
-    if (regions.length === 0) return; // No conflicts
-
-    // Clear any existing conflict UI
-    this.hostEl.querySelectorAll(".conflict-banner").forEach((e) => e.remove());
+    if (regions.length === 0) return;
 
     // For each conflict region, render a banner above the editor
     for (let i = 0; i < regions.length; i++) {
-      const region = regions[i];
       const banner = document.createElement("div");
       banner.className = "conflict-banner";
       banner.innerHTML = `<span>Conflict ${i + 1} of ${regions.length}</span>`;
@@ -315,35 +331,29 @@ export class Pane {
       const btnOurs = document.createElement("button");
       btnOurs.className = "conflict-btn";
       btnOurs.textContent = "Accept Current";
-      btnOurs.onclick = () => this.applyConflictResolution(region, "ours");
+      btnOurs.onclick = () => this.applyConflictResolution(i, "ours");
 
       const btnTheirs = document.createElement("button");
       btnTheirs.className = "conflict-btn";
       btnTheirs.textContent = "Accept Incoming";
-      btnTheirs.onclick = () => this.applyConflictResolution(region, "theirs");
+      btnTheirs.onclick = () => this.applyConflictResolution(i, "theirs");
 
       const btnBoth = document.createElement("button");
       btnBoth.className = "conflict-btn";
       btnBoth.textContent = "Accept Both";
-      btnBoth.onclick = () => this.applyConflictResolution(region, "both");
+      btnBoth.onclick = () => this.applyConflictResolution(i, "both");
 
       banner.append(btnOurs, btnTheirs, btnBoth);
       this.hostEl.insertBefore(banner, this.view.dom);
     }
   }
 
-  // Apply a conflict resolution choice and update the document.
-  private applyConflictResolution(region: ConflictRegion, choice: "ours" | "theirs" | "both"): void {
+  // Apply a conflict resolution by re-parsing the live document at click time,
+  // so a region captured before edits can never slice the wrong lines.
+  private applyConflictResolution(index: number, choice: ConflictChoice): void {
     if (!this.active) return;
-    const docText = this.view.state.doc.toString();
-    const newText =
-      choice === "ours"
-        ? acceptOurs(docText, region)
-        : choice === "theirs"
-          ? acceptTheirs(docText, region)
-          : acceptBoth(docText, region);
-    this.setContent(newText);
-    // Re-detect conflicts (fewer now)
+    const newText = resolveConflictAtIndex(this.view.state.doc.toString(), index, choice);
+    if (newText != null) this.setContent(newText);
     this.detectAndRenderConflicts();
   }
 
@@ -363,6 +373,7 @@ export class Pane {
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */
   showWelcome(): void {
+    this.clearConflictBanners();
     this.previewSource = null;
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
@@ -481,7 +492,7 @@ export class Pane {
       el.onclick = () => this.mgr.activateInPane(this, tab);
       close.onclick = (e) => {
         e.stopPropagation();
-        this.mgr.requestClose(this, tab);
+        void this.mgr.requestClose(this, tab);
       };
       el.append(name, dot, close);
       this.tabsEl.append(el);
@@ -504,7 +515,7 @@ export class EditorManager {
   onTabsChanged?: () => void;
   onDiffChanged?: (hunks: Hunk[], label: string) => void;
   onGutterClick?: (hunkIndex: number) => void;
-  confirmCloseTab?: (tab: Tab) => boolean;
+  confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
 
   private container: HTMLElement;
@@ -557,13 +568,13 @@ export class EditorManager {
   }
 
   /** Collapse back to a single pane after confirming dirty tabs in the right pane. */
-  closeSplit(): boolean {
+  async closeSplit(): Promise<boolean> {
     if (this.panes.length < 2) return true;
     const right = this.panes[1];
     right.checkpoint();
     if (this.confirmCloseTab) {
       for (const tab of right.tabs) {
-        if (tab.dirty && !this.confirmCloseTab(tab)) return false;
+        if (tab.dirty && !(await this.confirmCloseTab(tab))) return false;
       }
     }
     this.panes.pop();
@@ -663,6 +674,8 @@ export class EditorManager {
     const content = await readFile(path);
     const name = path.split("/").pop() ?? path;
     const gitHead = await gitHeadContent(path).catch(() => null);
+    // Stamp the load-time mtime so the save path can detect external edits.
+    const lastMtime = await fileMtime(path).catch(() => null);
     const pane = this.focused;
     const tab: Tab = {
       id: `t${++idSeq}`,
@@ -673,7 +686,7 @@ export class EditorManager {
       gitHead,
       override: null,
       savedContent: content,
-      lastMtime: null,
+      lastMtime,
       hunks: [],
     };
     pane.addTab(tab);
@@ -718,7 +731,7 @@ export class EditorManager {
     this.activateInPane(target, tab);
 
     if (source === this.panes[1] && source.tabs.length === 0 && !source.previewSource) {
-      this.closeSplit();
+      void this.closeSplit(); // emptied pane has no dirty tabs — no prompt possible
     }
   }
 
@@ -770,15 +783,15 @@ export class EditorManager {
     this.onTabsChanged?.();
   }
 
-  requestClose(pane: Pane, tab: Tab): void {
-    if (this.confirmCloseTab && !this.confirmCloseTab(tab)) return;
+  async requestClose(pane: Pane, tab: Tab): Promise<void> {
+    if (this.confirmCloseTab && !(await this.confirmCloseTab(tab))) return;
     this.closeTabInPane(pane, tab);
   }
 
   closePreview(pane: Pane): void {
     pane.hidePreview();
     if (this.panes[1] === pane && pane.tabs.length === 0) {
-      this.closeSplit();
+      void this.closeSplit(); // empty pane — no prompt possible
       return;
     }
     this.renderAllTabs();
@@ -806,14 +819,14 @@ export class EditorManager {
     // Auto-collapse split when a pane is emptied.
     if (this.isSplit && pane.tabs.length === 0 && !pane.previewSource) {
       if (pane === this.panes[1]) {
-        this.closeSplit();
+        void this.closeSplit(); // empty pane — no prompt possible
         return;
       }
       const right = this.panes[1];
       if (right.tabs.length > 0) {
         for (const t of [...right.tabs]) this.moveTabToSide(t.id, "left");
       } else {
-        this.closeSplit();
+        void this.closeSplit();
       }
       return;
     }
@@ -897,7 +910,7 @@ export class EditorManager {
     const right = this.panes[1];
     if (right && right.previewSource === source) {
       right.hidePreview();
-      if (right.tabs.length === 0) this.closeSplit();
+      if (right.tabs.length === 0) void this.closeSplit();
       return;
     }
 
@@ -989,6 +1002,7 @@ export class EditorManager {
     if (!tab.path) return;
     const content = await readFile(tab.path).catch(() => null);
     if (content == null) return;
+    if (tab.dirty) return; // user typed while the read was in flight — keep their edits
     this.setTabContent(tab, content);
     tab.savedContent = content;
     tab.dirty = false;
@@ -1013,9 +1027,13 @@ export class EditorManager {
       if (content == null) continue;
       const gitHead = await gitHeadContent(tab.path).catch(() => null);
       const mtime = await fileMtime(tab.path).catch(() => tab.lastMtime);
+      // Re-check after the awaits: typing or an AI capture during the IPC
+      // round-trips must never be overwritten by stale disk content.
+      if (tab.dirty || tab.override != null) continue;
       if (content !== tab.savedContent) {
-        this.setTabContent(tab, content);
         tab.savedContent = content;
+        this.setTabContent(tab, content);
+        tab.dirty = false;
         changed = true;
       }
       if (gitHead !== tab.gitHead) {
@@ -1023,10 +1041,21 @@ export class EditorManager {
         changed = true;
       }
       if (mtime !== tab.lastMtime) tab.lastMtime = mtime;
-      tab.dirty = false;
     }
     if (!changed) return;
     this.recomputeDiff();
+    this.renderAllTabs();
+    this.onTabsChanged?.();
+  }
+
+  /**
+   * Update a tab's path/name after the file was renamed or moved on disk.
+   * Deliberately leaves dirty + savedContent untouched: the bytes moved
+   * unchanged, so unsaved buffer edits must stay marked unsaved.
+   */
+  retargetTab(tab: Tab, path: string, name: string): void {
+    tab.path = path;
+    tab.name = name;
     this.renderAllTabs();
     this.onTabsChanged?.();
   }
