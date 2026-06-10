@@ -100,6 +100,14 @@ export const mcpSetRoot = (root: string) => invoke<void>("mcp_set_root", { root 
 export const mcpWriteAgentConfig = (root: string) =>
   invoke<string[]>("mcp_write_agent_config", { root });
 
+export const watchStart = (root: string) => invoke<void>("watch_start", { root });
+export const watchStop = () => invoke<void>("watch_stop");
+export interface FsChangedPayload {
+  paths: string[];
+}
+export const onFsChanged = (cb: (payload: FsChangedPayload) => void): Promise<UnlistenFn> =>
+  listen<FsChangedPayload>("fs-changed", (e) => cb(e.payload));
+
 export type PreviewOpenKind = "html" | "md" | "diagram";
 export interface PreviewOpenPayload {
   kind: PreviewOpenKind;

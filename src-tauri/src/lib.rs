@@ -8,6 +8,7 @@ mod mcp_config;
 mod preview_server;
 mod pty;
 mod search;
+mod watcher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,6 +37,7 @@ pub fn run() {
         .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
         .manage(mcp::McpState::default())
+        .manage(watcher::WatcherState::default())
         .setup(|app| {
             let state = app.state::<mcp::McpState>();
             let token = app.state::<mcp::LocalAuthToken>().value().to_string();
@@ -82,6 +84,8 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_is_busy,
             search::search_dir,
+            watcher::watch_start,
+            watcher::watch_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

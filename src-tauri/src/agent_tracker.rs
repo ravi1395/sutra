@@ -6,15 +6,32 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 use tauri::State;
+use xxhash_rust::xxh3::xxh3_64;
 
-pub type Snapshot = BTreeMap<PathBuf, Vec<u8>>;
+type Snapshot = BTreeMap<PathBuf, FileSignature>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileSignature {
+    size: u64,
+    mtime_nanos: u128,
+    hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RestoreSource {
+    Bytes(Vec<u8>),
+    Delete,
+    Unsafe,
+}
 
 #[derive(Clone, Debug)]
 struct PendingChange {
     status: String,
     human_touched: bool,
     observed: Option<Vec<u8>>,
+    restore: RestoreSource,
 }
 
 #[derive(Clone, Serialize)]
@@ -46,6 +63,7 @@ struct TrackingSession {
     root: PathBuf,
     head: String,
     baseline: Snapshot,
+    last_scan: Snapshot,
     pending: BTreeMap<PathBuf, PendingChange>,
     agent_active: bool,
     settle_polls: u8,
@@ -94,10 +112,12 @@ impl Tracker {
             .map(|session| session.root != root || session.head != head)
             .unwrap_or(true);
         if reset {
+            let baseline = scan_workspace(root, None)?;
             self.session = Some(TrackingSession {
                 root: root.to_path_buf(),
                 head,
-                baseline: scan_workspace(root)?,
+                last_scan: baseline.clone(),
+                baseline,
                 pending: BTreeMap::new(),
                 agent_active: false,
                 settle_polls: 0,
@@ -115,16 +135,17 @@ impl Tracker {
         let effective_discover = discover && !session.report_mode;
 
         if agent_active && !session.agent_active && session.settle_polls == 0 {
-            let current = scan_workspace(root)?;
+            let current = scan_workspace(root, Some(&session.last_scan))?;
             let pending_paths = session.pending.keys().cloned().collect::<BTreeSet<_>>();
             session
                 .baseline
                 .retain(|path, _| pending_paths.contains(path) || current.contains_key(path));
-            for (path, bytes) in current {
-                if !pending_paths.contains(&path) {
-                    session.baseline.insert(path, bytes);
+            for (path, signature) in &current {
+                if !pending_paths.contains(path) {
+                    session.baseline.insert(path.clone(), signature.clone());
                 }
             }
+            session.last_scan = current;
         }
         let should_scan = if agent_active {
             session.agent_active = true;
@@ -156,7 +177,9 @@ impl Tracker {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(disabled_status());
         };
-        session.baseline = scan_workspace(root)?;
+        let baseline = scan_workspace(root, Some(&session.last_scan))?;
+        session.last_scan = baseline.clone();
+        session.baseline = baseline;
         session.pending.clear();
         Ok(session_status(session))
     }
@@ -165,7 +188,7 @@ impl Tracker {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(AgentRevertResult::default());
         };
-        let result = revert_safe_changes(&session.baseline, &mut session.pending);
+        let result = revert_safe_changes(&mut session.pending);
         Ok(result)
     }
 
@@ -173,13 +196,9 @@ impl Tracker {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        let current = scan_workspace(&session.root)?;
-        let mut next = compare_snapshots(&session.baseline, &current);
-        for (path, change) in &session.pending {
-            if let Some(next_change) = next.get_mut(path) {
-                next_change.human_touched = change.human_touched;
-            }
-        }
+        let current = scan_workspace(&session.root, Some(&session.last_scan))?;
+        let next = compare_snapshots(&session.root, &session.baseline, &current, &session.pending);
+        session.last_scan = current;
         session.pending = next;
         Ok(())
     }
@@ -193,8 +212,18 @@ impl Tracker {
         session.report_mode = true;
         let current = fs::read(&path).ok();
         let baseline = session.baseline.get(&path).cloned();
-        if current == baseline {
+        if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
             session.pending.remove(&path);
+            match current.as_deref() {
+                Some(bytes) => {
+                    let signature =
+                        signature_for_current_or_bytes(&path, bytes, session.last_scan.get(&path));
+                    session.last_scan.insert(path, signature);
+                }
+                None => {
+                    session.last_scan.remove(&path);
+                }
+            }
             return;
         }
         let status = match (baseline.as_ref(), current.as_ref()) {
@@ -202,14 +231,34 @@ impl Tracker {
             (Some(_), None) => "D",
             _ => "M",
         };
+        let restore = session
+            .pending
+            .get(&path)
+            .map(|change| change.restore.clone())
+            .unwrap_or_else(|| restore_source_for_change(&session.root, &path, baseline.as_ref()));
         session.pending.insert(
-            path,
+            path.clone(),
             PendingChange {
                 status: status.to_string(),
                 human_touched: false,
                 observed: current,
+                restore,
             },
         );
+        match session
+            .pending
+            .get(&path)
+            .and_then(|change| change.observed.as_deref())
+        {
+            Some(bytes) => {
+                let signature =
+                    signature_for_current_or_bytes(&path, bytes, session.last_scan.get(&path));
+                session.last_scan.insert(path, signature);
+            }
+            None => {
+                session.last_scan.remove(&path);
+            }
+        }
     }
 
     /// Recompute status of already-known pending paths and drop any back at
@@ -221,8 +270,21 @@ impl Tracker {
         for path in session.pending.keys().cloned().collect::<Vec<_>>() {
             let current = fs::read(&path).ok();
             let baseline = session.baseline.get(&path).cloned();
-            if current == baseline {
+            if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
                 session.pending.remove(&path);
+                match current.as_deref() {
+                    Some(bytes) => {
+                        let signature = signature_for_current_or_bytes(
+                            &path,
+                            bytes,
+                            session.last_scan.get(&path),
+                        );
+                        session.last_scan.insert(path, signature);
+                    }
+                    None => {
+                        session.last_scan.remove(&path);
+                    }
+                }
                 continue;
             }
             if let Some(change) = session.pending.get_mut(&path) {
@@ -232,6 +294,17 @@ impl Tracker {
                     _ => "M",
                 }
                 .to_string();
+                change.observed = current.clone();
+            }
+            match current.as_deref() {
+                Some(bytes) => {
+                    let signature =
+                        signature_for_current_or_bytes(&path, bytes, session.last_scan.get(&path));
+                    session.last_scan.insert(path, signature);
+                }
+                None => {
+                    session.last_scan.remove(&path);
+                }
             }
         }
     }
@@ -271,38 +344,83 @@ impl Tracker {
             .cloned()
             .collect::<BTreeSet<_>>();
         for path in paths {
-            let before_bytes = before.get(&path).and_then(|value| value.as_ref());
             let after_bytes = after.get(&path).and_then(|value| value.as_ref());
-            let baseline_bytes = session.baseline.get(&path);
-            if before_bytes == baseline_bytes {
+            let baseline_signature = session.baseline.get(&path);
+            let before_matches_baseline = bytes_option_matches_signature(
+                before.get(&path).and_then(|value| value.as_deref()),
+                baseline_signature,
+            );
+            let after_matches_baseline = bytes_option_matches_signature(
+                after.get(&path).and_then(|value| value.as_deref()),
+                baseline_signature,
+            );
+            if before_matches_baseline {
                 match after_bytes {
                     Some(bytes) => {
-                        session.baseline.insert(path.clone(), bytes.clone());
+                        let signature = signature_for_current_or_bytes(
+                            &path,
+                            bytes,
+                            session.last_scan.get(&path),
+                        );
+                        session.baseline.insert(path.clone(), signature.clone());
+                        session.last_scan.insert(path.clone(), signature);
                     }
                     None => {
                         session.baseline.remove(&path);
+                        session.last_scan.remove(&path);
                     }
                 }
                 session.pending.remove(&path);
                 continue;
             }
-            if after_bytes == baseline_bytes {
+            if after_matches_baseline {
+                match after_bytes {
+                    Some(bytes) => {
+                        let signature = signature_for_current_or_bytes(
+                            &path,
+                            bytes,
+                            session.last_scan.get(&path),
+                        );
+                        session.last_scan.insert(path.clone(), signature);
+                    }
+                    None => {
+                        session.last_scan.remove(&path);
+                    }
+                }
                 session.pending.remove(&path);
                 continue;
             }
-            let status = match (baseline_bytes, after_bytes) {
+            let status = match (baseline_signature, after_bytes) {
                 (None, Some(_)) => "A",
                 (Some(_), None) => "D",
                 _ => "M",
             };
+            let restore = session
+                .pending
+                .get(&path)
+                .map(|change| change.restore.clone())
+                .unwrap_or_else(|| {
+                    restore_source_for_change(&session.root, &path, baseline_signature)
+                });
             session.pending.insert(
-                path,
+                path.clone(),
                 PendingChange {
                     status: status.to_string(),
                     human_touched: true,
                     observed: after_bytes.cloned(),
+                    restore,
                 },
             );
+            match after_bytes {
+                Some(bytes) => {
+                    let signature =
+                        signature_for_current_or_bytes(&path, bytes, session.last_scan.get(&path));
+                    session.last_scan.insert(path, signature);
+                }
+                None => {
+                    session.last_scan.remove(&path);
+                }
+            }
         }
     }
 }
@@ -349,22 +467,32 @@ fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
             .pending
             .iter()
             .map(|(path, change)| {
-                let bytes = fs::read(path)
-                    .ok()
-                    .or_else(|| session.baseline.get(path).cloned())
-                    .unwrap_or_default();
+                let bytes = change
+                    .observed
+                    .as_deref()
+                    .or_else(|| match &change.restore {
+                        RestoreSource::Bytes(bytes) => Some(bytes.as_slice()),
+                        RestoreSource::Delete | RestoreSource::Unsafe => None,
+                    });
                 AgentChange {
                     path: path.to_string_lossy().into_owned(),
                     status: change.status.clone(),
                     human_touched: change.human_touched,
-                    binary: std::str::from_utf8(&bytes).is_err(),
+                    binary: bytes
+                        .map(|bytes| std::str::from_utf8(bytes).is_err())
+                        .unwrap_or(false),
                 }
             })
             .collect(),
     }
 }
 
-fn compare_snapshots(baseline: &Snapshot, current: &Snapshot) -> BTreeMap<PathBuf, PendingChange> {
+fn compare_snapshots(
+    root: &Path,
+    baseline: &Snapshot,
+    current: &Snapshot,
+    previous: &BTreeMap<PathBuf, PendingChange>,
+) -> BTreeMap<PathBuf, PendingChange> {
     let paths = baseline
         .keys()
         .chain(current.keys())
@@ -374,7 +502,7 @@ fn compare_snapshots(baseline: &Snapshot, current: &Snapshot) -> BTreeMap<PathBu
     for path in paths {
         let before = baseline.get(&path);
         let after = current.get(&path);
-        if before == after {
+        if same_file_content(before, after) {
             continue;
         }
         let status = match (before, after) {
@@ -382,12 +510,22 @@ fn compare_snapshots(baseline: &Snapshot, current: &Snapshot) -> BTreeMap<PathBu
             (Some(_), None) => "D",
             _ => "M",
         };
+        let observed = after.and_then(|_| fs::read(&path).ok());
+        let restore = previous
+            .get(&path)
+            .map(|change| change.restore.clone())
+            .unwrap_or_else(|| restore_source_for_change(root, &path, before));
+        let human_touched = previous
+            .get(&path)
+            .map(|change| change.human_touched)
+            .unwrap_or(false);
         changes.insert(
             path,
             PendingChange {
                 status: status.to_string(),
-                human_touched: false,
-                observed: after.cloned(),
+                human_touched,
+                observed,
+                restore,
             },
         );
     }
@@ -419,7 +557,7 @@ pub(crate) fn capture_paths(paths: &[PathBuf]) -> BTreeMap<PathBuf, Option<Vec<u
     captured
 }
 
-fn scan_workspace(root: &Path) -> Result<Snapshot, String> {
+fn scan_workspace(root: &Path, previous: Option<&Snapshot>) -> Result<Snapshot, String> {
     let mut snapshot = Snapshot::new();
     for entry in WalkBuilder::new(root)
         .hidden(false)
@@ -437,11 +575,116 @@ fn scan_workspace(root: &Path) -> Result<Snapshot, String> {
         {
             continue;
         }
-        if let Ok(bytes) = fs::read(entry.path()) {
-            snapshot.insert(entry.path().to_path_buf(), bytes);
+        if let Some(signature) = file_signature(
+            entry.path(),
+            previous.and_then(|last| last.get(entry.path())),
+        ) {
+            snapshot.insert(entry.path().to_path_buf(), signature);
         }
     }
     Ok(snapshot)
+}
+
+fn file_signature(path: &Path, previous: Option<&FileSignature>) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    let size = metadata.len();
+    let mtime_nanos = metadata_mtime_nanos(&metadata);
+    if let Some(previous) = previous {
+        if previous.size == size && previous.mtime_nanos == mtime_nanos {
+            return Some(previous.clone());
+        }
+    }
+    let bytes = fs::read(path).ok()?;
+    Some(FileSignature {
+        size,
+        mtime_nanos,
+        hash: xxh3_64(&bytes),
+    })
+}
+
+fn metadata_mtime_nanos(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn signature_for_current_or_bytes(
+    path: &Path,
+    bytes: &[u8],
+    previous: Option<&FileSignature>,
+) -> FileSignature {
+    file_signature(path, previous).unwrap_or_else(|| FileSignature {
+        size: bytes.len() as u64,
+        mtime_nanos: 0,
+        hash: xxh3_64(bytes),
+    })
+}
+
+fn bytes_match_signature(bytes: &[u8], signature: &FileSignature) -> bool {
+    bytes.len() as u64 == signature.size && xxh3_64(bytes) == signature.hash
+}
+
+fn bytes_option_matches_signature(bytes: Option<&[u8]>, signature: Option<&FileSignature>) -> bool {
+    match (bytes, signature) {
+        (None, None) => true,
+        (Some(bytes), Some(signature)) => bytes_match_signature(bytes, signature),
+        _ => false,
+    }
+}
+
+fn same_file_content(before: Option<&FileSignature>, after: Option<&FileSignature>) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before), Some(after)) => before.size == after.size && before.hash == after.hash,
+        _ => false,
+    }
+}
+
+fn restore_source_for_change(
+    root: &Path,
+    path: &Path,
+    baseline: Option<&FileSignature>,
+) -> RestoreSource {
+    let Some(baseline) = baseline else {
+        return RestoreSource::Delete;
+    };
+    if let Ok(bytes) = fs::read(path) {
+        if bytes_match_signature(&bytes, baseline) {
+            return RestoreSource::Bytes(bytes);
+        }
+    }
+    if let Some(bytes) = git_head_bytes(root, path) {
+        if bytes_match_signature(&bytes, baseline) {
+            return RestoreSource::Bytes(bytes);
+        }
+    }
+    RestoreSource::Unsafe
+}
+
+fn git_head_bytes(root: &Path, path: &Path) -> Option<Vec<u8>> {
+    let repo = Repository::discover(root).ok()?;
+    let workdir = canonical_existing_path(repo.workdir()?);
+    let path = canonical_existing_path(path);
+    let rel = path.strip_prefix(workdir).ok()?;
+    let head = repo.head().ok()?.peel_to_tree().ok()?;
+    let entry = head.get_path(rel).ok()?;
+    let obj = entry.to_object(&repo).ok()?;
+    Some(obj.as_blob()?.content().to_vec())
+}
+
+fn canonical_existing_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
 }
 
 fn parse_process_table(output: &str) -> Vec<ProcessInfo> {
@@ -531,10 +774,7 @@ fn git_head_id(root: &Path) -> Option<String> {
         .map(|oid| oid.to_string())
 }
 
-fn revert_safe_changes(
-    baseline: &Snapshot,
-    pending: &mut BTreeMap<PathBuf, PendingChange>,
-) -> AgentRevertResult {
+fn revert_safe_changes(pending: &mut BTreeMap<PathBuf, PendingChange>) -> AgentRevertResult {
     let mut result = AgentRevertResult::default();
     let paths = pending.keys().cloned().collect::<Vec<_>>();
     for path in paths {
@@ -542,7 +782,10 @@ fn revert_safe_changes(
             continue;
         };
         let changed_after_observation = fs::read(&path).ok() != change.observed;
-        if change.human_touched || changed_after_observation {
+        if change.human_touched
+            || changed_after_observation
+            || matches!(change.restore, RestoreSource::Unsafe)
+        {
             if let Some(change) = pending.get_mut(&path) {
                 change.human_touched = true;
             }
@@ -551,20 +794,21 @@ fn revert_safe_changes(
                 .push(path.to_string_lossy().into_owned());
             continue;
         }
-        let restore = match baseline.get(&path) {
-            Some(bytes) => if let Some(parent) = path.parent() {
+        let restore = match &change.restore {
+            RestoreSource::Bytes(bytes) => if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|error| error.to_string())
             } else {
                 Ok(())
             }
             .and_then(|_| fs::write(&path, bytes).map_err(|error| error.to_string())),
-            None => {
+            RestoreSource::Delete => {
                 if path.exists() {
                     fs::remove_file(&path).map_err(|error| error.to_string())
                 } else {
                     Ok(())
                 }
             }
+            RestoreSource::Unsafe => Ok(()),
         };
         match restore {
             Ok(()) => {
@@ -627,8 +871,83 @@ mod tests {
     fn snapshot(entries: &[(&str, &[u8])]) -> Snapshot {
         entries
             .iter()
-            .map(|(path, bytes)| (PathBuf::from(path), bytes.to_vec()))
+            .map(|(path, bytes)| {
+                (
+                    PathBuf::from(path),
+                    FileSignature {
+                        size: bytes.len() as u64,
+                        mtime_nanos: 0,
+                        hash: xxh3_64(bytes),
+                    },
+                )
+            })
             .collect::<BTreeMap<_, _>>()
+    }
+
+    fn signature(size: u64, mtime_nanos: u128, hash: u64) -> FileSignature {
+        FileSignature {
+            size,
+            mtime_nanos,
+            hash,
+        }
+    }
+
+    #[test]
+    fn file_signatures_compare_content_independent_of_mtime() {
+        let baseline = signature(4, 10, 99);
+        let same_content_new_mtime = signature(4, 11, 99);
+        let changed_hash = signature(4, 11, 100);
+        let changed_size = signature(5, 10, 99);
+
+        assert!(same_file_content(
+            Some(&baseline),
+            Some(&same_content_new_mtime)
+        ));
+        assert!(!same_file_content(Some(&baseline), Some(&changed_hash)));
+        assert!(!same_file_content(Some(&baseline), Some(&changed_size)));
+        assert!(!same_file_content(Some(&baseline), None));
+    }
+
+    #[test]
+    fn scan_reuses_hash_when_size_and_mtime_are_unchanged() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "first").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let previous = baseline[&path].clone();
+
+        let rescanned = scan_workspace(dir.path(), Some(&baseline)).unwrap();
+
+        assert_eq!(rescanned[&path].hash, previous.hash);
+        assert_eq!(rescanned[&path].mtime_nanos, previous.mtime_nanos);
+    }
+
+    #[test]
+    fn restore_source_uses_git_head_when_it_matches_baseline_signature() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tracked.txt");
+        fs::write(&path, "head").unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        commit_all(&repo, "head");
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        fs::write(&path, "agent").unwrap();
+
+        let source = restore_source_for_change(dir.path(), &path, baseline.get(&path));
+
+        assert_eq!(source, RestoreSource::Bytes(b"head".to_vec()));
+    }
+
+    #[test]
+    fn restore_source_marks_modified_file_unsafe_when_original_is_unrecoverable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("untracked.txt");
+        fs::write(&path, "before").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        fs::write(&path, "agent").unwrap();
+
+        let source = restore_source_for_change(dir.path(), &path, baseline.get(&path));
+
+        assert_eq!(source, RestoreSource::Unsafe);
     }
 
     #[test]
@@ -644,7 +963,7 @@ mod tests {
             ("same.txt", b"same"),
         ]);
 
-        let changes = compare_snapshots(&base, &current);
+        let changes = compare_snapshots(Path::new("."), &base, &current, &BTreeMap::new());
         assert_eq!(changes[&PathBuf::from("added.txt")].status, "A");
         assert_eq!(changes[&PathBuf::from("deleted.txt")].status, "D");
         assert_eq!(changes[&PathBuf::from("modified.txt")].status, "M");
@@ -661,13 +980,36 @@ mod tests {
         fs::write(&created, b"agent-created").unwrap();
         fs::write(&unsafe_path, b"human-after-agent").unwrap();
 
-        let mut baseline = Snapshot::new();
-        baseline.insert(modified.clone(), vec![0, 159, 146, 150]);
-        baseline.insert(unsafe_path.clone(), b"before-agent".to_vec());
-        let mut pending = compare_snapshots(&baseline, &scan_workspace(dir.path()).unwrap());
-        pending.get_mut(&unsafe_path).unwrap().human_touched = true;
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            modified.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: false,
+                observed: Some(b"agent".to_vec()),
+                restore: RestoreSource::Bytes(vec![0, 159, 146, 150]),
+            },
+        );
+        pending.insert(
+            created.clone(),
+            PendingChange {
+                status: "A".into(),
+                human_touched: false,
+                observed: Some(b"agent-created".to_vec()),
+                restore: RestoreSource::Delete,
+            },
+        );
+        pending.insert(
+            unsafe_path.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: true,
+                observed: Some(b"human-after-agent".to_vec()),
+                restore: RestoreSource::Bytes(b"before-agent".to_vec()),
+            },
+        );
 
-        let result = revert_safe_changes(&baseline, &mut pending);
+        let result = revert_safe_changes(&mut pending);
 
         assert_eq!(fs::read(&modified).unwrap(), vec![0, 159, 146, 150]);
         assert!(!created.exists());
@@ -684,11 +1026,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file.txt");
         fs::write(&path, "agent").unwrap();
-        let baseline = snapshot(&[(path.to_str().unwrap(), b"before")]);
-        let mut pending = compare_snapshots(&baseline, &scan_workspace(dir.path()).unwrap());
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            path.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: false,
+                observed: Some(b"agent".to_vec()),
+                restore: RestoreSource::Bytes(b"before".to_vec()),
+            },
+        );
 
         fs::write(&path, "external-human").unwrap();
-        let result = revert_safe_changes(&baseline, &mut pending);
+        let result = revert_safe_changes(&mut pending);
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "external-human");
         assert_eq!(result.unsafe_paths, vec![path.to_string_lossy()]);
@@ -731,7 +1081,8 @@ mod tests {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head: "head".into(),
-                baseline: scan_workspace(dir.path()).unwrap(),
+                baseline: scan_workspace(dir.path(), None).unwrap(),
+                last_scan: scan_workspace(dir.path(), None).unwrap(),
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 2,
@@ -766,7 +1117,8 @@ mod tests {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
-                baseline: scan_workspace(dir.path()).unwrap(),
+                baseline: scan_workspace(dir.path(), None).unwrap(),
+                last_scan: scan_workspace(dir.path(), None).unwrap(),
                 pending: BTreeMap::new(),
                 agent_active: false,
                 settle_polls: 0,
@@ -779,10 +1131,10 @@ mod tests {
         tracker.poll(dir.path(), true, true).unwrap();
 
         assert!(tracker.session.as_ref().unwrap().pending.is_empty());
-        assert_eq!(
-            tracker.session.as_ref().unwrap().baseline[&path],
-            b"outside-agent"
-        );
+        assert!(bytes_match_signature(
+            b"outside-agent",
+            &tracker.session.as_ref().unwrap().baseline[&path],
+        ));
     }
 
     #[test]
@@ -790,11 +1142,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("f.txt");
         fs::write(&path, "base").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
         let mut tracker = Tracker {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head: "head".into(),
-                baseline: scan_workspace(dir.path()).unwrap(),
+                last_scan: baseline.clone(),
+                baseline,
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 0,
@@ -823,11 +1177,13 @@ mod tests {
         fs::write(&manual, "base").unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "initial");
+        let baseline = scan_workspace(dir.path(), None).unwrap();
         let mut tracker = Tracker {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
-                baseline: scan_workspace(dir.path()).unwrap(),
+                last_scan: baseline.clone(),
+                baseline,
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 0,
@@ -853,11 +1209,13 @@ mod tests {
         fs::write(&manual, "base").unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "initial");
+        let baseline = scan_workspace(dir.path(), None).unwrap();
         let mut tracker = Tracker {
             session: Some(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
-                baseline: scan_workspace(dir.path()).unwrap(),
+                last_scan: baseline.clone(),
+                baseline,
                 pending: BTreeMap::new(),
                 agent_active: true,
                 settle_polls: 0,

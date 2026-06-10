@@ -30,11 +30,22 @@ import {
 import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
+  deserializeWorkspaceSession,
   filterWorkspaceTabs,
   pathBelongsToRoot,
+  pruneWorkspaceSession,
+  serializeWorkspaceSession,
+  sessionFromTabs,
   upsertRecent,
   type RecentWorkspace,
 } from "../src/workspace";
+import {
+  DEFAULT_SETTINGS,
+  clampSettings,
+  deserializeSettings,
+  nextFontSettings,
+  serializeSettings,
+} from "../src/settings";
 import {
   agentBannerText,
   firstViewableAgentChange,
@@ -118,6 +129,73 @@ test("basenameOf returns the final folder segment", () => {
   assert.equal(basenameOf("/tmp/project/"), "project");
   assert.equal(basenameOf("/tmp/project"), "project");
   assert.equal(basenameOf("/"), "/");
+});
+
+test("sessionFromTabs persists ordered workspace file tabs and active path", () => {
+  const session = sessionFromTabs(
+    [
+      { path: "/tmp/project/a.ts" },
+      { path: null },
+      { path: "/tmp/project/b.ts" },
+      { path: "/tmp/other/c.ts" },
+      { path: "/tmp/project/a.ts" },
+    ],
+    "/tmp/project/b.ts",
+    "/tmp/project",
+  );
+
+  assert.deepEqual(session, {
+    tabs: ["/tmp/project/a.ts", "/tmp/project/b.ts"],
+    activePath: "/tmp/project/b.ts",
+  });
+});
+
+test("workspace session serialize and deserialize reject malformed storage", () => {
+  const raw = serializeWorkspaceSession({
+    tabs: ["/repo/a.ts", "/repo/b.ts"],
+    activePath: "/repo/b.ts",
+  });
+
+  assert.deepEqual(deserializeWorkspaceSession(raw), {
+    tabs: ["/repo/a.ts", "/repo/b.ts"],
+    activePath: "/repo/b.ts",
+  });
+  assert.equal(deserializeWorkspaceSession("not json"), null);
+  assert.equal(deserializeWorkspaceSession(JSON.stringify({ tabs: [1] })), null);
+});
+
+test("pruneWorkspaceSession skips missing tabs and drops missing active path", () => {
+  const pruned = pruneWorkspaceSession(
+    { tabs: ["/repo/a.ts", "/repo/missing.ts", "/repo/b.ts"], activePath: "/repo/missing.ts" },
+    (path) => path !== "/repo/missing.ts",
+  );
+
+  assert.deepEqual(pruned, {
+    tabs: ["/repo/a.ts", "/repo/b.ts"],
+    activePath: null,
+  });
+});
+
+test("settings deserialize clamps malformed or out-of-range values", () => {
+  assert.deepEqual(deserializeSettings(null), DEFAULT_SETTINGS);
+  assert.deepEqual(deserializeSettings("not json"), DEFAULT_SETTINGS);
+  assert.deepEqual(
+    deserializeSettings(JSON.stringify({ editorFontSize: 99, terminalFontSize: -4 })),
+    { ...DEFAULT_SETTINGS, editorFontSize: 24, terminalFontSize: 10 },
+  );
+  assert.deepEqual(clampSettings({ editorFontSize: 13, terminalFontSize: 15 }), {
+    ...DEFAULT_SETTINGS,
+    editorFontSize: 13,
+    terminalFontSize: 15,
+  });
+});
+
+test("settings serialize and font actions update both editor and terminal sizes", () => {
+  const settings = nextFontSettings(DEFAULT_SETTINGS, 1);
+
+  assert.deepEqual(settings, { ...DEFAULT_SETTINGS, editorFontSize: 14, terminalFontSize: 13 });
+  assert.deepEqual(nextFontSettings(settings, -1), DEFAULT_SETTINGS);
+  assert.deepEqual(deserializeSettings(serializeSettings(settings)), settings);
 });
 
 test("parseGitDirLine accepts only gitdir pointers", () => {

@@ -24,6 +24,14 @@ function lineCount(p: Change): number {
   return v.replace(/\n$/, "").split("\n").length;
 }
 
+function preservesOnlyFinalNewline(removed: string, added: string): boolean {
+  return (
+    removed !== added &&
+    removed.replace(/\n$/, "") === added.replace(/\n$/, "") &&
+    (removed.endsWith("\n") || added.endsWith("\n"))
+  );
+}
+
 /**
  * Diff `current` against `baseline` (git HEAD, or a captured pre-AI buffer).
  * A removed+added pair is a modification; a lone addition is new; a lone removal
@@ -54,6 +62,8 @@ export function computeLineDiff(
     // Absorb a contiguous run of removed/added parts into one hunk.
     let rem = 0;
     let add = 0;
+    let removedValue = "";
+    let addedValue = "";
     const startOld = oldLine;
     const startNew = newLine;
     while (i < parts.length && (parts[i].added || parts[i].removed)) {
@@ -61,12 +71,22 @@ export function computeLineDiff(
       const c = lineCount(q);
       if (q.removed) {
         rem += c;
+        removedValue += q.value;
         oldLine += c;
       } else {
         add += c;
+        addedValue += q.value;
         newLine += c;
       }
       i++;
+    }
+    let oldText = baseLines.slice(startOld, startOld + rem);
+    let newText = curLines.slice(startNew, startNew + add);
+    if (rem > 0 && add > 0 && preservesOnlyFinalNewline(removedValue, addedValue)) {
+      oldText = removedValue.split("\n");
+      newText = addedValue.split("\n");
+      rem = oldText.length;
+      add = newText.length;
     }
     const kind: DiffKind = rem > 0 && add > 0 ? "modified" : add > 0 ? "added" : "deleted";
     if (add > 0) {
@@ -83,8 +103,8 @@ export function computeLineDiff(
       kind,
       newFrom: startNew,
       newTo: startNew + add,
-      oldText: baseLines.slice(startOld, startOld + rem),
-      newText: curLines.slice(startNew, startNew + add),
+      oldText,
+      newText,
     });
   }
   return { marks, hunks };

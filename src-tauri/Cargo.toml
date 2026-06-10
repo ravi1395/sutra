@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 toml = "0.8"
 trash = "5"
 getrandom = "0.3"
+notify = "8.2.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
 tempfile = "3"

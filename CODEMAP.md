@@ -26,7 +26,7 @@ Main boot flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App bootstrap, workspace open, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index polling, integrated-agent polling/banner/review flow | `$`, `saveTab`, `openWorkspace`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `showAgentBanner` |
+| `src/main.ts` | App bootstrap, workspace open/session restore, settings apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/banner/review flow | `$`, `saveTab`, `openWorkspace`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `showAgentBanner` |
 | `src/agent-tracking.ts` | Pure integrated-agent presentation helpers and direct terminal command hint | `mergeChangedFiles`, `aiChanges`, `agentBannerText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
 | `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and recents | `mountMenuBar`, `MenuActions`, `MenuBarHandle`, `closeAll` |
@@ -45,7 +45,8 @@ Main boot flow:
 | `src/terminal-groups.ts` | Pure left/right terminal group movement helpers used by `TerminalManager` and tests | `moveItemToGroup`, `removeItemFromGroups`, `collapseAfterClose`, `groupSideForItem` (5 callers) |
 | `src/terminal.ts` | xterm frontends, multi-terminal split groups, PTY lifecycle, optional per-terminal cwd override, direct Claude/Codex pre-execution tracking hint | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit` |
 | `src/contextmenu.ts` | Right-click context menu (file tree + terminal) — build, position, dismiss | `openContextMenu`, `closeContextMenu` (4 callers) |
-| `src/workspace.ts` | Workspace path membership helpers + recents store (pure logic + localStorage adapters) | `pathBelongsToRoot` (7 callers), `normalizePath` (5 callers), `filterWorkspaceTabs`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
+| `src/workspace.ts` | Workspace path membership helpers, per-workspace session restore helpers, and recents store (pure logic + localStorage adapters) | `pathBelongsToRoot` (7 callers), `normalizePath` (5 callers), `filterWorkspaceTabs`, `sessionFromTabs`, `pruneWorkspaceSession`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
+| `src/settings.ts` | Persisted editor/terminal font settings and clamp/update helpers | `loadSettings`, `saveSettings`, `nextFontSettings`, `clampSettings` |
 | `src/preview.ts` | Markdown/HTML live preview in split pane; Markdown via `marked` + `DOMPurify`; HTML via static preview server | `PreviewController` |
 | `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply` |
 | `src/git-index.ts` | Pure helpers for resolving the real Git index in regular repos and linked worktrees | `parseGitDirLine`, `resolveGitIndexPathFromGitDir` |
@@ -58,7 +59,7 @@ Main boot flow:
 | Path | Owns | Key functions/classes |
 |---|---|---|
 | `src-tauri/src/lib.rs` | Tauri app builder, plugins, shared PTY state, command registration; minimal native Edit menu restores standard editing responders | `run` |
-| `src-tauri/src/agent_tracker.rs` | Git-only integrated-agent session detection, git-ignore-aware byte snapshots, candidate changes, Sutra mutation suppression, safe revert | `AgentTrackerState`, `agent_tracking_begin`, `agent_tracking_poll`, `agent_tracking_accept`, `agent_tracking_revert`, `compare_snapshots`, `has_agent_descendant` |
+| `src-tauri/src/agent_tracker.rs` | Git-only integrated-agent session detection, git-ignore-aware signature snapshots, changed-file byte capture, Sutra mutation suppression, safe revert | `AgentTrackerState`, `agent_tracking_begin`, `agent_tracking_poll`, `agent_tracking_accept`, `agent_tracking_revert`, `compare_snapshots`, `has_agent_descendant` |
 | `src-tauri/src/main.rs` | Native binary entrypoint | `main` |
 | `src-tauri/src/fs_cmds.rs` | Directory listing, symlink/depth-safe compact folders, capped text file read/write, Trash-backed delete, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
 | `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
@@ -67,11 +68,12 @@ Main boot flow:
 | `src-tauri/src/preview_server.rs` | Session-local token-gated static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
 | `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
 | `src-tauri/src/search.rs` | Project-wide file search, literal by default with explicit regex opt-in | `search_dir`; structs: `SearchMatch`, `SearchResult` |
+| `src-tauri/src/watcher.rs` | Recursive native filesystem watching for the active workspace; debounces changed paths into `fs-changed` events | `WatcherState`, `watch_start`, `watch_stop` |
 
 ## Important Call Paths
 
 **Open folder:**
-Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialog` (native dialog) or `openWorkspace(path)` for recents → `confirmWorkspaceClose` → `EditorManager.closeTabsOutsideWorkspace` → `FileTree.setRoot` → `MenuBarHandle.setCurrentWorkspace` → `TerminalManager.reset(cwd)` → `upsertRecent` + `saveRecents` → `tree.render` → `ipc.listDir` → Rust `fs_cmds::list_dir`.
+Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialog` (native dialog) or `openWorkspace(path)` for recents → `confirmWorkspaceClose` → save prior session → `EditorManager.closeTabsOutsideWorkspace` → `FileTree.setRoot` → restore saved tabs that still exist → `watch_start` → `MenuBarHandle.setCurrentWorkspace` → `TerminalManager.reset(cwd)` → `upsertRecent` + `saveRecents` → `tree.render` → `ipc.listDir` → Rust `fs_cmds::list_dir`.
 
 **Open file:**
 `FileTree.onOpenFile` → `EditorManager.openFile` → `ipc.readFile` + `ipc.gitHeadContent` → Rust `read_file` + `git_head_content` → new `Tab` → `EditorManager.activate`.
@@ -89,7 +91,7 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 `Shift+Cmd+V` → `main.togglePreview` → `EditorManager.togglePreview`. Markdown: renders current buffer through `preview.ts` (`marked` + `DOMPurify`) and external links open via the opener plugin. HTML: requires saved file in workspace → `ipc.previewServerUrl` → Rust `preview_server_url` → starts/reuses a token-gated `127.0.0.1` static server → preview iframe.
 
 **Git bar:**
-`mountGitBar` sets up periodic poll → `ipc.gitBranch` + `ipc.gitAheadBehind` + `ipc.gitStatus` → Rust `git_branch`, `git_ahead_behind`, `git_status` → renders branch name, ahead/behind badge, changed-file list. `main.pollGitIndex` resolves `.git/index` once per workspace, including linked worktree `.git` pointer files.
+`mountGitBar` sets up refreshes driven by native `fs-changed` events plus a 10s fallback poll → `ipc.gitBranch` + `ipc.gitAheadBehind` + `ipc.gitStatus` → Rust `git_branch`, `git_ahead_behind`, `git_status` → renders branch name, ahead/behind badge, changed-file list. `main.pollGitIndex` resolves `.git/index` once per workspace, including linked worktree `.git` pointer files.
 
 **Project search:**
 `SearchPanel.query` → `ipc.searchDir` → Rust `search_dir` (literal by default, regex only when `isRegex` is true) → results rendered as file:line rows → clicking opens file in editor.
@@ -104,7 +106,7 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 `TerminalManager.renderTabs` uses `beginSplitPointerDrag`. Releasing over `#terminal-area` → moves live `Term` + xterm DOM into selected group. Right-side drop creates/uses right group.
 
 **Integrated-agent workspace tracking:**
-Direct `claude`/`codex` terminal command → `agentTrackingBegin` captures pre-execution state. `pty_spawn` registers shell PID → `agentTrackingPoll` checks full process ancestry every 1.5s. Claude runs in report mode: `.sutra/hooks/report-edit.sh` posts edited paths to `/ingest/edit`, which records only reported paths as AI changes. Codex runs in discovery mode and keeps the workspace diff fallback. Sutra filesystem/config commands report known human mutations. The banner shows only when at least one non-human-touched AI change exists. View uses Git `HEAD`; safe revert restores only non-human-touched candidates.
+Direct `claude`/`codex` terminal command → `agentTrackingBegin` captures pre-execution signatures. `pty_spawn` registers shell PID → `agentTrackingPoll` checks full process ancestry every 1.5s, reusing hashes when size+mtime are unchanged. Claude runs in report mode: `.sutra/hooks/report-edit.sh` posts edited paths to `/ingest/edit`, which records only reported paths as AI changes. Codex runs in discovery mode and keeps the workspace diff fallback. Sutra filesystem/config commands report known human mutations. The banner shows only when at least one non-human-touched AI change exists. View uses Git `HEAD`; safe revert restores only non-human-touched candidates whose original bytes were captured or proven from matching Git `HEAD`.
 
 **MCP drive/read control plane:**
 Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.1` URLs → Rust `mcp.rs` validates path-taking drive tools with `resolve_in_root` → emits `sutra://drive` → `main.ts` routes to `EditorManager.openFile`/`firstHunkLine`, `FileTree.reveal`, or `TerminalManager.create`. The same local server exposes `/ingest/edit` for Claude edit reports and writes `<root>/.sutra/endpoint` when the root is set. Rust-native read tools call `git.rs`, `agent_tracker.rs`, or `search.rs` directly. UI-only reads emit `sutra://ui/request` with a pending oneshot id → `main.ts` replies via `mcp_ui_reply` with open-tabs or selection JSON; Rust times out after 2s and removes stale pending entries.
@@ -121,17 +123,18 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Build desktop app | `npm run tauri build` |
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
+| CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |
 
 ## Test Strategy
 
-- Workspace tab filtering, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups, native Edit menu structure: `npm test`
+- Workspace tab filtering/session restore, settings, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups, native Edit menu structure: `npm test`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
 - MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
 - Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`
 - Type-only frontend: `npm exec tsc -- --noEmit`
 - Rust command changes: `cargo check --manifest-path src-tauri/Cargo.toml`
 - UI behavior: `npm run tauri dev` — smoke editor shortcuts, terminal/splits, preview, then run integrated Claude/Codex and verify unopened-file banner/View/Keep/safe-revert plus non-Git disablement.
-- Diff logic (`computeLineDiff`): pure function — unit-testable, add tests before changing.
+- Diff logic (`computeLineDiff`, `hunkIndexAtLine`): pure function — unit-testable, covered in `tests/diff.test.ts`.
 - PTY changes: smoke multiple terminals, resize, close, panel toggle, shell exit.
 
 ## Risks
@@ -140,7 +143,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 - `pty.rs::Session` — **risk 0.7, security-relevant, untested** (graph). PTY output is raw bytes base64-encoded; xterm reassembles UTF-8 after decode. Never spawn/kill a PTY during split drag.
 - `computeLineDiff` / `revertHunk` — line/newline-sensitive; small off-by-one causes silent wrong reverts.
 - `EditorManager` stores one live `EditorView`; inactive tabs depend on `EditorState` checkpointing during activation.
-- Workspace snapshots retain ignored-aware file bytes for exact safe revert; large repositories can consume significant memory.
+- Workspace tracking baseline stores ignored-aware file signatures; only changed files retain observed bytes and proven restore bytes, keeping steady-state memory bounded by changed files plus signature metadata.
 - Filesystem events lack writer PID. Claude attribution depends on hook reports; missed hook posts mean no banner. Codex attribution remains conservative: unrelated external writes during a detected Codex window may appear.
 - Claude report hooks currently shell out to `node` and `curl` from `.sutra/hooks/report-edit.sh`; systems without either tool silently lose Claude edit attribution.
 - Safe revert compares current bytes with the last observed candidate state; later external edits become manual-review-only.
