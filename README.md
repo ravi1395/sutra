@@ -150,7 +150,7 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 
 ## Settings
 
-Open with **⌘,** (or "Settings" in the command palette). Changes apply
+Open with the titlebar Settings button, **⌘,**, or "Settings" in the command palette. Changes apply
 instantly and persist in `localStorage` across launches.
 
 | Section | Options |
@@ -185,6 +185,7 @@ instantly and persist in `localStorage` across launches.
 | `⌘B` | Toggle sidebar |
 | `⌘\` | Toggle split pane |
 | `⇧⌘V` | Toggle Markdown / HTML preview |
+| `⌘,` | Open Settings |
 
 ## Run
 

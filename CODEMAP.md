@@ -26,7 +26,7 @@ Main boot flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App bootstrap, workspace open/session restore, settings apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/banner/review flow | `$`, `saveTab`, `openWorkspace`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `showAgentBanner` |
+| `src/main.ts` | App bootstrap, workspace open/session restore, settings apply, titlebar settings button, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/banner/review flow | `$`, `saveTab`, `openWorkspace`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `showAgentBanner` |
 | `src/agent-tracking.ts` | Pure integrated-agent presentation helpers and direct terminal command hint | `mergeChangedFiles`, `aiChanges`, `agentBannerText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
 | `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
 | `src/menubar.ts` | Custom in-window menu bar + workspace switcher; one shared popover primitive for both menus and recents | `mountMenuBar`, `MenuActions`, `MenuBarHandle`, `closeAll` |
@@ -89,6 +89,9 @@ Switcher pill / recents / **File ▸ Open Folder** / `⌘O` → `openFolderDialo
 
 **Preview:**
 `Shift+Cmd+V` → `main.togglePreview` → `EditorManager.togglePreview`. Markdown: renders current buffer through `preview.ts` (`marked` + `DOMPurify`) and external links open via the opener plugin. HTML: requires saved file in workspace → `ipc.previewServerUrl` → Rust `preview_server_url` → starts/reuses a token-gated `127.0.0.1` static server → preview iframe.
+
+**Settings:**
+Titlebar Settings button / `Cmd+,` / Command Palette Settings → `main.openSettings` → `openSettingsModal`, which reuses live `settings`, persists via `saveSettings`, and applies changes through `applySettings`.
 
 **Git bar:**
 `mountGitBar` sets up refreshes driven by native `fs-changed` events plus a 10s fallback poll → `ipc.gitBranch` + `ipc.gitAheadBehind` + `ipc.gitStatus` → Rust `git_branch`, `git_ahead_behind`, `git_status` → renders branch name, ahead/behind badge, changed-file list. `main.pollGitIndex` resolves `.git/index` once per workspace, including linked worktree `.git` pointer files.

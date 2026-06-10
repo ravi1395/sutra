@@ -258,6 +258,18 @@ test("preview shortcut is handled before focused editor paste handlers", () => {
   assert.equal(GLOBAL_SHORTCUT_OPTIONS.capture, true);
 });
 
+test("titlebar settings button opens the existing settings modal path", () => {
+  const html = readFileSync("index.html", "utf8");
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const iconsTs = readFileSync("src/icons.ts", "utf8");
+
+  assert.match(html, /id="btn-settings"/);
+  assert.match(mainTs, /const btnSettings = \$\("btn-settings"\)/);
+  assert.match(mainTs, /btnSettings\.innerHTML = icon\("settings", 17\)/);
+  assert.match(mainTs, /btnSettings\.onclick = \(\) => openSettings\(\)/);
+  assert.match(iconsTs, /\|\s*"settings"/);
+});
+
 test("native Edit menu restores standard editing shortcuts", () => {
   const libRs = readFileSync("src-tauri/src/lib.rs", "utf8");
 

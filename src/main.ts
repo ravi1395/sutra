@@ -514,6 +514,7 @@ $("diff-close").onclick = () => setDiff(false);
 const browserArea = $("browser-area");
 const browserRes = $("browser-resizer");
 const btnBrowser = $("btn-browser");
+const btnSettings = $("btn-settings");
 function setBrowser(on: boolean): void {
   browserArea.classList.toggle("hidden", !on);
   browserRes.classList.toggle("hidden", !on);
@@ -850,12 +851,14 @@ window.addEventListener("blur", () => {
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("diff", 17);
 btnBrowser.innerHTML = icon("browser", 17);
+btnSettings.innerHTML = icon("settings", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
+btnSettings.onclick = () => openSettings();
 
 const actions = {
   newFile: () => editor.newUntitled(),
