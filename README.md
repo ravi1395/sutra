@@ -204,6 +204,29 @@ GitHub Actions runs on push and pull request on `macos-latest`: Node 20, Rust
 stable, `npm ci`, `npm run build`, `npm test`, and `cargo test --lib` in
 `src-tauri/` with Cargo caching.
 
+## Releases
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
+installers and attaches them to a draft GitHub release:
+
+- **macOS** — universal `.dmg` (Apple Silicon + Intel). Signed and notarized
+  when the `APPLE_*` repo secrets are set (`APPLE_CERTIFICATE`,
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_PASSWORD`, `APPLE_TEAM_ID`); otherwise ad-hoc signed and users must
+  right-click → Open on first launch.
+- **Windows** — x64 `.msi` and NSIS `.exe`. The installer fetches the WebView2
+  runtime if missing (preinstalled on Windows 10/11). Unsigned builds show a
+  SmartScreen prompt ("More info → Run anyway").
+
+End users need no Rust or Node — installers are self-contained.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0   # cut a release
+```
+
+The tag should match `version` in `src-tauri/tauri.conf.json`. Review the
+draft release on GitHub and publish.
+
 ## MCP control plane
 
 Sutra runs a local Model Context Protocol server (`http://127.0.0.1:<port>/mcp?token=...`)
