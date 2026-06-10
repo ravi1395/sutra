@@ -415,10 +415,11 @@ export class TerminalManager {
     };
 
     input.addEventListener("keydown", (e: KeyboardEvent) => {
-      if (e.key === "Enter") {
-        search.findNext(input.value);
-      } else if (e.key === "Shift" || (e.shiftKey && e.key === "Enter")) {
+      if (e.shiftKey && e.key === "Enter") {
+        e.preventDefault();
         search.findPrevious(input.value);
+      } else if (e.key === "Enter") {
+        search.findNext(input.value);
       } else if (e.key === "Escape") {
         e.preventDefault();
         close();
@@ -436,6 +437,7 @@ export class TerminalManager {
   private showHistorySuggestion(t: Term, prefix: string): void {
     // Find commands in history that start with prefix; show top 3.
     const suggestions = t.cmdHistory
+      .slice()
       .reverse()
       .filter((cmd) => cmd.startsWith(prefix) && cmd !== prefix)
       .slice(0, 3);

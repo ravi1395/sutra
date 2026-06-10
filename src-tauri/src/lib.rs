@@ -11,6 +11,8 @@ mod search;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let local_auth_token =
+        mcp::LocalAuthToken::generate().expect("failed to generate local server auth token");
     tauri::Builder::default()
         // Keep native Edit responders for standard shortcuts; the in-window
         // menu bar remains the visible source of truth for app commands.
@@ -30,16 +32,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(agent_tracker::AgentTrackerState::default())
+        .manage(local_auth_token)
         .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
         .manage(mcp::McpState::default())
         .setup(|app| {
             let state = app.state::<mcp::McpState>();
+            let token = app.state::<mcp::LocalAuthToken>().value().to_string();
             let port = mcp::start(
                 app.handle().clone(),
                 state.root.clone(),
                 state.pending.clone(),
                 state.next_id.clone(),
+                token,
             )
             .map_err(|e| e.to_string())?;
             *state.port.lock().unwrap() = Some(port);

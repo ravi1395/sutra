@@ -152,8 +152,12 @@ export const onPtyExit = (cb: (id: string) => void): Promise<UnlistenFn> =>
 
 export interface SearchMatch { path: string; line: number; text: string; }
 export interface SearchResult { matches: SearchMatch[]; truncated: boolean; }
-export const searchDir = (root: string, pattern: string, caseInsensitive: boolean) =>
-  invoke<SearchResult>("search_dir", { root, pattern, caseInsensitive });
+export const searchDir = (
+  root: string,
+  pattern: string,
+  caseInsensitive: boolean,
+  isRegex = false,
+) => invoke<SearchResult>("search_dir", { root, pattern, caseInsensitive, isRegex });
 
 // Clipboard wrappers over tauri-plugin-clipboard-manager.
 export const clipboardRead = (): Promise<string> => readText();

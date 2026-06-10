@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use crate::mcp::{query_has_auth_token, with_auth_token, LocalAuthToken};
+
 #[derive(Default)]
 pub struct PreviewServerState {
     servers: Mutex<HashMap<String, u16>>,
@@ -22,18 +24,21 @@ impl PreviewServerState {
     /// Public: canonicalize `file` under `root`, ensure it is a file, and return
     /// the local preview-server URL. Shared by the `preview_server_url` command
     /// and the MCP handlers.
-    pub fn url_for(&self, root: &Path, file: &Path) -> Result<String, String> {
+    pub fn url_for(&self, root: &Path, file: &Path, token: &str) -> Result<String, String> {
         let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
         let file = fs::canonicalize(file).map_err(|e| e.to_string())?;
         if !file.is_file() {
             return Err("preview path is not a file".to_string());
         }
         let url_path = file_url_path(&root, &file)?;
-        let port = self.port_for_root(root)?;
-        Ok(format!("http://127.0.0.1:{port}{url_path}"))
+        let port = self.port_for_root(root, token.to_string())?;
+        Ok(with_auth_token(
+            format!("http://127.0.0.1:{port}{url_path}"),
+            token,
+        ))
     }
 
-    fn port_for_root(&self, root: PathBuf) -> Result<u16, String> {
+    fn port_for_root(&self, root: PathBuf, token: String) -> Result<u16, String> {
         let key = root.to_string_lossy().into_owned();
         let mut servers = self.servers.lock().map_err(|e| e.to_string())?;
         if let Some(port) = servers.get(&key) {
@@ -44,7 +49,7 @@ impl PreviewServerState {
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         thread::Builder::new()
             .name("sutra-preview-server".to_string())
-            .spawn(move || serve(listener, root))
+            .spawn(move || serve(listener, root, token))
             .map_err(|e| e.to_string())?;
         servers.insert(key, port);
         Ok(port)
@@ -54,19 +59,20 @@ impl PreviewServerState {
 #[tauri::command]
 pub fn preview_server_url(
     state: tauri::State<PreviewServerState>,
+    token: tauri::State<LocalAuthToken>,
     root: String,
     path: String,
 ) -> Result<String, String> {
-    state.url_for(Path::new(&root), Path::new(&path))
+    state.url_for(Path::new(&root), Path::new(&path), token.value())
 }
 
-fn serve(listener: TcpListener, root: PathBuf) {
+fn serve(listener: TcpListener, root: PathBuf, token: String) {
     for stream in listener.incoming().flatten() {
-        handle_client(stream, &root);
+        handle_client(stream, &root, &token);
     }
 }
 
-fn handle_client(mut stream: TcpStream, root: &Path) {
+fn handle_client(mut stream: TcpStream, root: &Path, token: &str) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buf = [0_u8; 8192];
     let n = match stream.read(&mut buf) {
@@ -90,13 +96,29 @@ fn handle_client(mut stream: TcpStream, root: &Path) {
         return;
     }
 
-    let path_part = target
+    let (path_part, query_part) = target
         .split_once('?')
-        .map(|(path, _)| path)
-        .unwrap_or(target)
+        .map(|(path, query)| (path, Some(query)))
+        .unwrap_or((target, None));
+    let query_part = query_part.map(|query| {
+        query
+            .split_once('#')
+            .map(|(query, _)| query)
+            .unwrap_or(query)
+    });
+    if !query_has_auth_token(query_part, token) {
+        write_error(
+            &mut stream,
+            "401 Unauthorized",
+            "unauthorized",
+            method == "HEAD",
+        );
+        return;
+    }
+    let path_part = path_part
         .split_once('#')
         .map(|(path, _)| path)
-        .unwrap_or(target);
+        .unwrap_or(path_part);
 
     let mut file = match safe_request_path(root, path_part) {
         Ok(path) => path,
@@ -106,7 +128,13 @@ fn handle_client(mut stream: TcpStream, root: &Path) {
         }
     };
     if file.is_dir() {
-        file = file.join("index.html");
+        match canonicalize_in_root(root, &file.join("index.html")) {
+            Ok(index) => file = index,
+            Err(e) => {
+                write_error(&mut stream, "403 Forbidden", &e, method == "HEAD");
+                return;
+            }
+        }
     }
     let body = match fs::read(&file) {
         Ok(body) => body,
@@ -164,10 +192,20 @@ fn safe_request_path(root: &Path, raw_url_path: &str) -> Result<PathBuf, String>
         }
         out.push(segment);
     }
-    if out.strip_prefix(root).is_err() {
+    canonicalize_in_root(root, &out)
+}
+
+fn canonicalize_in_root(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let candidate = match fs::canonicalize(candidate) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => candidate.to_path_buf(),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !candidate.starts_with(&root) {
         return Err("path escapes preview root".to_string());
     }
-    Ok(out)
+    Ok(candidate)
 }
 
 fn file_url_path(root: &Path, file: &Path) -> Result<String, String> {
@@ -266,9 +304,9 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         state.servers.lock().unwrap().insert(key, 1420);
-        let url = state.url_for(dir.path(), &file).unwrap();
+        let url = state.url_for(dir.path(), &file, "abc").unwrap();
         assert!(url.starts_with("http://127.0.0.1:1420"));
-        assert!(url.ends_with("/page.html"));
+        assert!(url.ends_with("/page.html?token=abc"));
     }
 
     #[test]
@@ -295,5 +333,17 @@ mod tests {
         let root = Path::new("/tmp/sutra");
 
         assert!(safe_request_path(root, "/../secret.txt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_request_path_rejects_symlink_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside_file, root.path().join("link.txt")).unwrap();
+
+        assert!(safe_request_path(root.path(), "/link.txt").is_err());
     }
 }

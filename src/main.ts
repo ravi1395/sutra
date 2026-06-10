@@ -21,6 +21,7 @@ import {
   agentTrackingAccept,
   agentTrackingPoll,
   agentTrackingRevert,
+  readFile,
   writeFile,
   fileMtime,
   gitHeadContent,
@@ -55,6 +56,7 @@ import {
   type AutomationBarHandle,
 } from "./automations";
 import { icon } from "./icons";
+import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import { loadRecents, saveRecents, upsertRecent } from "./workspace";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 
@@ -322,9 +324,12 @@ async function openWorkspace(dir: string): Promise<void> {
   void refreshGitState(dir);
   automations = await loadAutomations(dir);
   automationBar.setAutomations(automations);
+  stopGitPoll();
+  const resolvedGitIndexPath = await resolveGitIndexPath(dir);
+  if (currentRoot !== dir) return;
+  gitIndexPath = resolvedGitIndexPath;
   startAgentTrackingPoll();
   void pollAgentChanges();
-  stopGitPoll();
   startGitPoll();
 }
 
@@ -459,6 +464,7 @@ function startAgentTrackingPoll(): void {
 // ---- git-index mtime watcher — refreshes tree badges after terminal git ops ----
 let gitIndexMtime = 0;
 let gitPollTimer: number | undefined;
+let gitIndexPath: string | null = null;
 
 function startGitPoll(): void {
   if (gitPollTimer !== undefined) return;
@@ -470,12 +476,26 @@ function stopGitPoll(): void {
     clearInterval(gitPollTimer);
     gitPollTimer = undefined;
     gitIndexMtime = 0;
+    gitIndexPath = null;
   }
+}
+
+/** Resolve the real git index once per workspace, including linked worktrees. */
+async function resolveGitIndexPath(root: string): Promise<string> {
+  const defaultIndex = `${root}/.git/index`;
+  try {
+    const gitFile = await readFile(`${root}/.git`);
+    const gitDir = parseGitDirLine(gitFile);
+    if (gitDir) return resolveGitIndexPathFromGitDir(root, gitDir);
+  } catch {
+    // Regular repos have a .git directory, not a readable pointer file.
+  }
+  return defaultIndex;
 }
 
 async function pollGitIndex(): Promise<void> {
   if (!currentRoot) return;
-  const indexPath = `${currentRoot}/.git/index`;
+  const indexPath = gitIndexPath ?? `${currentRoot}/.git/index`;
   try {
     const mtime = await fileMtime(indexPath);
     if (gitIndexMtime !== 0 && mtime !== gitIndexMtime) {

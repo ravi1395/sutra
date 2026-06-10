@@ -159,6 +159,7 @@ pub fn pty_kill(
             tracker.unregister_shell(pid);
         }
         let _ = session.child.kill();
+        let _ = session.child.wait();
     }
     Ok(())
 }

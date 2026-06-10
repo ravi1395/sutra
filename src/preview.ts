@@ -1,5 +1,6 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type PreviewKind = "md" | "html" | "diagram";
 
@@ -60,6 +61,7 @@ export class PreviewController {
       const raw = marked.parse(text) as string;
       const safe = DOMPurify.sanitize(raw);
       this.el.innerHTML = `<style>${MD_STYLE}</style><div class="sutra-md-preview">${safe}</div>`;
+      this.interceptMarkdownLinks();
       return;
     }
     if (this.kind === "diagram") {
@@ -77,5 +79,26 @@ export class PreviewController {
       this.el.appendChild(this.frame);
     }
     this.frame.src = text;
+  }
+
+  /** Route external Markdown links through the system opener. */
+  private interceptMarkdownLinks(): void {
+    const preview = this.el.querySelector(".sutra-md-preview");
+    preview?.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest<HTMLAnchorElement>("a[href]");
+      const href = link?.getAttribute("href");
+      if (!href) return;
+      let url: URL;
+      try {
+        url = new URL(href);
+      } catch {
+        return;
+      }
+      if (!["http:", "https:", "mailto:"].includes(url.protocol)) return;
+      event.preventDefault();
+      void openUrl(url.toString()).catch(() => {});
+    });
   }
 }

@@ -7,6 +7,7 @@ import {
   previewTabName,
   splitClonesActiveTab,
 } from "../src/editor";
+import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "../src/git-index";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "../src/shortcuts";
 import {
   FILE_DRAG_TYPE,
@@ -117,6 +118,24 @@ test("basenameOf returns the final folder segment", () => {
   assert.equal(basenameOf("/tmp/project/"), "project");
   assert.equal(basenameOf("/tmp/project"), "project");
   assert.equal(basenameOf("/"), "/");
+});
+
+test("parseGitDirLine accepts only gitdir pointers", () => {
+  assert.equal(parseGitDirLine("gitdir: ../.git/worktrees/sutra\n"), "../.git/worktrees/sutra");
+  assert.equal(parseGitDirLine(" gitdir: /repo/.git/worktrees/wt \n"), "/repo/.git/worktrees/wt");
+  assert.equal(parseGitDirLine("not a gitdir"), null);
+  assert.equal(parseGitDirLine("gitdir:"), null);
+});
+
+test("resolveGitIndexPathFromGitDir resolves relative gitdir paths against root", () => {
+  assert.equal(
+    resolveGitIndexPathFromGitDir("/work/project", "../.git/worktrees/project"),
+    "/work/.git/worktrees/project/index",
+  );
+  assert.equal(
+    resolveGitIndexPathFromGitDir("/work/project", "/repo/.git/worktrees/project"),
+    "/repo/.git/worktrees/project/index",
+  );
 });
 
 test("detectLanguage covers requested syntax highlighted extensions", () => {

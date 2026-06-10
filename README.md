@@ -33,6 +33,10 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 ### Files
 - View, edit, and save files (`⌘S`). New file via **File ▸ New File** (`⌘N`),
   **Save As** (`⇧⌘S`), **Save All** (`⌥⌘S`), **Close Tab** (`⌘W`).
+- Deleting from the file tree moves files/folders to the macOS Trash instead
+  of permanently removing them.
+- Text files larger than 10 MB are refused before loading to keep the webview
+  responsive.
 - Saving a **new / untitled** file opens the native Finder dialog to choose a
   name + extension.
 - Opening a folder closes tabs outside that folder so the workspace matches the
@@ -83,6 +87,12 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - **Click a gutter marker** to open the diff viewer focused on that hunk.
 - Each hunk has a **Revert** button that restores that hunk to its HEAD version.
 
+### Search
+
+- Folder search treats the query as literal text by default, so characters like
+  `(` and `[` do not need escaping. MCP clients can opt into regex search with
+  `isRegex: true`.
+
 ### Split view & preview
 
 - **Split pane** — `⌘\` opens a second editor column; pressing again collapses it.
@@ -96,9 +106,12 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   live preview in the right pane (opening the split automatically if needed).
   - Markdown is rendered via **marked** and sanitized with **DOMPurify** before
     injection, so scripts and inline handlers are stripped.
+  - Markdown preview links to external `http:`, `https:`, and `mailto:` URLs
+    open through the system opener instead of navigating the Sutra webview.
   - Saved HTML files are loaded from Sutra's local static preview server at
     `127.0.0.1:<port>`, rooted at the opened workspace. Relative CSS, images,
-    and scripts resolve like a normal browser page.
+    and scripts resolve like a normal browser page. Preview URLs include a
+    session token, and unauthenticated local requests are rejected.
   - Markdown preview updates within ~150 ms of each keystroke in the source pane.
     HTML preview serves disk content, so save the file to reload the preview.
   - Pressing `⇧⌘V` again (source still focused) closes the preview; if the right
@@ -160,13 +173,15 @@ and takes a minute or two; later builds are incremental.
 
 ## MCP control plane
 
-Sutra runs a local Model Context Protocol server (`http://127.0.0.1:<port>/mcp`)
+Sutra runs a local Model Context Protocol server (`http://127.0.0.1:<port>/mcp?token=...`)
 so a `claude`/`codex` agent in the integrated terminal can render output into
 Sutra's preview pane. On opening a workspace, Sutra merge-writes a `sutra` entry
 into `.mcp.json` (claude) and `.codex/config.toml` (codex), writes a Claude
 edit-report hook under `.sutra/hooks/`, and merges that hook into
 `.claude/settings.json`. Generated config paths are gitignored. Existing
 entries are preserved; a malformed file is skipped rather than overwritten.
+The token is generated once per app launch and required on both the MCP and
+preview loopback servers.
 
 ### Display tools (P1)
 
@@ -192,7 +207,7 @@ entries are preserved; a malformed file is skipped rather than overwritten.
 |---|---|---|
 | `get_git_status` | — | Branch, ahead/behind, changed files. |
 | `get_tracked_changes` | — | AI-vs-human pending changes from the agent tracker. |
-| `search` | `query`, `caseInsensitive?` | Matching file/line/text results. |
+| `search` | `query`, `caseInsensitive?`, `isRegex?` | Matching file/line/text results. Literal by default; set `isRegex` to opt in. |
 | `get_open_tabs` | — | Open tab paths, names, active/dirty flags (live, via UI round-trip). |
 | `get_selection` | — | Active file path, selected text, line (live, via UI round-trip). |
 
@@ -237,6 +252,8 @@ correct.
 - Workspace snapshots retain file bytes for exact safe revert and may use
   significant memory in large repositories.
 - Binary files are rejected by the editor (`read_file` returns an error).
+- The Tauri webview uses this Content-Security-Policy:
+  `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://127.0.0.1:* https:; frame-src http://127.0.0.1:* http://localhost:* https:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*`.
 - MCP `render_html` executes agent-supplied scripts inside a separate
   `127.0.0.1:<port>` iframe origin — isolated from Tauri IPC (no `fs`/`pty`
   access), but it is not sandboxed against network/DOM within that iframe.

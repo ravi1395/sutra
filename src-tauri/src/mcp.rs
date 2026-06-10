@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::State as AxumState;
+use axum::extract::{Request, State as AxumState};
 use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::post;
 use axum::Json;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -25,6 +27,66 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 
 use crate::preview_server::PreviewServerState;
+
+/// Shared local-server bearer token appended to preview/MCP loopback URLs.
+#[derive(Clone)]
+pub struct LocalAuthToken(String);
+
+impl LocalAuthToken {
+    /// Generate a 32-byte random token encoded as lowercase hex.
+    pub fn generate() -> Result<Self, String> {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
+        Ok(Self(hex_encode(&bytes)))
+    }
+
+    /// Return the token string for URL construction and request checks.
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Encode bytes as lowercase hex without pulling in another dependency.
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// True when a URL query contains the exact local auth token.
+pub fn query_has_auth_token(query: Option<&str>, token: &str) -> bool {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .any(|(key, value)| key == "token" && value == token)
+}
+
+/// Append the local auth token to a URL as `token=...`.
+pub fn with_auth_token(url: String, token: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}token={token}")
+}
+
+/// Reject unauthenticated MCP HTTP requests before they reach rmcp.
+async fn require_auth_token(
+    AxumState(token): AxumState<String>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/ingest/edit" {
+        return Ok(next.run(req).await);
+    }
+    if query_has_auth_token(req.uri().query(), &token) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
 
 /// Resolve `path` (absolute or relative to `root`) and confirm it stays inside
 /// `root`. Returns the canonical path or an error string.
@@ -262,6 +324,8 @@ struct SearchArgs {
     query: String,
     /// Case-insensitive search (default true).
     case_insensitive: Option<bool>,
+    /// Treat query as a regex instead of literal text (default false).
+    is_regex: Option<bool>,
 }
 
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
@@ -367,7 +431,7 @@ impl SutraMcp {
         let url = self
             .app
             .state::<PreviewServerState>()
-            .url_for(&root, &file)
+            .url_for(&root, &file, self.app.state::<LocalAuthToken>().value())
             .map_err(|e| McpError::internal_error(e, None))?;
         self.emit_preview(PreviewOpen {
             kind: "html",
@@ -423,7 +487,7 @@ impl SutraMcp {
                 let url = self
                     .app
                     .state::<PreviewServerState>()
-                    .url_for(&root, &file)
+                    .url_for(&root, &file, self.app.state::<LocalAuthToken>().value())
                     .map_err(|e| McpError::internal_error(e, None))?;
                 self.emit_preview(PreviewOpen {
                     kind: "html",
@@ -549,6 +613,7 @@ impl SutraMcp {
             root.to_string_lossy().into_owned(),
             args.query,
             args.case_insensitive.unwrap_or(true),
+            args.is_regex,
         )
         .map_err(|e| McpError::internal_error(e, None))?;
         let body = serde_json::to_value(&result)
@@ -595,6 +660,7 @@ pub fn start(
     root: Arc<Mutex<Option<PathBuf>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     next_id: Arc<AtomicU64>,
+    auth_token: String,
 ) -> Result<u16, String> {
     let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
     let port = std_listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -631,6 +697,10 @@ pub fn start(
                 let router = axum::Router::new()
                     .nest_service("/mcp", service)
                     .route("/ingest/edit", post(ingest_edit))
+                    .layer(axum::middleware::from_fn_with_state(
+                        auth_token.clone(),
+                        require_auth_token,
+                    ))
                     .with_state(ingest_ctx);
                 let _ = axum::serve(listener, router).await;
             });
@@ -643,13 +713,19 @@ pub fn start(
 
 /// Return the live MCP server URL (`http://127.0.0.1:PORT/mcp`).
 #[tauri::command]
-pub fn mcp_server_url(state: tauri::State<McpState>) -> Result<String, String> {
+pub fn mcp_server_url(
+    state: tauri::State<McpState>,
+    token: tauri::State<LocalAuthToken>,
+) -> Result<String, String> {
     let port = state
         .port
         .lock()
         .map_err(|e| e.to_string())?
         .ok_or("mcp server not started")?;
-    Ok(format!("http://127.0.0.1:{port}/mcp"))
+    Ok(with_auth_token(
+        format!("http://127.0.0.1:{port}/mcp"),
+        token.value(),
+    ))
 }
 
 /// Set the active workspace root the MCP tools target.
@@ -670,6 +746,7 @@ pub fn mcp_set_root(state: tauri::State<McpState>, root: String) -> Result<(), S
 pub fn mcp_write_agent_config(
     state: tauri::State<McpState>,
     tracker: tauri::State<crate::agent_tracker::AgentTrackerState>,
+    token: tauri::State<LocalAuthToken>,
     root: String,
 ) -> Result<Vec<String>, String> {
     use crate::agent_tracker::capture_paths;
@@ -681,7 +758,7 @@ pub fn mcp_write_agent_config(
         .lock()
         .map_err(|e| e.to_string())?
         .ok_or("mcp server not started")?;
-    let url = format!("http://127.0.0.1:{port}/mcp");
+    let url = with_auth_token(format!("http://127.0.0.1:{port}/mcp"), token.value());
     let root = PathBuf::from(root);
     let mut warnings = Vec::new();
 
@@ -848,5 +925,16 @@ mod tests {
         assert!(state.pending.lock().unwrap().is_empty());
         let mut rx = rx;
         assert_eq!(rx.try_recv().unwrap()["tabs"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn token_helpers_append_and_validate_query_token() {
+        assert_eq!(hex_encode(&[0, 15, 255]), "000fff");
+        let url = with_auth_token("http://127.0.0.1:1/mcp".to_string(), "abc");
+        assert_eq!(url, "http://127.0.0.1:1/mcp?token=abc");
+        assert!(query_has_auth_token(Some("token=abc"), "abc"));
+        assert!(query_has_auth_token(Some("x=1&token=abc"), "abc"));
+        assert!(!query_has_auth_token(Some("token=wrong"), "abc"));
+        assert!(!query_has_auth_token(None, "abc"));
     }
 }

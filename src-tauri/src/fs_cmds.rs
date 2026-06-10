@@ -6,6 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
+const MAX_COMPACT_DEPTH: usize = 32;
+const MAX_READ_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const BYTES_PER_MB: u64 = 1024 * 1024;
+
 #[derive(Serialize)]
 pub struct Entry {
     /// Display label. For compacted dir chains this is `a/b/c`.
@@ -28,7 +32,8 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>, String> {
     for ent in rd {
         let ent = ent.map_err(|e| e.to_string())?;
         let p = ent.path();
-        if p.is_dir() {
+        let file_type = ent.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
             let (deep, label) = compact(p);
             dirs.push(Entry {
                 name: label,
@@ -55,13 +60,19 @@ fn read_entries(dir: &Path) -> Result<Vec<Entry>, String> {
 fn compact(start: PathBuf) -> (PathBuf, String) {
     let mut path = start;
     let mut label = name_of(&path);
-    loop {
-        let children: Vec<PathBuf> = match fs::read_dir(&path) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+    for _ in 0..MAX_COMPACT_DEPTH {
+        let children: Vec<(PathBuf, fs::FileType)> = match fs::read_dir(&path) {
+            Ok(rd) => rd
+                .filter_map(|e| {
+                    let e = e.ok()?;
+                    let file_type = e.file_type().ok()?;
+                    Some((e.path(), file_type))
+                })
+                .collect(),
             Err(_) => break,
         };
-        if children.len() == 1 && children[0].is_dir() {
-            path = children[0].clone();
+        if children.len() == 1 && children[0].1.is_dir() {
+            path = children[0].0.clone();
             label = format!("{}/{}", label, name_of(&path));
         } else {
             break;
@@ -78,6 +89,11 @@ fn name_of(p: &Path) -> String {
 
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_READ_FILE_BYTES {
+        let mb = (meta.len() + BYTES_PER_MB - 1) / BYTES_PER_MB;
+        return Err(format!("file too large to open ({mb} MB)"));
+    }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|_| "binary file".to_string())
 }
@@ -171,14 +187,9 @@ pub fn move_path(
 /// Delete a file or folder (recursive for directories).
 #[tauri::command]
 pub fn delete_path(tracker: State<'_, AgentTrackerState>, path: String) -> Result<(), String> {
-    let p = Path::new(&path);
     let tracked_path = PathBuf::from(&path);
     let before = capture_paths(&[tracked_path.clone()]);
-    if p.is_dir() {
-        fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-    } else {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
+    trash::delete(&path).map_err(|e| e.to_string())?;
     tracker.record_sutra_mutation(before, &[tracked_path]);
     Ok(())
 }
@@ -225,5 +236,50 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect();
         assert_eq!(names, vec!["a.txt"], "temp files left behind: {names:?}");
+    }
+
+    #[test]
+    fn read_file_rejects_files_over_ten_mb() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("huge.txt");
+        let file = fs::File::create(&target).unwrap();
+        file.set_len(10 * 1024 * 1024 + 1).unwrap();
+
+        assert_eq!(
+            read_file(target.to_string_lossy().into_owned()).unwrap_err(),
+            "file too large to open (11 MB)"
+        );
+    }
+
+    #[test]
+    fn compact_stops_after_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut current = dir.path().join("d0");
+        fs::create_dir(&current).unwrap();
+        let start = current.clone();
+        for i in 1..40 {
+            current = current.join(format!("d{i}"));
+            fs::create_dir(&current).unwrap();
+        }
+
+        let (_deep, label) = compact(start);
+
+        assert_eq!(label.split('/').count(), 33);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_does_not_follow_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = dir.path().join("a");
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(&start).unwrap();
+        fs::write(outside.path().join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), start.join("link")).unwrap();
+
+        let (deep, label) = compact(start.clone());
+
+        assert_eq!(deep, start);
+        assert_eq!(label, "a");
     }
 }
