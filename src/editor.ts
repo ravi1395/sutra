@@ -28,7 +28,7 @@ import {
 import { openSearchPanel, selectNextOccurrence, search } from "@codemirror/search";
 import { buildSearchPanel } from "./search-panel";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { StreamLanguage } from "@codemirror/language";
+import { StreamLanguage, indentUnit } from "@codemirror/language";
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
 import { json } from "@codemirror/lang-json";
@@ -118,6 +118,11 @@ const diffField = StateField.define<RangeSet<GutterMarker>>({
 
 const rubyLanguage = StreamLanguage.define(ruby);
 
+// Indent width as both the display tab size and the unit inserted by indent commands.
+export function indentSettings(size: number): Extension {
+  return [EditorState.tabSize.of(size), indentUnit.of(" ".repeat(size))];
+}
+
 export function detectLanguage(name: string): Extension | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   switch (ext) {
@@ -202,6 +207,8 @@ export class Pane {
   readonly previewEl: HTMLElement; // .preview-host (used in Phase 5)
   private welcomeEl: HTMLElement;
   private languageCompartment = new Compartment();
+  private indentCompartment = new Compartment();
+  private wrapCompartment = new Compartment();
 
   constructor(
     private mgr: EditorManager,
@@ -257,6 +264,8 @@ export class Pane {
         },
       }),
       this.languageCompartment.of(detectLanguage(name) ?? []),
+      this.indentCompartment.of(indentSettings(this.mgr.indentSize)),
+      this.wrapCompartment.of(this.mgr.wordWrap ? EditorView.lineWrapping : []),
       Prec.high(
         keymap.of([
           { key: "Mod-s", run: () => (this.mgr.requestSave(this), true) },
@@ -297,6 +306,16 @@ export class Pane {
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: text },
     });
+  }
+
+  // Live-reconfigures indent width for the currently displayed document.
+  applyIndent(size: number): void {
+    this.view.dispatch({ effects: this.indentCompartment.reconfigure(indentSettings(size)) });
+  }
+
+  // Live-toggles soft wrap for the currently displayed document.
+  applyWrap(on: boolean): void {
+    this.view.dispatch({ effects: this.wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []) });
   }
 
   tabByPath(path: string): Tab | undefined {
@@ -509,6 +528,9 @@ export class Pane {
 export class EditorManager {
   panes: Pane[] = [];
   focused: Pane;
+  // Current indent/wrap preferences; new tabs read these, open tabs get reconfigured.
+  indentSize = 4;
+  wordWrap = false;
 
   // wired by main.ts
   saveHandler?: (tab: Tab) => Promise<void>;
@@ -534,6 +556,18 @@ export class EditorManager {
   /** Root hit target for internal editor tab split drags. */
   get splitTarget(): HTMLElement {
     return this.container;
+  }
+
+  // Applies indent width to every pane and remembers it for future tabs.
+  setIndent(size: number): void {
+    this.indentSize = size;
+    for (const p of this.panes) p.applyIndent(size);
+  }
+
+  // Applies soft wrap to every pane and remembers it for future tabs.
+  setWordWrap(on: boolean): void {
+    this.wordWrap = on;
+    for (const p of this.panes) p.applyWrap(on);
   }
 
   setFocused(pane: Pane): void {
