@@ -91,6 +91,7 @@ export function deserializeSettings(raw: string | null): UserSettings {
 
 export function nextFontSettings(settings: UserSettings, delta: number): UserSettings {
   return clampSettings({
+    ...settings,
     editorFontSize: settings.editorFontSize + delta,
     terminalFontSize: settings.terminalFontSize + delta,
   });

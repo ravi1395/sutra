@@ -71,6 +71,24 @@ test("nextFontSettings still bumps both fonts and clamps", () => {
   assert.equal(nextFontSettings(s, 100).editorFontSize, 24);
 });
 
+test("nextFontSettings preserves non-font settings", () => {
+  const s = clampSettings({
+    editorWordWrap: true,
+    editorTabSize: 8,
+    terminalScrollback: 10000,
+    restoreSession: false,
+    agentTracking: false,
+    autosaveOnBlur: true,
+  });
+  const next = nextFontSettings(s, 1);
+  assert.equal(next.editorWordWrap, true);
+  assert.equal(next.editorTabSize, 8);
+  assert.equal(next.terminalScrollback, 10000);
+  assert.equal(next.restoreSession, false);
+  assert.equal(next.agentTracking, false);
+  assert.equal(next.autosaveOnBlur, true);
+});
+
 test("indentSettings sets tabSize and indent unit", () => {
   const state = EditorState.create({ extensions: indentSettings(2) });
   assert.equal(state.tabSize, 2);
