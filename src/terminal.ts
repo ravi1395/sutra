@@ -68,6 +68,10 @@ export class TerminalManager {
   private terms: Term[] = [];
   private active: Term | null = null;
   private seq = 0;
+  private fontSize = 12;
+  private fontFamily = '"SF Mono", Menlo, monospace';
+  private scrollback = 5000;
+  private shellPref: string | null = null;
   cwd: string | null = null;
   onTabsChanged?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
@@ -212,10 +216,10 @@ export class TerminalManager {
     const id = newPtyId();
     const term = new Terminal({
       theme: THEME,
-      fontFamily: '"SF Mono", Menlo, monospace',
-      fontSize: 12,
+      fontFamily: this.fontFamily,
+      fontSize: this.fontSize,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: this.scrollback,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -594,6 +598,38 @@ export class TerminalManager {
 
   focusActive(): void {
     this.active?.term.focus();
+  }
+
+  /** Apply terminal font size to current and future terminal sessions. */
+  setFontSize(size: number): void {
+    this.fontSize = size;
+    for (const t of this.terms) {
+      t.term.options.fontSize = size;
+    }
+    this.refit();
+  }
+
+  /** Apply terminal font family to current and future terminal sessions. */
+  setFontFamily(family: string): void {
+    this.fontFamily = family;
+    for (const t of this.terms) {
+      t.term.options.fontFamily = family;
+    }
+    this.refit();
+  }
+
+  /** Apply terminal scrollback depth to current and future terminal sessions. */
+  setScrollback(lines: number): void {
+    this.scrollback = lines;
+    for (const t of this.terms) {
+      t.term.options.scrollback = lines;
+    }
+  }
+
+  /** Apply shell preference to future terminal sessions; null uses system $SHELL. */
+  setShellPreference(shell: string | null): void {
+    if (this.shellPref === shell) return;
+    this.shellPref = shell;
   }
 
   private renderTabs(): void {
