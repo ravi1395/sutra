@@ -1,5 +1,7 @@
 # Sutra
 
+[![CI](https://github.com/ravi1395/sutra/actions/workflows/ci.yml/badge.svg)](https://github.com/ravi1395/sutra/actions/workflows/ci.yml)
+
 Minimal Rust + Tauri code editor: folder tree, multi-tab editor, integrated
 multi-terminal, and a git-aware diff viewer with per-hunk revert. Built for a
 fast, low-chrome editing loop rather than IDE breadth.
@@ -49,17 +51,26 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - The **＋** button adds a folder via the native dialog.
 - Recents are deduped, most-recent-first, capped at 8, and persisted in
   `localStorage` across relaunches. Also reachable via **File ▸ Open Recent**.
+- Each workspace restores its previous file tabs from `localStorage` after the
+  tree loads. Missing files are skipped; the saved active tab is reactivated
+  when it still exists.
 - **Compact folder tree**: single-subfolder chains with no files collapse into
   one `a/b/c` node, so expanding one node lands on real content instead of a
   corridor of empty folders.
 - File and folder rows show type-specific colored badges, including common
   source, config, Markdown, and data files.
+- Native file watching refreshes the tree, clean open-tab baselines, and git
+  badges after filesystem changes. A 10s git-index mtime poll remains as a
+  fallback.
 
 ### Editor
 - CodeMirror 6 with **line numbers**, one-dark theme, bracket matching, search,
   and syntax highlighting for HTML, JS, TS, Python, Java, SQL, Rust, Go, Ruby,
   JSON, CSS, and Markdown.
 - VS Code-style keybindings (see table).
+- Command palette actions **Increase Font Size**, **Decrease Font Size**, and
+  **Reset Font Size** update editor and terminal font sizes live and persist in
+  `localStorage`.
 
 ### Terminal
 - Real PTYs via `portable-pty` (your `$SHELL`, defaults to zsh).
@@ -134,6 +145,21 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   and require manual/per-hunk review.
 - Non-Git workspaces and Claude/Codex processes launched outside Sutra are not
   tracked.
+- Tracking baselines store per-file signatures instead of full workspace bytes.
+  Full bytes are retained only for changed files when needed for safe revert.
+
+## Settings
+
+Open with **⌘,** (or "Settings" in the command palette). Changes apply
+instantly and persist in `localStorage` across launches.
+
+| Section | Options |
+|---|---|
+| Editor | Font size (10–24), font family, tab size (2/4/8), word wrap |
+| Terminal | Font size, font family, scrollback (1k/5k/10k), default shell (new sessions only) |
+| Behavior | Restore session on launch, AI agent tracking, autosave on focus loss |
+| Shortcuts | Read-only keyboard shortcut reference |
+| About | App description, version, reset all settings |
 
 ## Keyboard shortcuts
 
@@ -170,6 +196,12 @@ npm run tauri build    # production bundle (.app / .dmg)
 
 Requires Rust (stable) and Node. First Rust build compiles `git2` + `portable-pty`
 and takes a minute or two; later builds are incremental.
+
+## CI
+
+GitHub Actions runs on push and pull request on `macos-latest`: Node 20, Rust
+stable, `npm ci`, `npm run build`, `npm test`, and `cargo test --lib` in
+`src-tauri/` with Cargo caching.
 
 ## MCP control plane
 
@@ -222,6 +254,7 @@ served directly from Rust.
 | Layer | Path | Responsibility |
 |---|---|---|
 | Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
+| Rust: watcher | `src-tauri/src/watcher.rs` | recursive native workspace watcher, debounced `fs-changed` event |
 | Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 13 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
@@ -237,6 +270,7 @@ served directly from Rust.
 | TS: terminal | `src/terminal.ts` | xterm front-ends, multi-session, terminal split groups, refit |
 | TS: layout | `src/layout.ts` | drag-resize splitters; terminal height shrinks within app bounds |
 | TS: agent tracking | `src/agent-tracking.ts` | pending-file merge, banner text, direct-command hint |
+| TS: settings | `src/settings.ts` | persisted editor/terminal font size helpers |
 | TS: main | `src/main.ts` | wiring, toggles, shortcuts, save, integrated-agent review flow |
 
 PTY output is shipped to the UI as base64-encoded raw bytes and decoded to a
@@ -249,8 +283,9 @@ correct.
   (there is nothing to diff against) until it is committed.
 - Integrated-agent tracking polls process/workspace state every 1.5s; direct
   `claude`/`codex` terminal commands snapshot before execution.
-- Workspace snapshots retain file bytes for exact safe revert and may use
-  significant memory in large repositories.
+- Workspace tracking retains signatures for the baseline and only changed-file
+  bytes for review/revert. If original bytes cannot be proven from the captured
+  state or matching Git `HEAD`, revert marks that path unsafe.
 - Binary files are rejected by the editor (`read_file` returns an error).
 - The Tauri webview uses this Content-Security-Policy:
   `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://127.0.0.1:* https:; frame-src http://127.0.0.1:* http://localhost:* https:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*`.
