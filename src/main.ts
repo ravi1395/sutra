@@ -3,6 +3,7 @@
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { FileTree } from "./tree";
 import {
   FILE_DRAG_TYPE,
@@ -37,6 +38,9 @@ import {
   mcpUiReply,
   mcpSetRoot,
   mcpWriteAgentConfig,
+  onFsChanged,
+  watchStart,
+  watchStop,
   type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
@@ -57,8 +61,26 @@ import {
 } from "./automations";
 import { icon } from "./icons";
 import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
-import { loadRecents, saveRecents, upsertRecent } from "./workspace";
+import {
+  loadRecents,
+  loadWorkspaceSession,
+  pathBelongsToRoot,
+  pruneWorkspaceSession,
+  saveRecents,
+  saveWorkspaceSession,
+  sessionFromTabs,
+  upsertRecent,
+} from "./workspace";
+import {
+  DEFAULT_SETTINGS,
+  clampSettings,
+  loadSettings,
+  nextFontSettings,
+  saveSettings,
+  type UserSettings,
+} from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
+import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -137,6 +159,17 @@ void onUiRequest((r) => {
   void mcpUiReply(r.id, payload);
 });
 
+// Native workspace watcher refreshes the visible tree and git badges after
+// filesystem changes from terminals, external tools, or Finder.
+void onFsChanged((payload) => {
+  if (!currentRoot) return;
+  const root = currentRoot;
+  if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
+    return;
+  }
+  void refreshFileSystemState(root);
+});
+
 const banner = $("ai-banner");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
@@ -145,6 +178,8 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
+let suppressSessionSave = false;
+let settings: UserSettings = loadSettings();
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
@@ -153,6 +188,7 @@ editor.onGutterClick = (idx) => {
   diffViewer.highlightHunk(idx);
 };
 editor.onActiveTabChanged = (tab) => tree.setActive(tab?.path ?? null);
+editor.onTabsChanged = () => persistWorkspaceSession();
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
 diffViewer.onRevert = (h) => editor.revertHunk(h);
@@ -263,6 +299,66 @@ async function confirmWorkspaceClose(dir: string): Promise<boolean> {
   return confirmNative(`Discard unsaved changes outside this folder? ${names}${more}`);
 }
 
+function persistWorkspaceSession(): void {
+  if (!currentRoot || suppressSessionSave) return;
+  saveWorkspaceSession(
+    currentRoot,
+    sessionFromTabs(editor.tabs, editor.active?.path ?? null, currentRoot),
+  );
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return fileMtime(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+async function restoreWorkspaceTabs(root: string): Promise<void> {
+  const session = loadWorkspaceSession(root);
+  if (!session) return;
+  const existing = new Set<string>();
+  for (const path of session.tabs) {
+    if (await pathExists(path)) existing.add(path);
+  }
+  const pruned = pruneWorkspaceSession(session, (path) => existing.has(path));
+  for (const path of pruned.tabs) {
+    try {
+      await editor.openFile(path);
+    } catch {
+      // Missing/unreadable files are skipped; restore is best-effort.
+    }
+  }
+  if (pruned.activePath) {
+    const active = editor.tabByPath(pruned.activePath);
+    if (active) editor.activate(active);
+  }
+}
+
+// Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
+function applySettings(next: UserSettings): void {
+  settings = clampSettings(next);
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
+  rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
+  editor.setIndent(settings.editorTabSize);
+  editor.setWordWrap(settings.editorWordWrap);
+  terminals.setFontSize(settings.terminalFontSize);
+  terminals.setFontFamily(settings.terminalFontFamily);
+  terminals.setScrollback(settings.terminalScrollback);
+  terminals.setShellPreference(settings.defaultShell || null);
+  if (settings.agentTracking) {
+    if (currentRoot) startAgentTrackingPoll();
+  } else {
+    stopAgentTrackingPoll();
+  }
+}
+
+function persistSettings(next: UserSettings): void {
+  applySettings(next);
+  saveSettings(settings);
+}
+
 async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   const prevPath = tab.path;
   let path = prevPath;
@@ -306,16 +402,25 @@ editor.saveHandler = saveTab;
 // ---- workspace open (single path shared by switcher rows, File menu, dialogs) ----
 async function openWorkspace(dir: string): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
-  editor.closeTabsOutsideWorkspace(dir);
-  editor.setWorkspaceRoot(dir);
-  currentRoot = dir;
-  void mcpSetRoot(dir);
-  void mcpWriteAgentConfig(dir).then((warnings) => {
-    for (const w of warnings) console.warn("MCP config:", w);
-  });
-  agentStatus = { enabled: false, agentActive: false, changes: [] };
-  tree.setActive(editor.active?.path ?? null);
-  await tree.setRoot(dir);
+  persistWorkspaceSession();
+  suppressSessionSave = true;
+  try {
+    editor.closeTabsOutsideWorkspace(dir);
+    editor.setWorkspaceRoot(dir);
+    currentRoot = dir;
+    void watchStop().catch(() => {});
+    void mcpSetRoot(dir);
+    void mcpWriteAgentConfig(dir).then((warnings) => {
+      for (const w of warnings) console.warn("MCP config:", w);
+    });
+    agentStatus = { enabled: false, agentActive: false, changes: [] };
+    tree.setActive(editor.active?.path ?? null);
+    await tree.setRoot(dir);
+    if (settings.restoreSession) await restoreWorkspaceTabs(dir);
+  } finally {
+    suppressSessionSave = false;
+  }
+  persistWorkspaceSession();
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   hideBanner();
@@ -328,7 +433,8 @@ async function openWorkspace(dir: string): Promise<void> {
   const resolvedGitIndexPath = await resolveGitIndexPath(dir);
   if (currentRoot !== dir) return;
   gitIndexPath = resolvedGitIndexPath;
-  startAgentTrackingPoll();
+  void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
+  if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
 }
@@ -378,6 +484,14 @@ async function refreshDiffFileList(): Promise<void> {
   } catch (e) {
     // Silently skip on error
   }
+}
+
+async function refreshFileSystemState(root: string): Promise<void> {
+  await tree.refresh();
+  if (currentRoot !== root) return;
+  await editor.refreshCleanGitBaselines();
+  if (currentRoot !== root) return;
+  void refreshGitState(root);
 }
 
 // ---- diff toggle ----
@@ -461,6 +575,15 @@ function startAgentTrackingPoll(): void {
   pollTimer = window.setInterval(pollAgentChanges, 1500);
 }
 
+// Halts agent-change polling and clears any banner it surfaced.
+function stopAgentTrackingPoll(): void {
+  if (pollTimer !== undefined) {
+    clearInterval(pollTimer);
+    pollTimer = undefined;
+  }
+  hideAgentBanner();
+}
+
 // ---- git-index mtime watcher — refreshes tree badges after terminal git ops ----
 let gitIndexMtime = 0;
 let gitPollTimer: number | undefined;
@@ -468,7 +591,7 @@ let gitIndexPath: string | null = null;
 
 function startGitPoll(): void {
   if (gitPollTimer !== undefined) return;
-  gitPollTimer = window.setInterval(() => void pollGitIndex(), 3000);
+  gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
 }
 
 function stopGitPoll(): void {
@@ -712,8 +835,16 @@ window.addEventListener("keydown", (e) => {
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(termArea.classList.contains("hidden"));
+  } else if (mod && e.code === "Comma") {
+    e.preventDefault();
+    openSettings();
   }
 }, GLOBAL_SHORTCUT_OPTIONS);
+
+// Autosave: flush dirty tabs when the window loses focus (opt-in via settings).
+window.addEventListener("blur", () => {
+  if (settings.autosaveOnBlur) actions.saveAllDirty();
+});
 
 // ---- chrome: icon buttons + menu bar ----
 btnTerm.innerHTML = icon("terminal", 17);
@@ -744,6 +875,15 @@ const actions = {
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
   newTerminal: () => void terminals.create(),
+  increaseFontSize: () => persistSettings(nextFontSettings(settings, 1)),
+  decreaseFontSize: () => persistSettings(nextFontSettings(settings, -1)),
+  // Resets only the font sizes — other settings keep their values.
+  resetFontSize: () =>
+    persistSettings({
+      ...settings,
+      editorFontSize: DEFAULT_SETTINGS.editorFontSize,
+      terminalFontSize: DEFAULT_SETTINGS.terminalFontSize,
+    }),
   openInBrowser: () => {
     setBrowser(true);
     browser.show();
@@ -911,7 +1051,8 @@ async function switchBranch(branch: string): Promise<void> {
 }
 
 // ---- command palette ----
-palette = mountPalette([
+// Named so the settings shortcuts reference can reuse it as the single source of truth.
+const paletteCommands = [
   { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
   { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
   { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
@@ -928,12 +1069,35 @@ palette = mountPalette([
     else editor.openSplit();
   }, shortcut: "⌘\\" },
   { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
+  { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
+  { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
+  { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
   { id: "new-automation", title: "New Automation…", run: () => openCreatePanel() },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
     search.focus();
   }, shortcut: "⇧⌘F" },
-]);
+  { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
+];
+palette = mountPalette(paletteCommands);
+
+// Shortcuts shown in the settings reference: palette entries + hardcoded extras.
+function shortcutEntries(): ShortcutEntry[] {
+  const fromPalette = paletteCommands
+    .filter((c) => "shortcut" in c && c.shortcut)
+    .map((c) => ({ title: c.title, keys: (c as { shortcut: string }).shortcut }));
+  return [...fromPalette, { title: "Focus Terminal", keys: "⌃`" }];
+}
+
+// Opens the settings modal wired to live state and instant-apply persistence.
+function openSettings(): void {
+  openSettingsModal({
+    get: () => settings,
+    apply: persistSettings,
+    version: getVersion(),
+    shortcuts: shortcutEntries(),
+  });
+}
 
 /** Custom input dialog replacing window.prompt() — WKWebView silently returns null for native JS dialogs. */
 function promptInput(message: string): Promise<string | null> {
@@ -997,5 +1161,6 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 });
 
 // ---- boot ----
+applySettings(settings);
 editor.renderAllTabs();
 setTerminal(true); // panel visible by default → spawns first shell

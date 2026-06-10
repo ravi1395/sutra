@@ -960,7 +960,7 @@ button:hover {
 /* keep code mono even though the chrome (root) font is now sans */
 .pane-host .cm-editor,
 .pane-host .cm-scroller {
-  font-family: var(--mono);
+  font-family: var(--editor-font-family, var(--mono));
   font-size: var(--editor-font-size, 13px);
 }
 .pane-welcome {
