@@ -14,7 +14,9 @@ export interface UserSettings {
 }
 
 // Whitelists: every multi-choice setting validates against one of these.
+// First two stacks match the app's shipped defaults (editor --mono / terminal).
 export const FONT_FAMILIES: readonly string[] = [
+  '"Spline Sans Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
   '"SF Mono", Menlo, monospace',
   "Menlo, monospace",
   '"JetBrains Mono", Menlo, monospace',
@@ -31,7 +33,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   editorTabSize: 4,
   editorWordWrap: false,
   terminalFontSize: 12,
-  terminalFontFamily: FONT_FAMILIES[0],
+  terminalFontFamily: FONT_FAMILIES[1],
   terminalScrollback: 5000,
   defaultShell: "",
   restoreSession: true,
