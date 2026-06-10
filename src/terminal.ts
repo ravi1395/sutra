@@ -358,7 +358,7 @@ export class TerminalManager {
     // fit() can report 0 before first paint; fall back to a sane size.
     const rows = term.rows || 24;
     const cols = term.cols || 80;
-    await ptySpawn(id, cwd ?? this.cwd, rows, cols).catch((e) =>
+    await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref).catch((e) =>
       term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`),
     );
     this.activate(t);

@@ -132,8 +132,8 @@ export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>
 export const mcpUiReply = (id: number, payload: unknown) =>
   invoke<void>("mcp_ui_reply", { id, payload });
 
-export const ptySpawn = (id: string, cwd: string | null, rows: number, cols: number) =>
-  invoke<void>("pty_spawn", { id, cwd, rows, cols });
+export const ptySpawn = (id: string, cwd: string | null, rows: number, cols: number, shell: string | null = null) =>
+  invoke<void>("pty_spawn", { id, cwd, rows, cols, shell });
 export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", { id, data });
 export const ptyResize = (id: string, rows: number, cols: number) =>
   invoke<void>("pty_resize", { id, rows, cols });

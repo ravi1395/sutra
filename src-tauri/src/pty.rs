@@ -33,6 +33,13 @@ struct PtyExit {
     id: String,
 }
 
+/// Requested shell wins when its binary exists; otherwise $SHELL, then /bin/zsh.
+fn resolve_shell(requested: Option<String>) -> String {
+    requested
+        .filter(|s| std::path::Path::new(s).is_file())
+        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()))
+}
+
 #[tauri::command]
 pub fn pty_spawn(
     app: AppHandle,
@@ -42,6 +49,7 @@ pub fn pty_spawn(
     cwd: Option<String>,
     rows: u16,
     cols: u16,
+    shell: Option<String>,
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -53,7 +61,7 @@ pub fn pty_spawn(
         })
         .map_err(|e| e.to_string())?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell = resolve_shell(shell);
     let mut cmd = CommandBuilder::new(shell);
     let registered_cwd = cwd
         .as_ref()
@@ -177,4 +185,26 @@ pub fn pty_is_busy(state: State<'_, PtyState>, id: String) -> Result<bool, Strin
         (Some(leader), Some(pid)) => leader as u32 != pid,
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_shell;
+
+    #[test]
+    fn resolve_shell_falls_back_when_requested_shell_missing() {
+        let got = resolve_shell(Some("/no/such/shell".into()));
+        assert_ne!(got, "/no/such/shell");
+    }
+
+    #[test]
+    fn resolve_shell_uses_requested_shell_when_present() {
+        assert_eq!(resolve_shell(Some("/bin/sh".into())), "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_shell_none_uses_env_or_default() {
+        let got = resolve_shell(None);
+        assert!(!got.is_empty());
+    }
 }
