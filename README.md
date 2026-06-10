@@ -209,10 +209,11 @@ stable, `npm ci`, `npm run build`, `npm test`, and `cargo test --lib` in
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
 installers and attaches them to a draft GitHub release:
 
-- **macOS** — universal `.dmg` (Apple Silicon + Intel). Signed and notarized
-  when the `APPLE_*` repo secrets are set (`APPLE_CERTIFICATE`,
+- **macOS** — universal `.dmg` (Apple Silicon + Intel). To sign + notarize,
+  set the `APPLE_*` repo secrets (`APPLE_CERTIFICATE`,
   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-  `APPLE_PASSWORD`, `APPLE_TEAM_ID`); otherwise ad-hoc signed and users must
+  `APPLE_PASSWORD`, `APPLE_TEAM_ID`) and uncomment the matching `env` lines
+  in `release.yml`; otherwise the app is ad-hoc signed and users must
   right-click → Open on first launch.
 - **Windows** — x64 `.msi` and NSIS `.exe`. The installer fetches the WebView2
   runtime if missing (preinstalled on Windows 10/11). Unsigned builds show a

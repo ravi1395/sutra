@@ -51,18 +51,21 @@ jobs:
 
       # Runs `tauri build` (which runs `npm run build` via beforeBuildCommand),
       # creates a draft GitHub release for the tag, and uploads the bundles.
-      # macOS signing/notarization activates only when APPLE_* secrets are set;
-      # otherwise the build is ad-hoc signed (users must right-click > Open).
+      # macOS signing/notarization: uncomment the APPLE_* lines once the repo
+      # secrets exist. Passing them unset breaks the build — tauri sees the
+      # empty APPLE_CERTIFICATE var and tries (and fails) to import it into
+      # the keychain. Without them the .app is ad-hoc signed (users must
+      # right-click > Open on first launch).
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Sutra ${{ github.ref_name }}'
