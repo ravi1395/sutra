@@ -43,10 +43,11 @@ Main boot flow:
 | `src/search-panel.ts` | CodeMirror in-editor search panel extension (find/replace within active buffer) | `buildSearchPanel`, `btn` (7 callers) |
 | `src/split-drop.ts` | Pointer-driven editor/terminal tab drag tracking, left/right target detection, tree drag payload constants, split-drop overlay helpers | `beginSplitPointerDrag`, `pointerDragStarted`, `splitSideAtPoint` (6 callers), `splitSideFromClientX` (6 callers), `dragHasType`, `setSplitDropHint`, `FILE_DRAG_TYPE`, `TREE_ENTRY_DRAG_TYPE` |
 | `src/terminal-groups.ts` | Pure left/right terminal group movement helpers used by `TerminalManager` and tests | `moveItemToGroup`, `removeItemFromGroups`, `collapseAfterClose`, `groupSideForItem` (5 callers) |
-| `src/terminal.ts` | xterm frontends, multi-terminal split groups, PTY lifecycle, optional per-terminal cwd override, direct Claude/Codex pre-execution tracking hint | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit` |
+| `src/terminal.ts` | xterm frontends, multi-terminal split groups, PTY lifecycle, optional per-terminal cwd + shell override, direct Claude/Codex pre-execution tracking hint | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit` |
 | `src/contextmenu.ts` | Right-click context menu (file tree + terminal) — build, position, dismiss | `openContextMenu`, `closeContextMenu` (4 callers) |
 | `src/workspace.ts` | Workspace path membership helpers, per-workspace session restore helpers, and recents store (pure logic + localStorage adapters) | `pathBelongsToRoot` (7 callers), `normalizePath` (5 callers), `filterWorkspaceTabs`, `sessionFromTabs`, `pruneWorkspaceSession`, `upsertRecent`, `basenameOf`, `loadRecents`, `saveRecents` |
 | `src/settings.ts` | Persisted editor/terminal font settings and clamp/update helpers | `loadSettings`, `saveSettings`, `nextFontSettings`, `clampSettings` |
+| `src/settings-modal.ts` | Cmd+, settings overlay UI with Editor/Terminal/Behavior/Shortcuts/About sections; host-driven live apply wiring | `openSettingsModal`, `SettingsModalDeps`, `ShortcutEntry` |
 | `src/preview.ts` | Markdown/HTML live preview in split pane; Markdown via `marked` + `DOMPurify`; HTML via static preview server | `PreviewController` |
 | `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply` |
 | `src/git-index.ts` | Pure helpers for resolving the real Git index in regular repos and linked worktrees | `parseGitDirLine`, `resolveGitIndexPathFromGitDir` |
@@ -124,9 +125,11 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Build frontend | `npm run build` |
 | Run dev app | `npm run tauri dev` |
 | Build desktop app | `npm run tauri build` |
+| Cut draft release | `git tag v0.1.0 && git push origin v0.1.0` |
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |
+| Release CI | `.github/workflows/release.yml` builds macOS universal + Windows installers on `v*` tags and attaches them to a draft GitHub release |
 
 ## Test Strategy
 
@@ -155,6 +158,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 - Terminal paste should stay on xterm/native Edit responders; adding a parallel `Mod+V` writer path duplicates input.
 - Terminal split moves existing `Term` + xterm DOM between group hosts; no PTY re-spawn on group move.
 - Folder switch kills all PTYs; next visible terminal starts in opened cwd.
+- `pty_is_busy` uses Unix foreground process groups; Windows currently always reports not-busy, so busy gating there must stay conservative.
 - `read_file` rejects non-UTF-8 files as `"binary file"` and files over 10 MB as too large.
 - HTML preview intentionally runs saved workspace HTML through a token-gated `127.0.0.1` static server — keep `safe_request_path` traversal and symlink canonicalization checks intact; only serve paths under opened root.
 - `git_head_content` returns `None` outside git repos, on unborn branches, or for untracked files (no gutter for those).

@@ -2,9 +2,47 @@
 
 [![CI](https://github.com/ravi1395/sutra/actions/workflows/ci.yml/badge.svg)](https://github.com/ravi1395/sutra/actions/workflows/ci.yml)
 
-Minimal Rust + Tauri code editor: folder tree, multi-tab editor, integrated
-multi-terminal, and a git-aware diff viewer with per-hunk revert. Built for a
-fast, low-chrome editing loop rather than IDE breadth.
+Sutra is a minimal native code editor built on Rust + Tauri. It pairs a
+CodeMirror 6 multi-tab editor with real PTY terminals and a git-aware diff
+gutter — no language servers, no extension marketplace, no Electron overhead.
+The goal is a fast, low-chrome editing loop: open a folder, write code, run a
+shell, review what changed.
+
+Core features: folder tree with compact chains and file-type badges, CM6 editor
+with syntax highlighting for 13 languages, multiple split terminals, per-hunk
+git diff revert, Markdown/HTML live preview, drag-to-split panes, and an
+integrated Claude/Codex agent tracker.
+
+## Install
+
+### macOS (recommended)
+
+Download `Sutra_<version>_universal.dmg` (Apple Silicon + Intel) from the
+[latest GitHub release](https://github.com/ravi1395/sutra/releases/latest),
+open the `.dmg`, and drag `Sutra.app` to `/Applications`.
+
+> **First launch blocked?** Sutra is ad-hoc signed but not yet Apple-notarized.
+> Right-click `Sutra.app → Open`, or allow it under
+> **System Settings → Privacy & Security → Open Anyway**.
+
+### Windows (recommended)
+
+Download `Sutra_<version>_x64-setup.exe` (NSIS installer) or
+`Sutra_<version>_x64_en-US.msi` from the
+[latest GitHub release](https://github.com/ravi1395/sutra/releases/latest).
+The installer fetches the WebView2 runtime if missing (pre-installed on
+Windows 10/11). Unsigned builds show a SmartScreen prompt —
+click **More info → Run anyway**.
+
+End users need no Rust or Node — installers are self-contained.
+
+### macOS — Homebrew
+
+```bash
+brew install --cask --no-quarantine ravi1395/tap/sutra
+```
+
+To update: `brew upgrade --cask sutra`.
 
 ## Layout
 
@@ -187,7 +225,7 @@ instantly and persist in `localStorage` across launches.
 | `⇧⌘V` | Toggle Markdown / HTML preview |
 | `⌘,` | Open Settings |
 
-## Run
+## Build from source
 
 ```bash
 npm install
@@ -204,29 +242,17 @@ GitHub Actions runs on push and pull request on `macos-latest`: Node 20, Rust
 stable, `npm ci`, `npm run build`, `npm test`, and `cargo test --lib` in
 `src-tauri/` with Cargo caching.
 
-## Releases
-
-Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
-installers and attaches them to a draft GitHub release:
-
-- **macOS** — universal `.dmg` (Apple Silicon + Intel). To sign + notarize,
-  set the `APPLE_*` repo secrets (`APPLE_CERTIFICATE`,
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-  `APPLE_PASSWORD`, `APPLE_TEAM_ID`) and uncomment the matching `env` lines
-  in `release.yml`; otherwise the app is ad-hoc signed and users must
-  right-click → Open on first launch.
-- **Windows** — x64 `.msi` and NSIS `.exe`. The installer fetches the WebView2
-  runtime if missing (preinstalled on Windows 10/11). Unsigned builds show a
-  SmartScreen prompt ("More info → Run anyway").
-
-End users need no Rust or Node — installers are self-contained.
+## Cutting a release
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0   # cut a release
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
-The tag should match `version` in `src-tauri/tauri.conf.json`. Review the
-draft release on GitHub and publish.
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds a
+universal macOS `.dmg` and a Windows x64 `.msi`/`.exe`, then attaches them to
+a draft GitHub release. Review the draft and publish. The Homebrew cask in
+[ravi1395/homebrew-tap](https://github.com/ravi1395/homebrew-tap) must be
+updated manually to point at the new version + SHA256 after each release.
 
 ## MCP control plane
 
