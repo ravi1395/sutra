@@ -174,7 +174,7 @@ export class FileTree {
     const row = document.createElement("div");
     row.className = `tree-row ${e.isDir ? "dir" : "file"}`;
     row.dataset.path = e.path;
-    row.style.paddingLeft = `${depth * 12 + 8}px`;
+    row.style.paddingLeft = `calc(${depth * 12 + 14}px - var(--tree-active-stitch, 0px))`;
 
     const twisty = document.createElement("span");
     twisty.className = "tree-twisty";
@@ -193,12 +193,14 @@ export class FileTree {
       const s = this.status.get(e.path)!;
       const cls = s === "M" ? "modified" : s === "A" ? "added" : "deleted";
       row.classList.add(`status-${cls}`);
-      const badge = document.createElement("span");
-      badge.className = "tree-status";
-      badge.textContent = s;
-      row.appendChild(badge);
+      const dot = document.createElement("span");
+      dot.className = `tree-dot ${cls}`;
+      row.appendChild(dot);
     } else if (e.isDir && this.changedDirs.has(e.path)) {
       row.classList.add("status-dir-changed");
+      const dot = document.createElement("span");
+      dot.className = "tree-dot modified";
+      row.appendChild(dot);
     }
 
     if (e.path === this.activePath) row.classList.add("active");
