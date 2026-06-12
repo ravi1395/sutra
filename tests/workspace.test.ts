@@ -33,11 +33,13 @@ import {
   breadcrumbSegments,
   deserializeWorkspaceSession,
   filterWorkspaceTabs,
+  formatAge,
   pathBelongsToRoot,
   pruneWorkspaceSession,
   serializeWorkspaceSession,
   sessionFromTabs,
   upsertRecent,
+  workspaceMenuModel,
   type RecentWorkspace,
 } from "../src/workspace";
 import {
@@ -326,6 +328,21 @@ test("agent banner and first viewable change handle unsafe deleted and binary fi
 
   assert.equal(agentBannerText(changes), "Integrated agent changed 2 files; 1 needs manual review.");
   assert.equal(firstViewableAgentChange(changes)?.path, "/repo/view.ts");
+});
+
+test("formatAge buckets", () => {
+  const d = 86_400_000;
+  assert.equal(formatAge(Date.now(), Date.now()), "today");
+  assert.equal(formatAge(0, 2 * d), "2d");
+  assert.equal(formatAge(0, 14 * d), "2w");
+  assert.equal(formatAge(0, 60 * d), "2mo");
+});
+
+test("workspaceMenuModel puts current first and dedupes it from recents", () => {
+  const recents = [{ path: "/p/sutra", name: "sutra", openedAt: 0 }, { path: "/p/lite", name: "lite", openedAt: 0 }];
+  const m = workspaceMenuModel("/p/sutra", recents, 86_400_000 * 3);
+  assert.equal(m[0].kind, "current");
+  assert.deepEqual(m.slice(1).map(x => x.name), ["lite"]);
 });
 
 test("integrated agent command hint recognizes direct Claude and Codex launches", () => {

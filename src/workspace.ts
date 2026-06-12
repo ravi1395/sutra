@@ -179,3 +179,24 @@ export function saveRecents(list: readonly RecentWorkspace[]): void {
     /* storage unavailable / quota — recents are best-effort */
   }
 }
+
+// ---- workspace selector menu model ----
+
+export interface WorkspaceMenuItem { kind: "current" | "recent"; name: string; path: string; age: string; }
+
+/** Compact relative age for menu rows: <1d → "today", then d/w/mo. */
+export function formatAge(openedAt: number, now: number): string {
+  const days = Math.floor((now - openedAt) / 86_400_000);
+  if (days < 1) return "today";
+  if (days < 7) return `${days}d`;
+  if (days < 30) return `${Math.floor(days / 7)}w`;
+  return `${Math.floor(days / 30)}mo`;
+}
+
+/** Menu model: current root first, then recents excluding it. */
+export function workspaceMenuModel(root: string, recents: readonly RecentWorkspace[], now: number): WorkspaceMenuItem[] {
+  const items: WorkspaceMenuItem[] = [{ kind: "current", name: basenameOf(root), path: root, age: "" }];
+  for (const r of recents) if (r.path !== root)
+    items.push({ kind: "recent", name: r.name, path: r.path, age: formatAge(r.openedAt, now) });
+  return items;
+}

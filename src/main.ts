@@ -880,7 +880,6 @@ window.addEventListener("blur", () => {
 });
 
 // ---- chrome: icon buttons + menu bar ----
-$("ws-wordmark").textContent = "sutra";
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
@@ -970,6 +969,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   switchWorkspace: actions.switchWorkspace,
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
+  openSettings: () => openSettings(),
 });
 workspaceBar.setCurrentWorkspace(null);
 

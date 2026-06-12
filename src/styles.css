@@ -167,6 +167,11 @@ body {
   padding: 1px 6px;
   margin-left: auto;
 }
+.menu-age {
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-left: auto;
+}
 .glyph {
   width: 30px;
   height: 30px;
