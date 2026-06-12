@@ -17,6 +17,26 @@ export interface Hunk {
   newText: string[]; // current lines for this hunk
 }
 
+export interface LensModel {
+  title: string;
+  oldLines: string[];
+  newLines: string[];
+  attribution: string | null;
+}
+
+/** Assemble display model for the inline hunk lens. */
+export function lensModel(hunks: readonly Hunk[], index: number, attribution: string | null): LensModel {
+  const h = hunks[index];
+  const last = Math.max(h.newFrom + 1, h.newTo);
+  const lineLabel = last > h.newFrom + 1 ? `lines ${h.newFrom + 1}–${last}` : `line ${h.newFrom + 1}`;
+  return {
+    title: `hunk ${index + 1} of ${hunks.length} · ${lineLabel}`,
+    oldLines: h.oldText,
+    newLines: h.newText,
+    attribution,
+  };
+}
+
 function lineCount(p: Change): number {
   if (typeof p.count === "number") return p.count;
   const v = p.value;

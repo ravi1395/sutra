@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeLineDiff, hunkIndexAtLine } from "../src/diff";
+import { computeLineDiff, hunkIndexAtLine, lensModel } from "../src/diff";
 
 test("computeLineDiff marks a pure addition", () => {
   const { marks, hunks } = computeLineDiff("one\nthree", "one\ntwo\nthree");
@@ -71,4 +71,20 @@ test("hunkIndexAtLine hits normal and deleted hunks only at their ranges", () =>
   assert.equal(hunkIndexAtLine(hunks, 1), -1);
   assert.equal(hunkIndexAtLine(hunks, 2), 1);
   assert.equal(hunkIndexAtLine(hunks, 9), -1);
+});
+
+test("lensModel uses real hunk text and 1-based line label", () => {
+  const { hunks } = computeLineDiff("one\ntwo\nthree", "one\ndos\nthree");
+  const m = lensModel(hunks, 0, "stitched by claude · 2:14 pm");
+  assert.equal(m.title, "hunk 1 of 1 · line 2");
+  assert.deepEqual(m.oldLines, ["two"]);
+  assert.deepEqual(m.newLines, ["dos"]);
+  assert.equal(m.attribution, "stitched by claude · 2:14 pm");
+});
+
+test("lensModel multi-line range label and null attribution", () => {
+  const { hunks } = computeLineDiff("one\nfour", "one\ntwo\nthree\nfour");
+  const m = lensModel(hunks, 0, null);
+  assert.equal(m.title, "hunk 1 of 1 · lines 2–3");
+  assert.equal(m.attribution, null);
 });

@@ -1261,6 +1261,57 @@ button:hover {
   box-shadow: 0 -2px 0 var(--deleted);
 }
 
+/* ---- inline diff lens ---- */
+.lens {
+  margin: 6px 18px 8px 24px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-menu);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.lens-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.lens-revert {
+  padding: 3px 9px;
+  font-size: 11px;
+}
+.lens-body {
+  display: flex;
+  flex-direction: column;
+}
+.lens-row {
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.lens-row.old {
+  background: rgba(240, 113, 106, 0.08);
+  color: color-mix(in srgb, var(--deleted) 72%, var(--fg));
+}
+.lens-row.new {
+  background: rgba(227, 179, 65, 0.12);
+  color: color-mix(in srgb, var(--added) 72%, var(--fg));
+}
+.lens-footer {
+  padding: 6px 10px 8px;
+  font-family: var(--voice);
+  font-style: italic;
+  font-size: 12px;
+  color: var(--fg-faint);
+  border-top: 1px solid var(--line);
+}
+
 /* ---- diff viewer pane ---- */
 #diff-pane {
   flex: 0 0 45%;
