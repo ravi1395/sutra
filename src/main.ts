@@ -571,7 +571,6 @@ function togglePreview(): void {
 // ---- search view toggle ----
 const treeEl = $("tree");
 const searchView = $("search-view");
-const sidebarTitle = $("sidebar-title");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
 let searchIconHtml = "";
@@ -580,7 +579,6 @@ function openSearchView(): void {
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
-  sidebarTitle.textContent = "SEARCH";
   searchIconHtml = btnSearchToggle.innerHTML;
   btnSearchToggle.innerHTML = "←";
   btnSearchToggle.title = "Back to files";
@@ -591,7 +589,6 @@ function closeSearchView(): void {
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
-  sidebarTitle.textContent = "FILES";
   if (searchIconHtml) btnSearchToggle.innerHTML = searchIconHtml;
   btnSearchToggle.title = "Search folder (⇧⌘F)";
 }
@@ -973,7 +970,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
 });
 workspaceBar.setCurrentWorkspace(null);
 
-gitBar = createGitBar($("menubar-host"));
+gitBar = createGitBar($("branch-whisper"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 

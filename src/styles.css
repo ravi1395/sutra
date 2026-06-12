@@ -193,6 +193,30 @@ body {
   color: var(--em);
 }
 
+/* sidebar whisper row — branch selector button */
+.whisper-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  padding: 5px 8px;
+  border-radius: var(--r-md);
+}
+.whisper-btn:hover,
+.whisper-btn.open {
+  background: var(--em-wash);
+  color: var(--em);
+}
+.sbtn.reveal {
+  opacity: 0;
+}
+#sidebar-header:hover .sbtn.reveal {
+  opacity: 1;
+}
+
 /* generic graphite button base (hunk-revert, fallbacks) */
 button {
   background: var(--bg-3);
