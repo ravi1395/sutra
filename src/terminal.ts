@@ -27,6 +27,7 @@ interface Term {
   el: HTMLElement;
   title: string;
   alive: boolean;
+  agentAttached: boolean;
   cmdHistory: string[]; // Recent commands for autocomplete
   currentInput: string; // Current line being typed
 }
@@ -247,7 +248,7 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, cmdHistory: [], currentInput: "" };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, agentAttached: false, cmdHistory: [], currentInput: "" };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
@@ -272,6 +273,8 @@ export class TerminalManager {
       }
       const send = () => void ptyWrite(id, d).catch(() => {});
       if (submittedCommand && this.cwd && isIntegratedAgentCommand(submittedCommand)) {
+        t.agentAttached = true;
+        this.renderTabs();
         void agentTrackingBegin(this.cwd).then(send, send);
       } else {
         send();
@@ -654,6 +657,18 @@ export class TerminalManager {
         const label = document.createElement("span");
         label.textContent = t.title + (t.alive ? "" : " (exited)");
         tab.onclick = () => this.activate(t);
+        if (t === this.activeByGroup[side]) {
+          const ti = document.createElement("span");
+          ti.className = "term-tab-icon";
+          ti.innerHTML = icon("terminal", 13, 1.7);
+          tab.appendChild(ti);
+        }
+        if (t.agentAttached) {
+          const dot = document.createElement("span");
+          dot.className = "term-agent-dot";
+          dot.title = "Integrated agent attached";
+          tab.appendChild(dot);
+        }
         const close = document.createElement("button");
         close.className = "term-close";
         close.textContent = "×";

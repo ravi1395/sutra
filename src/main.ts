@@ -82,6 +82,7 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
+import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -456,7 +457,7 @@ async function openWorkspace(dir: string): Promise<void> {
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   hideBanner();
-  await terminals.reset(dir, !termArea.classList.contains("hidden"));
+  await terminals.reset(dir, drawerState.open);
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void refreshGitState(dir);
   automations = await loadAutomations(dir);
@@ -488,16 +489,48 @@ async function closeActiveTab(): Promise<void> {
 const termArea = $("terminal-area");
 const hres = $("hresizer");
 const btnTerm = $("btn-term");
+let drawerState: DrawerState = loadDrawerState(localStorage.getItem(DRAWER_KEY));
+const terminalSeam = document.createElement("button");
+terminalSeam.id = "terminal-seam";
+terminalSeam.type = "button";
+terminalSeam.onclick = () => setTerminal(true);
+termArea.prepend(terminalSeam);
+
+function saveDrawerState(next: DrawerState): void {
+  drawerState = clampDrawerState(next);
+  localStorage.setItem(DRAWER_KEY, JSON.stringify(drawerState));
+}
+
+function renderTerminalSeam(): void {
+  terminalSeam.innerHTML = "";
+  const chevron = document.createElement("span");
+  chevron.className = "terminal-seam-chevron";
+  chevron.textContent = drawerState.open ? "⌄" : "⌃";
+  const label = document.createElement("span");
+  label.className = "terminal-seam-label";
+  label.textContent = `terminal · ${terminals.count} ${terminals.count === 1 ? "thread" : "threads"}`;
+  const rule = document.createElement("span");
+  rule.className = "terminal-seam-rule";
+  const kbd = document.createElement("span");
+  kbd.className = "kbd";
+  kbd.textContent = "⌘J";
+  terminalSeam.append(chevron, label, rule, kbd);
+}
+
 function setTerminal(on: boolean): void {
-  termArea.classList.toggle("hidden", !on);
+  saveDrawerState({ ...drawerState, open: on });
+  termArea.classList.toggle("terminal-collapsed", !on);
   hres.classList.toggle("hidden", !on);
   btnTerm.classList.toggle("on", on);
+  termArea.style.flex = on ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+  renderTerminalSeam();
   if (on) {
     if (terminals.count === 0) void terminals.create();
     else requestAnimationFrame(() => terminals.refit());
   }
 }
-btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
+btnTerm.onclick = () => setTerminal(!drawerState.open);
+terminals.onTabsChanged = renderTerminalSeam;
 
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {
@@ -787,7 +820,16 @@ function showErrorBanner(message: string): void {
 
 // ---- resizers ----
 vResizer(vres, sidebar, { min: 120, max: 600, onResize: () => terminals.refit() });
-hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.refit() });
+hResizer(hres, termArea, {
+  min: 120,
+  max: 800,
+  fromEnd: true,
+  onResize: () => {
+    const heightPx = Math.round(termArea.getBoundingClientRect().height);
+    saveDrawerState({ open: true, heightPx });
+    terminals.refit();
+  },
+});
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
 vResizer(browserRes, browserArea, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
@@ -848,7 +890,7 @@ window.addEventListener("keydown", (e) => {
     }
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
-    setTerminal(termArea.classList.contains("hidden"));
+    setTerminal(!drawerState.open);
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
@@ -868,7 +910,7 @@ window.addEventListener("keydown", (e) => {
     search.focus();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
-    setTerminal(termArea.classList.contains("hidden"));
+    setTerminal(!drawerState.open);
   } else if (mod && e.code === "Comma") {
     e.preventDefault();
     openSettings();
@@ -940,7 +982,7 @@ const actions = {
   },
   openFolder: () => void openFolderDialog(),
   closeTab: () => void closeActiveTab(),
-  toggleTerminal: () => setTerminal(termArea.classList.contains("hidden")),
+  toggleTerminal: () => setTerminal(!drawerState.open),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
@@ -1234,4 +1276,4 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 // ---- boot ----
 applySettings(settings);
 editor.renderAllTabs();
-setTerminal(true); // panel visible by default → spawns first shell
+setTerminal(drawerState.open);
