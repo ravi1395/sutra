@@ -110,7 +110,22 @@ export async function saveAutomations(root: string, list: readonly Automation[])
   await writeFile(automationsPath(root), serializeAutomations(list));
 }
 
-// ---- titlebar picker bar (Variant C: labeled bar + dropdown) ----
+// ---- automation menu model (pure, unit-tested) ----
+
+export interface AutomationMenuRow { id: string; name: string; command: string; running: boolean; status: string; }
+
+/** Menu rows: running first, then by name; status = "" while running, else last-run note. */
+export function automationMenuModel(
+  list: readonly Automation[],
+  runningIds: ReadonlySet<string>,
+  lastRun: ReadonlyMap<string, string>,
+): AutomationMenuRow[] {
+  return [...list]
+    .sort((a, b) => Number(runningIds.has(b.id)) - Number(runningIds.has(a.id)) || a.name.localeCompare(b.name))
+    .map(a => ({ id: a.id, name: a.name, command: a.command, running: runningIds.has(a.id), status: runningIds.has(a.id) ? "" : (lastRun.get(a.id) ?? "") }));
+}
+
+// ---- titlebar bolt/chip picker (menu-card grammar) ----
 
 export interface AutomationBarActions {
   /** Run the selected/clicked automation (caller routes it to a free terminal). */
@@ -122,41 +137,47 @@ export interface AutomationBarActions {
 export interface AutomationBarHandle {
   /** Replace the listed automations and refresh the bar (+ any open dropdown). */
   setAutomations(list: Automation[]): void;
-  /** Toggle the live "running" indicator (emerald pulse + name suffix). */
+  /** Toggle the live "running" indicator (chip with pulse dot + name). */
   setRunning(running: boolean): void;
 }
 
 /**
- * Mount the labeled automation bar into `container`. The name/chevron region opens a
- * dropdown of automations ending in a create row; the ▷ button runs the selected one.
- * User-supplied names/commands are rendered via textContent (no HTML injection).
+ * Mount the automation bolt/chip into `container`. Idle state = bolt glyph button.
+ * Running state = emerald chip with pulse dot + name + chevron. Dropdown uses
+ * .menu-card grammar: running rows first with stop affordance, idle rows with play,
+ * command in .menu-path, footer opens the create panel.
+ * User-supplied names/commands rendered via textContent (no HTML injection).
  */
 export function mountAutomationBar(container: HTMLElement, actions: AutomationBarActions): AutomationBarHandle {
   let list: Automation[] = [];
-  let selectedId: string | null = null;
-  let running = false;
+  let runningId: string | null = null;
+  let lastRunId: string | null = null; // tracks the last automation passed to run()
   let dropdown: HTMLElement | null = null;
 
   container.innerHTML = "";
-  const bar = document.createElement("div");
-  bar.className = "auto-bar";
-  bar.title = "Automations";
-  container.appendChild(bar);
 
-  const selected = (): Automation | null =>
-    list.find((a) => a.id === selectedId) ?? list[0] ?? null;
+  // The anchor element — either bolt button (idle) or chip (running).
+  let anchor: HTMLElement = document.createElement("button");
+  container.appendChild(anchor);
+
+  // Wrap actions.run to track which automation was most recently started.
+  const wrappedRun = (a: Automation): void => {
+    lastRunId = a.id;
+    actions.run(a);
+  };
 
   function closeDropdown(): void {
     if (!dropdown) return;
     dropdown.remove();
     dropdown = null;
+    anchor.classList.remove("open");
     document.removeEventListener("mousedown", onOutside);
     document.removeEventListener("keydown", onKey);
   }
 
   function onOutside(e: MouseEvent): void {
     const t = e.target as Node;
-    if (dropdown && !dropdown.contains(t) && !bar.contains(t)) closeDropdown();
+    if (dropdown && !dropdown.contains(t) && !anchor.contains(t)) closeDropdown();
   }
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Escape") closeDropdown();
@@ -165,119 +186,152 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
   function openDropdown(): void {
     closeDropdown();
     const dd = document.createElement("div");
-    dd.className = "auto-dd";
+    dd.className = "menu-card";
 
-    if (list.length) {
-      const sec = document.createElement("div");
-      sec.className = "auto-dd-sec";
-      sec.textContent = "Automations";
-      dd.appendChild(sec);
-      const sel = selected();
-      for (const a of list) {
-        const row = document.createElement("div");
-        row.className = "auto-dd-row" + (a.id === sel?.id ? " cur" : "");
-        row.innerHTML =
-          `<span class="auto-ri">${icon("play", 12)}</span>` +
-          `<span class="auto-rmeta"><span class="auto-rname"></span><span class="auto-rcmd"></span></span>`;
-        row.querySelector(".auto-rname")!.textContent = a.name;
-        row.querySelector(".auto-rcmd")!.textContent = a.command;
-        row.onclick = () => {
-          selectedId = a.id;
-          closeDropdown();
-          renderBar();
-          actions.run(a);
-        };
-        dd.appendChild(row);
+    const rows = automationMenuModel(list, new Set(runningId ? [runningId] : []), new Map());
+
+    if (rows.length > 0) {
+      const head = document.createElement("div");
+      head.className = "menu-head";
+      head.textContent = "automations";
+      dd.appendChild(head);
+
+      for (const row of rows) {
+        const el = document.createElement("div");
+        el.className = "menu-row" + (row.running ? " current" : "");
+
+        if (row.running) {
+          // Running: show pulse dot + stop affordance.
+          const dot = document.createElement("span");
+          dot.className = "auto-chip-dot pulse";
+          el.appendChild(dot);
+          const name = document.createElement("span");
+          name.textContent = row.name;
+          el.appendChild(name);
+          const cmdSpan = document.createElement("span");
+          cmdSpan.className = "menu-path";
+          cmdSpan.textContent = row.command;
+          el.appendChild(cmdSpan);
+          const stopBtn = document.createElement("span");
+          stopBtn.innerHTML = icon("stop", 13);
+          stopBtn.title = "Stop";
+          stopBtn.style.cssText = "margin-left:auto;color:var(--fg-faint);";
+          el.appendChild(stopBtn);
+          // Stop = run again (the existing runAutomation flow handles toggle via isBusyById).
+          el.onclick = () => { closeDropdown(); const a = list.find(x => x.id === row.id); if (a) wrappedRun(a); };
+        } else {
+          // Idle: play affordance.
+          const playIco = document.createElement("span");
+          playIco.innerHTML = icon("play", 13);
+          el.appendChild(playIco);
+          const name = document.createElement("span");
+          name.textContent = row.name;
+          el.appendChild(name);
+          const cmdSpan = document.createElement("span");
+          cmdSpan.className = "menu-path";
+          cmdSpan.textContent = row.command;
+          el.appendChild(cmdSpan);
+          if (row.status) {
+            const status = document.createElement("span");
+            status.className = "menu-age";
+            status.textContent = row.status;
+            el.appendChild(status);
+          }
+          el.onclick = () => { closeDropdown(); const a = list.find(x => x.id === row.id); if (a) wrappedRun(a); };
+        }
+
+        dd.appendChild(el);
       }
-      const sep = document.createElement("div");
-      sep.className = "auto-dd-sep";
-      dd.appendChild(sep);
     } else {
       const empty = document.createElement("div");
-      empty.className = "auto-dd-empty";
+      empty.className = "menu-row";
+      empty.style.color = "var(--fg-faint)";
       empty.textContent = "No automations yet";
       dd.appendChild(empty);
     }
 
-    const create = document.createElement("div");
-    create.className = "auto-dd-new";
-    create.innerHTML = `<span class="auto-pi">${icon("plus", 13)}</span>New automation…`;
-    create.onclick = () => {
-      closeDropdown();
-      actions.openCreate();
-    };
-    dd.appendChild(create);
+    // Footer: edit automations…
+    const foot = document.createElement("div");
+    foot.className = "menu-foot";
+    dd.appendChild(foot);
+
+    const editRow = document.createElement("div");
+    editRow.className = "menu-row";
+    const plusIco = document.createElement("span");
+    plusIco.innerHTML = icon("plus", 13);
+    editRow.appendChild(plusIco);
+    const editLabel = document.createElement("span");
+    editLabel.textContent = "edit automations…";
+    editRow.appendChild(editLabel);
+    editRow.onclick = () => { closeDropdown(); actions.openCreate(); };
+    dd.appendChild(editRow);
 
     document.body.appendChild(dd);
-    const r = bar.getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
     dd.style.position = "fixed";
-    dd.style.top = `${r.bottom + 4}px`;
-    dd.style.left = `${r.left}px`;
-    dd.style.minWidth = `${Math.max(r.width, 264)}px`;
+    dd.style.top = `${rect.bottom + 4}px`;
+    const ddWidth = Math.max(240, rect.width);
+    let left = rect.left;
+    if (left + ddWidth > window.innerWidth - 8) left = Math.max(8, window.innerWidth - ddWidth - 8);
+    dd.style.left = `${left}px`;
+    dd.style.minWidth = `${ddWidth}px`;
     dropdown = dd;
+    anchor.classList.add("open");
     setTimeout(() => {
       document.addEventListener("mousedown", onOutside);
       document.addEventListener("keydown", onKey);
     }, 0);
   }
 
-  function renderBar(): void {
-    const sel = selected();
-    bar.innerHTML = "";
-
-    const lab = document.createElement("span");
-    lab.className = "auto-lab";
-    lab.textContent = "Automation";
-    bar.appendChild(lab);
+  function renderAnchor(): void {
+    // Rebuild the anchor in-place, preserving the container slot.
+    const next = document.createElement(runningId ? "button" : "button");
+    const running = runningId ? list.find(a => a.id === runningId) : null;
 
     if (running) {
+      // Chip: pulse dot + name + chevron.
+      next.className = "auto-chip";
       const dot = document.createElement("span");
-      dot.className = "auto-dot";
-      bar.appendChild(dot);
+      dot.className = "auto-chip-dot pulse";
+      next.appendChild(dot);
+      const name = document.createElement("span");
+      name.textContent = running.name;
+      next.appendChild(name);
+      const chev = document.createElement("span");
+      chev.innerHTML = icon("chevronDown", 11, 2.4);
+      next.appendChild(chev);
+    } else {
+      // Bolt glyph button.
+      next.className = "glyph";
+      next.title = "Automations";
+      next.innerHTML = icon("bolt", 16);
     }
 
-    const name = document.createElement("span");
-    name.className = "auto-name" + (running ? " running" : "");
-    name.textContent = sel ? (running ? `${sel.name} · running` : sel.name) : "New…";
-    bar.appendChild(name);
-
-    const chev = document.createElement("span");
-    chev.className = "auto-chev";
-    chev.innerHTML = icon("chevronDown", 11, 2.4);
-    bar.appendChild(chev);
-
-    const run = document.createElement("button");
-    run.className = "auto-run";
-    run.title = sel ? `Run ${sel.name}` : "Create an automation";
-    run.innerHTML = icon("play", 13);
-    run.onclick = (e) => {
-      e.stopPropagation();
-      closeDropdown();
-      const s = selected();
-      if (s) actions.run(s);
-      else actions.openCreate();
-    };
-    bar.appendChild(run);
-
-    bar.onclick = (e) => {
+    next.onclick = (e) => {
       e.stopPropagation();
       if (dropdown) closeDropdown();
       else openDropdown();
     };
+
+    anchor.replaceWith(next);
+    anchor = next;
   }
 
-  renderBar();
+  renderAnchor();
 
   return {
     setAutomations(next) {
       list = next;
-      if (selectedId && !list.some((a) => a.id === selectedId)) selectedId = null;
-      renderBar();
+      if (runningId && !list.some((a) => a.id === runningId)) runningId = null;
+      renderAnchor();
       if (dropdown) openDropdown(); // refresh an open dropdown in place
     },
     setRunning(next) {
-      running = next;
-      renderBar();
+      // Use the last-run automation id to show the correct chip label.
+      if (next) runningId = lastRunId ?? list[0]?.id ?? null;
+      else runningId = null;
+      renderAnchor();
+      if (dropdown) openDropdown();
     },
   };
 }

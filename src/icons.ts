@@ -25,7 +25,9 @@ export type IconName =
   | "arrowUp"
   | "x"
   | "expand"
-  | "compress";
+  | "compress"
+  | "bolt"
+  | "stop";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -55,6 +57,8 @@ const paths: Record<IconName, string> = {
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
+  bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H13L13 2z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

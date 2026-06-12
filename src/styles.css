@@ -172,6 +172,35 @@ body {
   color: var(--fg-faint);
   margin-left: auto;
 }
+.auto-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--em-wash);
+  color: var(--em);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: 4px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.auto-chip:hover,
+.auto-chip.open {
+  background: var(--em-wash);
+  filter: brightness(1.1);
+}
+.auto-chip-dot,
+.auto-chip .pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--em);
+  animation: pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes pulse {
+  50% { opacity: 0.35; }
+}
 .glyph {
   width: 30px;
   height: 30px;
