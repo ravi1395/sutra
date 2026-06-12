@@ -30,6 +30,7 @@ import {
 import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
+  breadcrumbSegments,
   deserializeWorkspaceSession,
   filterWorkspaceTabs,
   pathBelongsToRoot,
@@ -129,6 +130,18 @@ test("basenameOf returns the final folder segment", () => {
   assert.equal(basenameOf("/tmp/project/"), "project");
   assert.equal(basenameOf("/tmp/project"), "project");
   assert.equal(basenameOf("/"), "/");
+});
+
+test("breadcrumbSegments splits path under root", () => {
+  const segs = breadcrumbSegments("/p/sutra", "/p/sutra/src/editor.ts");
+  assert.deepEqual(segs.map(s => s.label), ["src", "editor.ts"]);
+  assert.equal(segs[0].dirPath, "/p/sutra/src");
+  assert.equal(segs[1].leaf, true);
+});
+
+test("breadcrumbSegments empty for outside-root and null", () => {
+  assert.deepEqual(breadcrumbSegments("/p/sutra", "/elsewhere/x.ts"), []);
+  assert.deepEqual(breadcrumbSegments("/p/sutra", null), []);
 });
 
 test("sessionFromTabs persists ordered workspace file tabs and active path", () => {
@@ -258,16 +271,14 @@ test("preview shortcut is handled before focused editor paste handlers", () => {
   assert.equal(GLOBAL_SHORTCUT_OPTIONS.capture, true);
 });
 
-test("titlebar settings button opens the existing settings modal path", () => {
+test("settings shortcut opens the existing settings modal path", () => {
   const html = readFileSync("index.html", "utf8");
   const mainTs = readFileSync("src/main.ts", "utf8");
-  const iconsTs = readFileSync("src/icons.ts", "utf8");
 
-  assert.match(html, /id="btn-settings"/);
-  assert.match(mainTs, /const btnSettings = \$\("btn-settings"\)/);
-  assert.match(mainTs, /btnSettings\.innerHTML = icon\("settings", 17\)/);
-  assert.match(mainTs, /btnSettings\.onclick = \(\) => openSettings\(\)/);
-  assert.match(iconsTs, /\|\s*"settings"/);
+  assert.doesNotMatch(html, /id="btn-settings"/);
+  assert.match(mainTs, /mod && e\.code === "Comma"/);
+  assert.match(mainTs, /openSettingsModal\(/);
+  assert.match(mainTs, /function openSettings\(\): void/);
 });
 
 test("native Edit menu restores standard editing shortcuts", () => {

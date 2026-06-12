@@ -13,7 +13,11 @@ export interface WorkspaceActions {
 
 export interface WorkspaceBarHandle {
   setCurrentWorkspace(path: string | null): void;
-  openPopover: (anchor: HTMLElement, build: (el: HTMLElement) => void) => void;
+  openPopover: (
+    anchor: HTMLElement,
+    build: (el: HTMLElement, close: () => void) => void,
+    className?: string,
+  ) => void;
 }
 
 // Best-effort ~ collapse for display; the renderer has no HOME env, so match the
@@ -48,13 +52,17 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     el.style.left = `${left}px`;
   }
 
-  function openPopover(anchor: HTMLElement, build: (el: HTMLElement) => void): void {
+  function openPopover(
+    anchor: HTMLElement,
+    build: (el: HTMLElement, close: () => void) => void,
+    className = "popover",
+  ): void {
     const reopening = openBtn === anchor;
     closeAll();
     if (reopening) return; // click again on the open anchor → toggle shut
     const el = document.createElement("div");
-    el.className = "popover";
-    build(el);
+    el.className = className;
+    build(el, closeAll);
     root.appendChild(el);
     positionUnder(el, anchor);
     pop = el;

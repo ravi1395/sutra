@@ -14,6 +14,20 @@ export function pathBelongsToRoot(path: string, root: string): boolean {
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
+export interface BreadcrumbSegment { label: string; dirPath: string | null; leaf: boolean; }
+
+/** Split an absolute file path into clickable breadcrumb segments relative to root. */
+export function breadcrumbSegments(root: string, filePath: string | null): BreadcrumbSegment[] {
+  if (!filePath || !pathBelongsToRoot(filePath, root)) return [];
+  const rel = filePath.slice(root.length).replace(/^\//, "");
+  const parts = rel.split("/").filter(Boolean);
+  return parts.map((label, i) => ({
+    label,
+    dirPath: i < parts.length - 1 ? `${root}/${parts.slice(0, i + 1).join("/")}` : null,
+    leaf: i === parts.length - 1,
+  }));
+}
+
 export function filterWorkspaceTabs<T extends WorkspaceTab>(tabs: readonly T[], root: string): T[] {
   return tabs.filter((tab) => tab.path != null && pathBelongsToRoot(tab.path, root));
 }

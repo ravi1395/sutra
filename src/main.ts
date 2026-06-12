@@ -62,6 +62,7 @@ import {
 import { icon } from "./icons";
 import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import {
+  breadcrumbSegments,
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
@@ -187,7 +188,31 @@ editor.onGutterClick = (idx) => {
   setDiff(true);
   diffViewer.highlightHunk(idx);
 };
-editor.onActiveTabChanged = (tab) => tree.setActive(tab?.path ?? null);
+// Render the loom-bar breadcrumb for the active file; dir segments reveal in the tree.
+function renderBreadcrumb(path: string | null): void {
+  const host = $("breadcrumb");
+  host.innerHTML = "";
+  if (!currentRoot) return;
+  for (const seg of breadcrumbSegments(currentRoot, path)) {
+    const sep = document.createElement("span");
+    sep.className = "sep";
+    sep.textContent = "/";
+    host.appendChild(sep);
+    const el = document.createElement("span");
+    el.className = "seg" + (seg.leaf ? " leaf" : " dir");
+    el.textContent = seg.label;
+    if (seg.dirPath) {
+      const dir = seg.dirPath;
+      el.onclick = () => void tree.reveal(dir);
+    }
+    host.appendChild(el);
+  }
+}
+
+editor.onActiveTabChanged = (tab) => {
+  tree.setActive(tab?.path ?? null);
+  renderBreadcrumb(tab?.path ?? null);
+};
 editor.onTabsChanged = () => persistWorkspaceSession();
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
@@ -868,7 +893,39 @@ $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
 btnPalette.onclick = () => palette.open();
-btnMenu.onclick = () => {};
+// App menu: the global verbs that aren't pane toggles (palette + shortcuts own the rest).
+btnMenu.onclick = () => {
+  workspaceBar.openPopover(
+    btnMenu,
+    (el, close) => {
+      const mk = (label: string, kbd: string, run: () => void): void => {
+        const row = document.createElement("div");
+        row.className = "menu-row";
+        const text = document.createElement("span");
+        text.textContent = label;
+        row.appendChild(text);
+        if (kbd) {
+          const k = document.createElement("span");
+          k.className = "kbd";
+          k.textContent = kbd;
+          row.appendChild(k);
+        }
+        row.onclick = () => {
+          close();
+          run();
+        };
+        el.appendChild(row);
+      };
+      mk("open folder…", "⌘O", () => actions.openFolder());
+      mk("command palette", "⌘K", () => palette.open());
+      const foot = document.createElement("div");
+      foot.className = "menu-foot";
+      el.appendChild(foot);
+      mk("settings…", "⌘,", () => openSettings());
+    },
+    "menu-card",
+  );
+};
 
 const actions = {
   newFile: () => editor.newUntitled(),
