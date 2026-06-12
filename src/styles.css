@@ -1,12 +1,7 @@
-/* Mockup C palette — graphite base + single emerald accent. Legacy --bg/--accent
-   names are kept as aliases so existing rules recolor without renaming. */
-@font-face {
-  font-family: "Hanken Grotesk";
-  src: url("/src/assets/fonts/HankenGrotesk-Variable.woff2") format("woff2");
-  font-weight: 400 700;
-  font-style: normal;
-  font-display: swap;
-}
+/* Ink + washi token system. Legacy --bg/--accent aliases keep every unconverted
+   rule rendering while the new token layer drives the thread redesign. */
+@font-face { font-family: "Instrument Sans"; src: url("/src/assets/fonts/InstrumentSans-Variable.woff2") format("woff2"); font-weight: 400 600; font-display: swap; }
+@font-face { font-family: "Fraunces"; src: url("/src/assets/fonts/Fraunces-Italic-Variable.woff2") format("woff2"); font-weight: 400 500; font-style: italic; font-display: swap; }
 @font-face {
   font-family: "Spline Sans Mono";
   src: url("/src/assets/fonts/SplineSansMono-Variable.woff2") format("woff2");
@@ -16,37 +11,28 @@
 }
 
 :root {
-  --bg-0: #0c0d0e; /* window root */
-  --bg-1: #111213; /* editor body */
-  --bg-2: #161718; /* bars / sidebar */
-  --bg-3: #1e1f21; /* raised / hover */
-  --line: #232527; /* hairline */
-  --line-soft: #1a1c1d;
-  --fg: #e6e7e9;
-  --fg-dim: #6c7075;
-  --fg-faint: #474b50;
-  --em: #34d399; /* single accent */
-  --em-dim: #1f8a63;
-  --em-wash: rgba(52, 211, 153, 0.11);
-  --added: #e3b341; /* diff gutter — new   */
-  --modified: #4493f8; /* diff gutter — changed */
-  --deleted: #f0716a; /* diff gutter — removed */
-  --r-lg: 12px;
-  --r-md: 8px;
-  --r-sm: 6px;
-  --ui: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
-  --mono: "Spline Sans Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-
-  /* legacy aliases → remapped onto the new palette */
-  --bg: var(--bg-1);
-  --bg-alt: var(--bg-2);
-  --bg-bar: var(--bg-2);
-  --border: var(--line);
-  --accent: var(--em);
-  --accent-hi: var(--em-dim);
-
-  font-family: var(--ui);
-  font-size: 13px;
+  --bg-0: #101311; --bg-1: #131614; --bg-2: #0e110f; --bg-3: #161a17; --bg-4: #1f2420;
+  --line: rgba(255,255,255,0.05); --line-menu: rgba(255,255,255,0.10);
+  --fg: #e8eae4; --fg-dim: #8b9189; --fg-faint: #565c54; --fg-ghost: #3e443e;
+  --em: #4ade93; --em-dim: #1f8a63; --em-wash: rgba(74,222,147,0.10); --em-wash-row: rgba(74,222,147,0.08);
+  --added: #e3b341; --modified: #4493f8; --deleted: #f0716a;
+  --bg-drawer: var(--bg-2); --bg-whisper: var(--bg-2);
+  --r-lg: 12px; --r-md: 8px; --r-sm: 5px;
+  --ui: "Instrument Sans", system-ui, sans-serif;
+  --voice: "Fraunces", Georgia, serif;
+  --mono: "Spline Sans Mono", ui-monospace, Menlo, monospace;
+  /* legacy aliases — keep every unconverted rule working */
+  --bg: var(--bg-1); --bg-alt: var(--bg-2); --bg-bar: var(--bg-2);
+  --border: var(--line); --accent: var(--em); --accent-hi: var(--em-dim);
+  --line-soft: var(--line);
+  font-family: var(--ui); font-size: 13px;
+}
+.theme-washi {
+  --bg-0: #f5f2eb; --bg-1: #f5f2eb; --bg-2: #f1ede3; --bg-3: #fbf9f4; --bg-4: #efebe0;
+  --line: rgba(31,35,31,0.08); --line-menu: rgba(31,35,31,0.10);
+  --fg: #1f231f; --fg-dim: #6e7268; --fg-faint: #9c988a; --fg-ghost: #b5b1a4;
+  --em: #0f8a5f; --em-dim: #0c6b4a; --em-wash: rgba(15,138,95,0.10); --em-wash-row: rgba(15,138,95,0.08);
+  --bg-drawer: #efebe0; --bg-whisper: #f1ede3;
 }
 
 * {
