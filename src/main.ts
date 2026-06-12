@@ -520,7 +520,8 @@ $("diff-close").onclick = () => setDiff(false);
 const browserArea = $("browser-area");
 const browserRes = $("browser-resizer");
 const btnBrowser = $("btn-browser");
-const btnSettings = $("btn-settings");
+const btnPalette = $("btn-palette");
+const btnMenu = $("btn-menu");
 function setBrowser(on: boolean): void {
   browserArea.classList.toggle("hidden", !on);
   browserRes.classList.toggle("hidden", !on);
@@ -854,17 +855,20 @@ window.addEventListener("blur", () => {
 });
 
 // ---- chrome: icon buttons + menu bar ----
+$("ws-wordmark").textContent = "sutra";
 btnTerm.innerHTML = icon("terminal", 17);
-btnDiff.innerHTML = icon("diff", 17);
-btnBrowser.innerHTML = icon("browser", 17);
-btnSettings.innerHTML = icon("settings", 17);
+btnDiff.innerHTML = icon("git-compare", 17);
+btnBrowser.innerHTML = icon("world", 17);
+btnPalette.innerHTML = icon("command", 17);
+btnMenu.innerHTML = icon("menu", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
-btnSettings.onclick = () => openSettings();
+btnPalette.onclick = () => palette.open();
+btnMenu.onclick = () => {};
 
 const actions = {
   newFile: () => editor.newUntitled(),
@@ -912,7 +916,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
 });
 workspaceBar.setCurrentWorkspace(null);
 
-gitBar = createGitBar($("gitbar"));
+gitBar = createGitBar($("menubar-host"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 

@@ -10,16 +10,21 @@
   <body>
     <div id="app">
       <div id="titlebar">
-        <div id="automations"></div>
-        <div class="spacer"></div>
-        <div id="workspace"></div>
-        <div id="gitbar"></div>
-        <div id="view-tools">
-          <button id="btn-term" class="tbtn on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
-          <button id="btn-diff" class="tbtn" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
-          <button id="btn-browser" class="tbtn" title="Toggle browser" aria-label="Toggle browser"></button>
-          <button id="btn-settings" class="tbtn" title="Settings (⌘,)" aria-label="Settings"></button>
+        <div id="loom-left">
+          <button id="ws-wordmark" class="wordmark" aria-label="Workspace menu"></button>
+          <div id="breadcrumb"></div>
         </div>
+        <div class="spacer"></div>
+        <div id="automations"></div>
+        <div id="view-tools">
+          <button id="btn-term" class="glyph on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
+          <button id="btn-diff" class="glyph" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
+          <button id="btn-browser" class="glyph" title="Toggle browser" aria-label="Toggle browser"></button>
+          <button id="btn-palette" class="glyph" title="Palette (⌘K)" aria-label="Command palette"></button>
+          <button id="btn-menu" class="glyph" title="Menu" aria-label="Application menu"></button>
+        </div>
+        <div id="workspace" class="hidden"></div>
+        <div id="menubar-host" class="hidden"></div>
       </div>
 
       <div id="body">

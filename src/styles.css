@@ -58,14 +58,13 @@ body {
   overflow: hidden;
 }
 
-/* ---- chrome (titlebar: menu bar · spacer · switcher · view tools) ---- */
+/* ---- chrome (loom bar shell) ---- */
 #titlebar {
   flex: 0 0 40px;
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 0 12px;
-  background: var(--bg-2);
+  padding: 0 14px;
+  background: var(--bg-0);
   border-bottom: 1px solid var(--line);
   position: relative;
   -webkit-user-select: none;
@@ -73,6 +72,59 @@ body {
 }
 #titlebar .spacer {
   flex: 1;
+}
+#loom-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.wordmark {
+  font-family: var(--voice);
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--em);
+  background: none;
+  border: 0;
+  padding: 4px 9px;
+  border-radius: var(--r-md);
+}
+.wordmark:hover,
+.wordmark.open {
+  background: var(--em-wash);
+}
+#breadcrumb {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+#breadcrumb .sep {
+  color: var(--fg-faint);
+  margin: 0 7px;
+}
+#breadcrumb .leaf {
+  color: var(--fg);
+}
+.glyph {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  color: var(--fg-faint);
+  font-size: 15px;
+  padding: 5px 7px;
+  border-radius: var(--r-sm);
+}
+.glyph:hover {
+  color: var(--fg-dim);
+  background: var(--bg-3);
+}
+.glyph.on {
+  color: var(--em);
 }
 
 /* generic graphite button base (hunk-revert, fallbacks) */
