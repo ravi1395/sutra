@@ -46,6 +46,8 @@ import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./di
 import { parseConflicts, resolveConflictAtIndex, type ConflictChoice } from "./conflict";
 import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
+import { marginEntries, type AiRange } from "./marginalia";
+import type { AgentChange } from "./ipc";
 
 export interface Tab {
   id: string;
@@ -263,6 +265,10 @@ export class Pane {
   readonly el: HTMLElement; // .pane root
   private tabsEl: HTMLElement;
   private hostEl: HTMLElement;
+  private editorShell: HTMLElement;
+  private codeHostEl: HTMLElement;
+  private marginaliaEl: HTMLElement;
+  private marginaliaInnerEl: HTMLElement;
   readonly previewEl: HTMLElement; // .preview-host (used in Phase 5)
   private welcomeEl: HTMLElement;
   private languageCompartment = new Compartment();
@@ -282,6 +288,21 @@ export class Pane {
     this.hostEl = document.createElement("div");
     this.hostEl.className = "pane-host";
 
+    this.editorShell = document.createElement("div");
+    this.editorShell.className = "editor-shell";
+
+    this.codeHostEl = document.createElement("div");
+    this.codeHostEl.className = "code-host";
+
+    this.marginaliaEl = document.createElement("div");
+    this.marginaliaEl.id = "marginalia";
+    this.marginaliaEl.className = "hidden";
+    this.marginaliaInnerEl = document.createElement("div");
+    this.marginaliaInnerEl.className = "marginalia-inner";
+    this.marginaliaEl.append(this.marginaliaInnerEl);
+    this.editorShell.append(this.codeHostEl, this.marginaliaEl);
+    this.hostEl.append(this.editorShell);
+
     this.previewEl = document.createElement("div");
     this.previewEl.className = "preview-host hidden";
 
@@ -293,8 +314,9 @@ export class Pane {
     this.el.append(this.tabsEl, this.hostEl, this.previewEl, this.welcomeEl);
     mount.append(this.el);
 
-    this.view = new EditorView({ parent: this.hostEl });
+    this.view = new EditorView({ parent: this.codeHostEl });
     this.view.dom.style.display = "none";
+    this.view.scrollDOM.addEventListener("scroll", () => this.syncMarginaliaScroll());
 
     // Tab clicks activate through their own handler; rerendering on press would detach a drag source.
     this.el.addEventListener("mousedown", (e) => {
@@ -367,6 +389,56 @@ export class Pane {
     });
   }
 
+  syncMarginalia(): void {
+    this.marginaliaInnerEl.innerHTML = "";
+    if (!this.active || this.previewSource) {
+      this.marginaliaEl.classList.add("hidden");
+      return;
+    }
+
+    const ai = this.mgr.aiRangesForTab(this.active, this.view.state.doc.lines);
+    const entries = marginEntries(this.active.hunks, ai, this.view.defaultLineHeight);
+    if (entries.length === 0) {
+      this.marginaliaEl.classList.add("hidden");
+      return;
+    }
+
+    this.marginaliaEl.classList.remove("hidden");
+    for (const entry of entries) {
+      if (entry.kind === "hunk") {
+        const pill = document.createElement("button");
+        pill.className = `margin-pill kind-${entry.color}`;
+        pill.style.top = `${entry.topPx}px`;
+        pill.style.minHeight = `${entry.heightPx}px`;
+        pill.textContent = entry.color;
+        pill.onclick = () => {
+          const hunk = this.active?.hunks[entry.hunkIndex];
+          if (!hunk) return;
+          this.mgr.setFocused(this);
+          this.mgr.revertHunk(hunk);
+        };
+        this.marginaliaInnerEl.append(pill);
+      } else {
+        const stitch = document.createElement("div");
+        stitch.className = "margin-ai";
+        stitch.style.top = `${entry.topPx}px`;
+        const line = document.createElement("span");
+        line.className = "stitch";
+        line.style.height = `${entry.heightPx}px`;
+        const who = document.createElement("span");
+        who.className = "who";
+        who.textContent = entry.agent;
+        stitch.append(line, who);
+        this.marginaliaInnerEl.append(stitch);
+      }
+    }
+    this.syncMarginaliaScroll();
+  }
+
+  private syncMarginaliaScroll(): void {
+    this.marginaliaInnerEl.style.transform = `translateY(-${this.view.scrollDOM.scrollTop}px)`;
+  }
+
   // Live-reconfigures indent width for the currently displayed document.
   applyIndent(size: number): void {
     this.view.dispatch({ effects: this.indentCompartment.reconfigure(indentSettings(size)) });
@@ -427,7 +499,7 @@ export class Pane {
       btnBoth.onclick = () => this.applyConflictResolution(i, "both");
 
       banner.append(btnOurs, btnTheirs, btnBoth);
-      this.hostEl.insertBefore(banner, this.view.dom);
+      this.hostEl.insertBefore(banner, this.editorShell);
     }
   }
 
@@ -451,6 +523,7 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    this.syncMarginalia();
     // Detect conflicts in the newly activated tab
     this.detectAndRenderConflicts();
   }
@@ -466,6 +539,7 @@ export class Pane {
     this.view.setState(EditorState.create({ extensions: this.extensions("") }));
     this.applyEditorTheme();
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.remove("hidden");
   }
 
@@ -479,6 +553,7 @@ export class Pane {
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
   }
@@ -496,6 +571,7 @@ export class Pane {
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
     this.renderTabs();
@@ -518,6 +594,7 @@ export class Pane {
     } else {
       this.welcomeEl.classList.remove("hidden");
     }
+    this.syncMarginalia();
   }
 
   /** Remove `tab`; if it was active, activate a neighbour or show welcome. */
@@ -611,6 +688,7 @@ export class EditorManager {
   private diffTimer: number | undefined;
   private previewTimer: number | undefined;
   private workspaceRoot: string | null = null;
+  private agentChanges: readonly AgentChange[] = [];
   private themeObserver: MutationObserver;
 
   constructor(container: HTMLElement) {
@@ -765,6 +843,20 @@ export class EditorManager {
 
   renderAllTabs(): void {
     for (const p of this.panes) p.renderTabs();
+  }
+
+  setAgentChanges(changes: readonly AgentChange[]): void {
+    this.agentChanges = changes;
+    for (const pane of this.panes) pane.syncMarginalia();
+  }
+
+  aiRangesForTab(tab: Tab, lineCount: number): AiRange[] {
+    if (!tab.path) return [];
+    const change = this.agentChanges.find(
+      (candidate) => candidate.path === tab.path && !candidate.humanTouched && !candidate.binary && candidate.status !== "D",
+    );
+    if (!change) return [];
+    return [{ startLine: 0, endLine: Math.max(0, lineCount - 1), agent: "AI" }];
   }
 
   private baselineOf(tab: Tab): string | null {
@@ -993,12 +1085,14 @@ export class EditorManager {
     if (baseline == null) {
       active.hunks = [];
       pane.view.dispatch({ effects: setDiffMarks.of([]) });
+      pane.syncMarginalia();
       this.onDiffChanged?.([], active.name);
       return;
     }
     const { marks, hunks } = computeLineDiff(baseline, current);
     active.hunks = hunks;
     pane.view.dispatch({ effects: setDiffMarks.of(marks) });
+    pane.syncMarginalia();
     const label = active.override != null ? `${active.name} — AI edits` : active.name;
     this.onDiffChanged?.(hunks, label);
   }

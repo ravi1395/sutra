@@ -445,6 +445,7 @@ async function openWorkspace(dir: string): Promise<void> {
       for (const w of warnings) console.warn("MCP config:", w);
     });
     agentStatus = { enabled: false, agentActive: false, changes: [] };
+    editor.setAgentChanges([]);
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
     if (settings.restoreSession) await restoreWorkspaceTabs(dir);
@@ -611,6 +612,7 @@ function stopAgentTrackingPoll(): void {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
+  editor.setAgentChanges([]);
   hideAgentBanner();
 }
 
@@ -668,6 +670,7 @@ async function pollAgentChanges(): Promise<void> {
     const next = await agentTrackingPoll(currentRoot);
     if (currentRoot !== root) return;
     agentStatus = next;
+    editor.setAgentChanges(next.changes);
     if (aiChanges(next.changes).length > 0) showAgentBanner(next.changes);
     else hideAgentBanner();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
@@ -731,6 +734,7 @@ function showAgentBanner(changes: AgentChange[]): void {
       if (!currentRoot) return;
       void agentTrackingAccept(currentRoot).then((status) => {
         agentStatus = status;
+        editor.setAgentChanges(status.changes);
         hideAgentBanner();
         void refreshDiffFileList();
       });

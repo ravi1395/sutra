@@ -1125,16 +1125,84 @@ button:hover {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
-.pane-host .cm-editor {
+.editor-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.code-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.code-host .cm-editor {
   height: 100%;
   position: relative; /* anchor for the floating in-file search panel */
 }
 /* keep code mono even though the chrome (root) font is now sans */
-.pane-host .cm-editor,
-.pane-host .cm-scroller {
+.code-host .cm-editor,
+.code-host .cm-scroller {
   font-family: var(--editor-font-family, var(--mono));
   font-size: var(--editor-font-size, 13px);
+}
+#marginalia {
+  width: 88px;
+  flex: 0 0 88px;
+  border-left: 1px solid var(--line);
+  position: relative;
+  overflow: hidden;
+}
+#marginalia.hidden {
+  display: none;
+}
+.marginalia-inner {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+.margin-pill {
+  position: absolute;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--line-menu);
+  border-radius: 9px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.margin-pill.kind-added {
+  border-color: color-mix(in srgb, var(--added) 45%, var(--line-menu));
+}
+.margin-pill.kind-modified {
+  border-color: color-mix(in srgb, var(--modified) 45%, var(--line-menu));
+}
+.margin-pill.kind-deleted {
+  border-color: color-mix(in srgb, var(--deleted) 45%, var(--line-menu));
+}
+.margin-ai {
+  position: absolute;
+  left: 13px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.margin-ai .stitch {
+  border-left: 2px dotted var(--em);
+}
+.margin-ai .who {
+  font-family: var(--voice);
+  font-style: italic;
+  font-size: 11px;
+  color: var(--em);
 }
 .pane-welcome {
   position: absolute;
@@ -1461,7 +1529,7 @@ button:hover {
 /* Float the panel over the editor's top-right instead of docking full-width.
    CM6 mounts panels as flex children of .cm-editor that reserve layout height;
    absolute-positioning lifts it out of flow so the editor text never shifts. */
-.pane-host .cm-editor > .cm-panels {
+.code-host .cm-editor > .cm-panels {
   position: absolute;
   top: 8px;
   right: 14px;
