@@ -46,7 +46,7 @@ import {
 } from "./ipc";
 import { agentBannerText, aiChanges, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, type PaletteHandle } from "./palette";
+import { mountPalette, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -1165,7 +1165,7 @@ async function switchBranch(branch: string): Promise<void> {
 
 // ---- command palette ----
 // Named so the settings shortcuts reference can reuse it as the single source of truth.
-const paletteCommands = [
+const paletteCommands: Command[] = [
   { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
   { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
   { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
@@ -1192,7 +1192,20 @@ const paletteCommands = [
   }, shortcut: "⇧⌘F" },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
 ];
-palette = mountPalette(paletteCommands);
+
+function recentPaletteCommands(): Command[] {
+  return loadRecents()
+    .filter((recent) => recent.path !== currentRoot)
+    .slice(0, 5)
+    .map((recent) => ({
+      id: `recent:${recent.path}`,
+      title: `Open ${recent.name}`,
+      run: () => actions.switchWorkspace(recent.path),
+      section: "recent" as const,
+    }));
+}
+
+palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {
