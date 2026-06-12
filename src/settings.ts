@@ -11,6 +11,7 @@ export interface UserSettings {
   restoreSession: boolean;
   agentTracking: boolean;
   autosaveOnBlur: boolean;
+  theme: "ink" | "washi";
 }
 
 // Whitelists: every multi-choice setting validates against one of these.
@@ -39,6 +40,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   restoreSession: true,
   agentTracking: true,
   autosaveOnBlur: false,
+  theme: "ink",
 };
 
 const SETTINGS_KEY = "sutra.settings";
@@ -73,6 +75,7 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     restoreSession: pickBool(value.restoreSession, d.restoreSession),
     agentTracking: pickBool(value.agentTracking, d.agentTracking),
     autosaveOnBlur: pickBool(value.autosaveOnBlur, d.autosaveOnBlur),
+    theme: value.theme === "washi" ? "washi" : "ink",
   };
 }
 

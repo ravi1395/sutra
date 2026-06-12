@@ -10,6 +10,7 @@ import {
   deserializeSettings,
   serializeSettings,
   nextFontSettings,
+  type UserSettings,
 } from "../src/settings";
 
 test("clampSettings fills defaults for empty input", () => {
@@ -93,4 +94,12 @@ test("indentSettings sets tabSize and indent unit", () => {
   const state = EditorState.create({ extensions: indentSettings(2) });
   assert.equal(state.tabSize, 2);
   assert.equal(state.facet(EditorState.tabSize), 2);
+});
+
+test("clampSettings defaults theme to ink", () => {
+  assert.equal(clampSettings({}).theme, "ink");
+});
+test("clampSettings accepts washi and rejects junk", () => {
+  assert.equal(clampSettings({ theme: "washi" } as Partial<UserSettings>).theme, "washi");
+  assert.equal(clampSettings({ theme: "neon" as never }).theme, "ink");
 });

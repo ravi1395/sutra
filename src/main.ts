@@ -335,9 +335,15 @@ async function restoreWorkspaceTabs(root: string): Promise<void> {
   }
 }
 
+// Apply the active theme by toggling the washi class on the document root.
+function applyTheme(theme: "ink" | "washi"): void {
+  document.documentElement.classList.toggle("theme-washi", theme === "washi");
+}
+
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
   settings = clampSettings(next);
+  applyTheme(settings.theme);
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
   rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
