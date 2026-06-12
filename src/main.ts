@@ -19,9 +19,7 @@ import { DiffViewer } from "./diff";
 import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
 import {
-  agentTrackingAccept,
   agentTrackingPoll,
-  agentTrackingRevert,
   readFile,
   writeFile,
   fileMtime,
@@ -41,10 +39,9 @@ import {
   onFsChanged,
   watchStart,
   watchStop,
-  type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
-import { agentBannerText, aiChanges, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
+import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -172,7 +169,7 @@ void onFsChanged((payload) => {
   void refreshFileSystemState(root);
 });
 
-const banner = $("ai-banner");
+const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -213,8 +210,12 @@ function renderBreadcrumb(path: string | null): void {
 editor.onActiveTabChanged = (tab) => {
   tree.setActive(tab?.path ?? null);
   renderBreadcrumb(tab?.path ?? null);
+  renderWhisperBar();
 };
-editor.onTabsChanged = () => persistWorkspaceSession();
+editor.onTabsChanged = () => {
+  persistWorkspaceSession();
+  renderWhisperBar();
+};
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
 diffViewer.onRevert = (h) => editor.revertHunk(h);
@@ -419,6 +420,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   }
   const mt = await fileMtime(path).catch(() => null);
   editor.markSaved(tab, path, basename(path), mt);
+  renderWhisperBar();
   if (path !== prevPath) {
     // brand-new file or Save As → it now exists on disk; seed git baseline + tree
     tab.gitHead = await gitHeadContent(path).catch(() => null);
@@ -447,6 +449,7 @@ async function openWorkspace(dir: string): Promise<void> {
     });
     agentStatus = { enabled: false, agentActive: false, changes: [] };
     editor.setAgentChanges([]);
+    renderWhisperBar();
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
     if (settings.restoreSession) await restoreWorkspaceTabs(dir);
@@ -456,7 +459,6 @@ async function openWorkspace(dir: string): Promise<void> {
   persistWorkspaceSession();
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
-  hideBanner();
   await terminals.reset(dir, drawerState.open);
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void refreshGitState(dir);
@@ -639,14 +641,15 @@ function startAgentTrackingPoll(): void {
   pollTimer = window.setInterval(pollAgentChanges, 1500);
 }
 
-// Halts agent-change polling and clears any banner it surfaced.
+// Halts agent-change polling and clears any whisper text it surfaced.
 function stopAgentTrackingPoll(): void {
   if (pollTimer !== undefined) {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
   editor.setAgentChanges([]);
-  hideAgentBanner();
+  agentStatus = { enabled: false, agentActive: false, changes: [] };
+  renderWhisperBar();
 }
 
 // ---- git-index mtime watcher — refreshes tree badges after terminal git ops ----
@@ -704,8 +707,7 @@ async function pollAgentChanges(): Promise<void> {
     if (currentRoot !== root) return;
     agentStatus = next;
     editor.setAgentChanges(next.changes);
-    if (aiChanges(next.changes).length > 0) showAgentBanner(next.changes);
-    else hideAgentBanner();
+    renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
     // Poll failures must not interrupt editing.
@@ -731,91 +733,40 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-function bannerBtn(text: string, fn: () => void, tone = "secondary"): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.textContent = text;
-  b.className = `ai-banner-btn ${tone}`;
-  b.onclick = fn;
-  return b;
-}
+function renderWhisperBar(): void {
+  whisperBar.innerHTML = "";
+  const left = document.createElement("div");
+  left.className = "whisper-left";
+  const saveState = document.createElement("span");
+  saveState.className = "whisper-save" + (editor.tabs.some((tab) => tab.dirty) ? " dirty" : "");
+  saveState.textContent = editor.tabs.some((tab) => tab.dirty) ? "unsaved changes" : "all changes saved";
+  left.append(saveState);
 
-function showAgentBanner(changes: AgentChange[]): void {
-  banner.innerHTML = "";
-  banner.dataset.kind = "agent";
-  const mark = document.createElement("span");
-  mark.className = "ai-banner-mark";
-  mark.innerHTML = icon("trackAI", 16, 1.7);
-
-  const copy = document.createElement("span");
-  copy.className = "ai-banner-copy";
-  const kicker = document.createElement("span");
-  kicker.className = "ai-banner-kicker";
-  kicker.textContent = "Agent review";
-  const message = document.createElement("span");
-  message.className = "ai-banner-message";
-  message.textContent = agentBannerText(changes);
-  copy.append(kicker, message);
-
-  const actions = document.createElement("span");
-  actions.className = "ai-banner-actions";
-  actions.append(
-    bannerBtn("View", () => {
-      const change = firstViewableAgentChange(changes);
+  const activePath = editor.active?.path ?? null;
+  const agentCopy = whisperText(agentStatus, activePath);
+  if (agentCopy) {
+    const agent = document.createElement("button");
+    agent.className = "whisper-agent";
+    agent.textContent = agentCopy;
+    agent.onclick = () => {
+      const change = firstViewableAgentChange(agentStatus.changes);
       if (change) void viewChangedPath(change.path);
-    }, "primary"),
-    bannerBtn("Keep", () => {
-      if (!currentRoot) return;
-      void agentTrackingAccept(currentRoot).then((status) => {
-        agentStatus = status;
-        editor.setAgentChanges(status.changes);
-        hideAgentBanner();
-        void refreshDiffFileList();
-      });
-    }),
-    bannerBtn("Revert", () => {
-      if (!currentRoot) return;
-      void agentTrackingRevert(currentRoot).then(async (result) => {
-        await tree.refresh();
-        await editor.reloadAllFromDisk();
-        await pollAgentChanges();
-        if (result.unsafePaths.length || result.errors.length) {
-          const unsafe = result.unsafePaths.length
-            ? `${result.unsafePaths.length} human-touched file(s) need manual review.`
-            : "";
-          const errors = result.errors.length ? ` ${result.errors.join("; ")}` : "";
-          void alertNative(`${unsafe}${errors}`.trim());
-        }
-      }).catch((e) => void alertNative(`Revert failed: ${e}`));
-    }, "danger"),
-  );
-  banner.append(
-    mark,
-    copy,
-    actions,
-  );
-  banner.classList.remove("hidden");
-}
-
-function hideAgentBanner(): void {
-  if (banner.dataset.kind === "agent") {
-    hideBanner();
+    };
+    left.append(agent);
   }
+
+  const right = document.createElement("div");
+  right.className = "whisper-right";
+  if (editor.active) {
+    const selection = editor.getSelection();
+    right.textContent = `ln ${selection.line}`;
+  }
+  whisperBar.append(left, right);
 }
 
-function hideBanner(): void {
-  banner.classList.add("hidden");
-  banner.innerHTML = "";
-  delete banner.dataset.kind;
-}
-
-/** One-off error banner (e.g. branch checkout rejected on a dirty tree). */
+/** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
 function showErrorBanner(message: string): void {
-  banner.innerHTML = "";
-  banner.dataset.kind = "error";
-  const span = document.createElement("span");
-  span.textContent = message;
-  banner.append(span, bannerBtn("Dismiss", hideBanner));
-  banner.classList.remove("hidden");
+  void alertNative(message);
 }
 
 // ---- resizers ----
@@ -1160,7 +1111,7 @@ async function switchBranch(branch: string): Promise<void> {
   void tree.refresh();
   void refreshGitState(currentRoot);
   editor.recomputeDiff();
-  hideBanner();
+  renderWhisperBar();
 }
 
 // ---- command palette ----
@@ -1289,4 +1240,5 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 // ---- boot ----
 applySettings(settings);
 editor.renderAllTabs();
+renderWhisperBar();
 setTerminal(drawerState.open);

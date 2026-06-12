@@ -50,7 +50,6 @@ import {
   serializeSettings,
 } from "../src/settings";
 import {
-  agentBannerText,
   firstViewableAgentChange,
   isIntegratedAgentCommand,
   mergeChangedFiles,
@@ -62,7 +61,7 @@ interface TabLike {
   path: string | null;
 }
 
-test("app layout keeps notifications above terminal and inside webview bounds", () => {
+test("app layout keeps whisper bar below body and terminal inside webview bounds", () => {
   const html = readFileSync("index.html", "utf8");
   const css = readFileSync("src/styles.css", "utf8");
   const layout = readFileSync("src/layout.ts", "utf8");
@@ -72,8 +71,9 @@ test("app layout keeps notifications above terminal and inside webview bounds", 
   const main = html.slice(mainStart, mainEnd);
 
   assert.ok(mainEnd > mainStart);
-  assert.ok(main.indexOf('id="editor-area"') < main.indexOf('id="ai-banner"'));
-  assert.ok(main.indexOf('id="ai-banner"') < main.indexOf('id="terminal-area"'));
+  assert.ok(main.indexOf('id="editor-area"') < main.indexOf('id="terminal-area"'));
+  assert.ok(html.indexOf('id="body"') < html.indexOf('id="whisper-bar"'));
+  assert.equal(html.includes('id="ai-banner"'), false);
   assert.match(css, /#app\s*\{[^}]*height:\s*100%;[^}]*width:\s*100%;/s);
   assert.match(css, /#app\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*overflow:\s*hidden;/s);
   assert.match(css, /#body\s*\{[^}]*overflow:\s*hidden;/s);
@@ -319,14 +319,13 @@ test("agent changes merge into git file list without duplicates", () => {
   assert.equal(merged.find((file) => file.path === "/repo/shared.ts")?.humanTouched, true);
 });
 
-test("agent banner and first viewable change handle unsafe deleted and binary files", () => {
+test("first viewable change handles unsafe deleted and binary files", () => {
   const changes: AgentChange[] = [
     { path: "/repo/deleted.ts", status: "D", humanTouched: false, binary: false },
     { path: "/repo/image.bin", status: "M", humanTouched: false, binary: true },
     { path: "/repo/view.ts", status: "M", humanTouched: true, binary: false },
   ];
 
-  assert.equal(agentBannerText(changes), "Integrated agent changed 2 files; 1 needs manual review.");
   assert.equal(firstViewableAgentChange(changes)?.path, "/repo/view.ts");
 });
 

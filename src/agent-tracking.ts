@@ -1,4 +1,4 @@
-import type { AgentChange, ChangedFile } from "./ipc";
+import type { AgentChange, AgentTrackingStatus, ChangedFile } from "./ipc";
 
 export interface ReviewFile extends ChangedFile {
   humanTouched?: boolean;
@@ -16,20 +16,21 @@ export function aiChanges(changes: AgentChange[]): AgentChange[] {
   return changes.filter((change) => !change.humanTouched);
 }
 
-export function agentBannerText(changes: AgentChange[]): string {
-  const count = aiChanges(changes).length;
-  const unsafe = changes.filter((change) => change.humanTouched).length;
-  const files = count === 1 ? "file" : "files";
-  const suffix = unsafe === 0
-    ? ""
-    : `; ${unsafe} ${unsafe === 1 ? "needs" : "need"} manual review`;
-  return `Integrated agent changed ${count} ${files}${suffix}.`;
-}
-
 export function firstViewableAgentChange(changes: AgentChange[]): AgentChange | undefined {
   const ai = aiChanges(changes);
   const isViewable = (change: AgentChange) => change.status !== "D" && !change.binary;
   return ai.find(isViewable) ?? changes.find(isViewable) ?? ai[0] ?? changes[0];
+}
+
+/** Lowercase whisper-bar summary of agent activity; "" when nothing to say. */
+export function whisperText(status: AgentTrackingStatus, activeFile: string | null, agentName = "agent"): string {
+  const ai = aiChanges(status.changes);
+  if (status.agentActive && activeFile && ai.some((change) => change.path === activeFile)) {
+    return `${agentName} is editing ${activeFile.split("/").pop()}`;
+  }
+  if (ai.length === 0) return "";
+  const noun = ai.length === 1 ? "change" : "changes";
+  return `${ai.length} ${noun} woven by ${agentName}`;
 }
 
 export function isIntegratedAgentCommand(command: string): boolean {
