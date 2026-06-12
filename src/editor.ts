@@ -27,8 +27,8 @@ import {
 } from "@codemirror/commands";
 import { openSearchPanel, selectNextOccurrence, search } from "@codemirror/search";
 import { buildSearchPanel } from "./search-panel";
-import { oneDark } from "@codemirror/theme-one-dark";
-import { StreamLanguage, indentUnit } from "@codemirror/language";
+import { HighlightStyle, StreamLanguage, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
 import { json } from "@codemirror/lang-json";
@@ -117,10 +117,69 @@ const diffField = StateField.define<RangeSet<GutterMarker>>({
 });
 
 const rubyLanguage = StreamLanguage.define(ruby);
+const editorThemeCompartment = new Compartment();
 
 // Indent width as both the display tab size and the unit inserted by indent commands.
 export function indentSettings(size: number): Extension {
   return [EditorState.tabSize.of(size), indentUnit.of(" ".repeat(size))];
+}
+
+function cssVar(name: string, fallback: string): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function cmThreadTheme(): Extension {
+  const washi = document.documentElement.classList.contains("theme-washi");
+  const fg = cssVar("--fg", washi ? "#1f231f" : "#e8eae4");
+  const fgDim = cssVar("--fg-dim", washi ? "#6e7268" : "#8b9189");
+  const fgFaint = cssVar("--fg-faint", washi ? "#9c988a" : "#565c54");
+  const bg = cssVar("--bg-1", washi ? "#f5f2eb" : "#131614");
+  const bg2 = cssVar("--bg-2", washi ? "#f1ede3" : "#0e110f");
+  const line = cssVar("--line", washi ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
+  const em = cssVar("--em", washi ? "#0f8a5f" : "#4ade93");
+  const synKw = cssVar("--syn-kw", washi ? "#0f8a5f" : "#5cc99b");
+  const synType = cssVar("--syn-type", washi ? "#3b6aa0" : "#86aedc");
+  const synStr = cssVar("--syn-str", washi ? "#b07b2e" : "#d9b47c");
+  const synComment = cssVar("--syn-comment", fgFaint);
+  const cursorLine = washi ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
+  const selection = washi ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
+
+  return [
+    EditorView.theme(
+      {
+        "&": { color: fg, backgroundColor: bg },
+        ".cm-content": { caretColor: em },
+        ".cm-cursor, .cm-dropCursor": { borderLeftColor: em, borderLeftWidth: "2px" },
+        "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+          backgroundColor: selection,
+        },
+        ".cm-activeLine": { backgroundColor: cursorLine },
+        ".cm-activeLineGutter": { backgroundColor: cursorLine },
+        ".cm-gutters": { backgroundColor: bg2, color: fgFaint, borderRight: `1px solid ${line}` },
+        ".cm-lineNumbers .cm-gutterElement": { color: fgFaint },
+        ".cm-foldGutter .cm-gutterElement": { color: fgDim },
+        ".cm-matchingBracket, .cm-nonmatchingBracket": { backgroundColor: cursorLine, outline: `1px solid ${line}` },
+        ".cm-panels": { backgroundColor: bg2, color: fg, borderColor: line },
+        ".cm-searchMatch": { backgroundColor: "rgba(227,179,65,0.22)" },
+        ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: selection },
+      },
+      { dark: !washi },
+    ),
+    syntaxHighlighting(
+      HighlightStyle.define([
+        { tag: [tags.keyword, tags.controlKeyword, tags.operatorKeyword, tags.modifier], color: synKw },
+        { tag: [tags.typeName, tags.className, tags.tagName, tags.namespace], color: synType },
+        { tag: [tags.string, tags.character, tags.special(tags.string), tags.regexp], color: synStr },
+        { tag: [tags.comment, tags.docComment], color: synComment, fontStyle: "italic" },
+        { tag: [tags.number, tags.bool, tags.null, tags.atom], color: synStr },
+        { tag: [tags.propertyName, tags.attributeName, tags.labelName], color: synType },
+        { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: synType },
+        { tag: [tags.operator, tags.punctuation, tags.bracket], color: fgDim },
+        { tag: tags.invalid, color: cssVar("--deleted", "#f0716a") },
+      ]),
+    ),
+  ];
 }
 
 export function detectLanguage(name: string): Extension | null {
@@ -247,7 +306,7 @@ export class Pane {
     return [
       basicSetup,
       search({ createPanel: buildSearchPanel }),
-      oneDark,
+      editorThemeCompartment.of(cmThreadTheme()),
       diffField,
       gutter({
         class: "cm-diff-gutter",
@@ -318,6 +377,11 @@ export class Pane {
     this.view.dispatch({ effects: this.wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []) });
   }
 
+  applyEditorTheme(): void {
+    this.view.dispatch({ effects: editorThemeCompartment.reconfigure(cmThreadTheme()) });
+    if (this.active) this.active.state = this.view.state;
+  }
+
   tabByPath(path: string): Tab | undefined {
     return this.tabs.find((t) => t.path === path);
   }
@@ -382,6 +446,7 @@ export class Pane {
     if (this.active && this.active !== tab) this.active.state = this.view.state;
     this.active = tab;
     this.view.setState(tab.state);
+    this.applyEditorTheme();
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
@@ -399,6 +464,7 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.previewEl.innerHTML = "";
     this.view.setState(EditorState.create({ extensions: this.extensions("") }));
+    this.applyEditorTheme();
     this.view.dom.style.display = "none";
     this.welcomeEl.classList.remove("hidden");
   }
@@ -545,12 +611,15 @@ export class EditorManager {
   private diffTimer: number | undefined;
   private previewTimer: number | undefined;
   private workspaceRoot: string | null = null;
+  private themeObserver: MutationObserver;
 
   constructor(container: HTMLElement) {
     this.container = container;
     const pane = new Pane(this, container);
     this.panes = [pane];
     this.focused = pane;
+    this.themeObserver = new MutationObserver(() => this.applyEditorTheme());
+    this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
   }
 
   /** Root hit target for internal editor tab split drags. */
@@ -568,6 +637,10 @@ export class EditorManager {
   setWordWrap(on: boolean): void {
     this.wordWrap = on;
     for (const p of this.panes) p.applyWrap(on);
+  }
+
+  applyEditorTheme(): void {
+    for (const p of this.panes) p.applyEditorTheme();
   }
 
   setFocused(pane: Pane): void {
