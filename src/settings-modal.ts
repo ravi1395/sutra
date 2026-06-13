@@ -9,6 +9,7 @@ import {
   TAB_SIZES,
   type UserSettings,
 } from "./settings";
+import { icon } from "./icons";
 
 export interface ShortcutEntry {
   title: string;
@@ -209,7 +210,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
   function renderAbout(): void {
     const wordmark = document.createElement("h2");
     wordmark.className = "settings-wordmark";
-    wordmark.textContent = "Sutra";
+    wordmark.innerHTML = `<span class="settings-mark">${icon("brandMark", 22, 2.2)}</span><span>Sutra</span>`;
     const tagline = document.createElement("p");
     tagline.className = "settings-tagline";
     tagline.textContent = "A minimal code editor.";

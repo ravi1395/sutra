@@ -27,7 +27,8 @@ export type IconName =
   | "expand"
   | "compress"
   | "bolt"
-  | "stop";
+  | "stop"
+  | "brandMark";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -59,6 +60,8 @@ const paths: Record<IconName, string> = {
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
   bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H13L13 2z"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  // Sutra brand mark: a thread tracing an "S" strung with a bead at each end.
+  brandMark: '<path d="M16.5 6C11 4.3 9 9 12 12c3 3 1 7.7-4.5 6"/><circle cx="16.5" cy="6" r="1.6"/><circle cx="7.5" cy="18" r="1.6"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

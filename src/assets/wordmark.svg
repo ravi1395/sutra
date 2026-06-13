@@ -1,0 +1,21 @@
+<!-- Sutra horizontal wordmark lockup: thread-and-bead mark + the name set in the
+     brand "voice" serif, with the Devanagari सूत्र as a quiet Sanskrit anchor. -->
+<svg width="300" height="80" viewBox="0 0 300 80" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sutra">
+  <defs>
+    <linearGradient id="wmThread" x1="58" y1="22" x2="22" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ef0ad"/>
+      <stop offset="1" stop-color="#1f8a63"/>
+    </linearGradient>
+  </defs>
+  <!-- mark -->
+  <g transform="translate(8,8)">
+    <path d="M58 22 C42 16.5 34 31 44 40 C54 49 46 64 30 58.5"
+          stroke="url(#wmThread)" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="58" cy="22" r="5.5" fill="#6ef0ad"/>
+    <circle cx="30" cy="58.5" r="5.5" fill="#1f8a63"/>
+  </g>
+  <!-- wordmark -->
+  <text x="92" y="44" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="38" fill="#4ade93">sutra</text>
+  <!-- Sanskrit anchor -->
+  <text x="93" y="66" font-family="'Noto Sans Devanagari', system-ui, sans-serif" font-size="15" letter-spacing="1.5" fill="#8b9189">सूत्र</text>
+</svg>

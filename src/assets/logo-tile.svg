@@ -1,0 +1,19 @@
+<!-- Sutra app-icon tile: emerald thread mark on the washi-ink ground, framed in
+     a rounded square. Use as the source for rasterized platform icons. -->
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sutra">
+  <defs>
+    <linearGradient id="tileBg" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#161a17"/>
+      <stop offset="1" stop-color="#0e110f"/>
+    </linearGradient>
+    <linearGradient id="tileThread" x1="176" y1="56" x2="80" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ef0ad"/>
+      <stop offset="1" stop-color="#1f8a63"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tileBg)" stroke="rgba(255,255,255,0.06)" stroke-width="1.5"/>
+  <path d="M176 64 C120 44 92 96 128 128 C164 160 136 212 80 192"
+        stroke="url(#tileThread)" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="176" cy="64" r="20" fill="#6ef0ad"/>
+  <circle cx="80" cy="192" r="20" fill="#1f8a63"/>
+</svg>

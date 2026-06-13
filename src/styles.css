@@ -89,6 +89,17 @@ body {
   border: 0;
   padding: 4px 9px;
   border-radius: var(--r-md);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.wordmark .wm-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--em);
+}
+.wordmark .wm-name {
+  font-style: italic;
 }
 .wordmark:hover,
 .wordmark.open {
@@ -2416,7 +2427,8 @@ button:hover {
   font-family: var(--ui);
   color: var(--fg-dim);
 }
-.settings-wordmark { margin: 0 0 2px; font-size: 18px; color: var(--fg); }
+.settings-wordmark { margin: 0 0 2px; font-size: 18px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.settings-wordmark .settings-mark { display: inline-flex; align-items: center; color: var(--em); }
 .settings-tagline { margin: 0 0 10px; font-size: 12px; color: var(--fg-dim); }
 .settings-desc { font-size: 12px; color: var(--fg-dim); line-height: 1.6; }
 .settings-version { font-size: 12px; color: var(--fg-dim); }
