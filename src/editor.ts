@@ -412,6 +412,12 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
+  /** Release document-level listeners and the CM view when the pane is removed. */
+  destroy(): void {
+    document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    this.view.destroy();
+  }
+
   private onOutsideLensMouseDown = (event: MouseEvent): void => {
     if (this.activeLensIndex == null) return;
     const target = event.target as Element | null;
@@ -463,6 +469,7 @@ export class Pane {
           this.active.dirty = this.view.state.doc.toString() !== this.active.savedContent;
           this.mgr.onPaneDocChanged(this);
         }
+        if (u.selectionSet && this.active) this.mgr.onSelectionChanged?.();
       }),
     ];
   }
@@ -807,6 +814,8 @@ export class EditorManager {
   onTabsChanged?: () => void;
   onDiffChanged?: (hunks: Hunk[], label: string) => void;
   onGutterClick?: (hunkIndex: number) => void;
+  /** Fires on cursor/selection moves in the focused pane (whisper-bar ln display). */
+  onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
 
@@ -890,6 +899,7 @@ export class EditorManager {
       }
     }
     this.panes.pop();
+    right.destroy();
     right.el.remove();
     this.splitter?.remove();
     this.splitter = null;

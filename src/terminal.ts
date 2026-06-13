@@ -401,6 +401,11 @@ export class TerminalManager {
     return ptyIsBusy(id).catch(() => false);
   }
 
+  /** Send Ctrl-C to a terminal id so its foreground command (e.g. an automation) stops. */
+  interrupt(id: string): void {
+    void ptyWrite(id, "\x03").catch(() => {});
+  }
+
   /** Open find overlay with SearchAddon wired to find controls. */
   private openFindOverlay(search: SearchAddon): void {
     // Create a simple find input overlay.

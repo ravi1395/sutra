@@ -72,12 +72,14 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
       .filter((x) => x.score !== null)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-    filteredCommands = scored.map((x) => x.cmd);
+    // Flatten in grouped (visual) order so selectedIdx maps to the highlighted row.
+    const sections = groupCommands(scored.map((x) => x.cmd));
+    filteredCommands = sections.flatMap((section) => section.items);
     if (selectedIdx >= filteredCommands.length) selectedIdx = 0;
 
     list.innerHTML = "";
     let flatIdx = 0;
-    for (const section of groupCommands(filteredCommands)) {
+    for (const section of sections) {
       const head = document.createElement("div");
       head.className = "palette-section-head";
       head.textContent = section.head;

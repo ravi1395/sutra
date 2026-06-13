@@ -130,6 +130,8 @@ export function automationMenuModel(
 export interface AutomationBarActions {
   /** Run the selected/clicked automation (caller routes it to a free terminal). */
   run(a: Automation): void;
+  /** Stop the running automation (caller interrupts its terminal). */
+  stop?: () => void;
   /** Open the create-automation panel (the "＋ New automation…" row). */
   openCreate(): void;
 }
@@ -217,8 +219,7 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
           stopBtn.title = "Stop";
           stopBtn.style.cssText = "margin-left:auto;color:var(--fg-faint);";
           el.appendChild(stopBtn);
-          // Stop = run again (the existing runAutomation flow handles toggle via isBusyById).
-          el.onclick = () => { closeDropdown(); const a = list.find(x => x.id === row.id); if (a) wrappedRun(a); };
+          el.onclick = () => { closeDropdown(); actions.stop?.(); };
         } else {
           // Idle: play affordance.
           const playIco = document.createElement("span");

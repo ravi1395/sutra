@@ -216,6 +216,7 @@ editor.onTabsChanged = () => {
   persistWorkspaceSession();
   renderWhisperBar();
 };
+editor.onSelectionChanged = () => renderWhisperBar();
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
 diffViewer.onRevert = (h) => editor.revertHunk(h);
@@ -977,8 +978,12 @@ async function refreshGitState(root: string): Promise<void> {
 }
 
 // ---- automations ----
+let runningAutomationTermId: string | null = null;
 automationBar = mountAutomationBar($("automations"), {
   run: (a) => void runAutomation(a),
+  stop: () => {
+    if (runningAutomationTermId) terminals.interrupt(runningAutomationTermId);
+  },
   openCreate: () => openCreatePanel(),
 });
 
@@ -987,11 +992,15 @@ async function runAutomation(a: Automation): Promise<void> {
   setTerminal(true);
   const termId = await terminals.runCommand(a.command).catch(() => null);
   if (!termId) return;
+  runningAutomationTermId = termId;
   automationBar.setRunning(true);
   const poll = async (): Promise<void> => {
     const busy = await terminals.isBusyById(termId).catch(() => false);
     if (busy) window.setTimeout(() => void poll(), 1000);
-    else automationBar.setRunning(false);
+    else {
+      if (runningAutomationTermId === termId) runningAutomationTermId = null;
+      automationBar.setRunning(false);
+    }
   };
   window.setTimeout(() => void poll(), 800); // let the command take the foreground first
 }
