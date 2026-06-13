@@ -14,6 +14,20 @@ export function pathBelongsToRoot(path: string, root: string): boolean {
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
+export interface BreadcrumbSegment { label: string; dirPath: string | null; leaf: boolean; }
+
+/** Split an absolute file path into clickable breadcrumb segments relative to root. */
+export function breadcrumbSegments(root: string, filePath: string | null): BreadcrumbSegment[] {
+  if (!filePath || !pathBelongsToRoot(filePath, root)) return [];
+  const rel = filePath.slice(root.length).replace(/^\//, "");
+  const parts = rel.split("/").filter(Boolean);
+  return parts.map((label, i) => ({
+    label,
+    dirPath: i < parts.length - 1 ? `${root}/${parts.slice(0, i + 1).join("/")}` : null,
+    leaf: i === parts.length - 1,
+  }));
+}
+
 export function filterWorkspaceTabs<T extends WorkspaceTab>(tabs: readonly T[], root: string): T[] {
   return tabs.filter((tab) => tab.path != null && pathBelongsToRoot(tab.path, root));
 }
@@ -164,4 +178,25 @@ export function saveRecents(list: readonly RecentWorkspace[]): void {
   } catch {
     /* storage unavailable / quota — recents are best-effort */
   }
+}
+
+// ---- workspace selector menu model ----
+
+export interface WorkspaceMenuItem { kind: "current" | "recent"; name: string; path: string; age: string; }
+
+/** Compact relative age for menu rows: <1d → "today", then d/w/mo. */
+export function formatAge(openedAt: number, now: number): string {
+  const days = Math.floor((now - openedAt) / 86_400_000);
+  if (days < 1) return "today";
+  if (days < 7) return `${days}d`;
+  if (days < 30) return `${Math.floor(days / 7)}w`;
+  return `${Math.floor(days / 30)}mo`;
+}
+
+/** Menu model: current root first, then recents excluding it. */
+export function workspaceMenuModel(root: string, recents: readonly RecentWorkspace[], now: number): WorkspaceMenuItem[] {
+  const items: WorkspaceMenuItem[] = [{ kind: "current", name: basenameOf(root), path: root, age: "" }];
+  for (const r of recents) if (r.path !== root)
+    items.push({ kind: "recent", name: r.name, path: r.path, age: formatAge(r.openedAt, now) });
+  return items;
 }

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { aiChanges, agentBannerText, firstViewableAgentChange } from "../src/agent-tracking";
-import type { AgentChange } from "../src/ipc";
+import { aiChanges, firstViewableAgentChange, whisperText } from "../src/agent-tracking";
+import type { AgentChange, AgentTrackingStatus } from "../src/ipc";
 
 const change = (path: string, humanTouched = false): AgentChange => ({
   path,
@@ -15,15 +15,6 @@ test("aiChanges excludes human-touched paths", () => {
   assert.deepEqual(aiChanges(set).map((c) => c.path), ["a"]);
 });
 
-test("agentBannerText counts only AI changes and notes review count", () => {
-  const set = [change("a"), change("b"), change("c", true)];
-  assert.equal(agentBannerText(set), "Integrated agent changed 2 files; 1 needs manual review.");
-});
-
-test("agentBannerText with a single AI change uses singular", () => {
-  assert.equal(agentBannerText([change("a")]), "Integrated agent changed 1 file.");
-});
-
 test("firstViewableAgentChange falls back to viewable review item", () => {
   const set: AgentChange[] = [
     { ...change("deleted"), status: "D" },
@@ -31,4 +22,16 @@ test("firstViewableAgentChange falls back to viewable review item", () => {
     change("review", true),
   ];
   assert.equal(firstViewableAgentChange(set)?.path, "review");
+});
+
+test("whisperText: live presence on active file wins", () => {
+  const status = { enabled: true, agentActive: true, changes: [change("/p/diff.ts")] } as AgentTrackingStatus;
+  assert.equal(whisperText(status, "/p/diff.ts", "claude"), "claude is editing diff.ts");
+});
+
+test("whisperText: count summary, human-touched excluded, empty when nothing", () => {
+  const two = { enabled: true, agentActive: false, changes: [change("/p/a.ts"), change("/p/b.ts")] } as AgentTrackingStatus;
+  assert.equal(whisperText(two, null, "claude"), "2 changes woven by claude");
+  const human = { enabled: true, agentActive: false, changes: [change("/p/a.ts", true)] } as AgentTrackingStatus;
+  assert.equal(whisperText(human, null), "");
 });

@@ -4,8 +4,12 @@
 export type IconName =
   | "trackAI"
   | "terminal"
+  | "git-compare"
   | "diff"
+  | "world"
   | "browser"
+  | "command"
+  | "menu"
   | "back"
   | "reload"
   | "folder"
@@ -21,7 +25,9 @@ export type IconName =
   | "arrowUp"
   | "x"
   | "expand"
-  | "compress";
+  | "compress"
+  | "bolt"
+  | "stop";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -30,8 +36,12 @@ const paths: Record<IconName, string> = {
   trackAI:
     '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><circle cx="18.5" cy="17.5" r="2.4"/>',
   terminal: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+  "git-compare": '<circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6M18 15V9a3 3 0 0 0-3-3H9"/>',
   diff: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/><path d="M6 9.5h3M7.5 8v3"/><path d="M15 14.5h3"/>',
+  world: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/>',
   browser: '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/>',
+  command: '<path d="M9 6a3 3 0 1 0-3 3h3V6ZM15 6a3 3 0 1 1 3 3h-3V6ZM9 18a3 3 0 1 1-3-3h3v3ZM15 18a3 3 0 1 0 3-3h-3v3ZM9 9h6v6H9z"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2 2 0 0 1-2.83 2.83l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.08 1.65V21a2 2 0 0 1-4 0v-.1a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-1.98.36l-.05.05a2 2 0 0 1-2.83-2.83l.05-.05A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.65-1.08H3a2 2 0 0 1 0-4h.1A1.8 1.8 0 0 0 4.75 8.84a1.8 1.8 0 0 0-.36-1.98l-.05-.05a2 2 0 0 1 2.83-2.83l.05.05a1.8 1.8 0 0 0 1.98.36A1.8 1.8 0 0 0 10.28 3V3a2 2 0 0 1 4 0v.1a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 1.98-.36l.05-.05a2 2 0 0 1 2.83 2.83l-.05.05a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.65 1.08H21a2 2 0 0 1 0 4h-.1A1.8 1.8 0 0 0 19.4 15z"/>',
   back: '<path d="M5 12h14M9 8l-4 4 4 4"/>',
@@ -47,6 +57,8 @@ const paths: Record<IconName, string> = {
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
+  bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H13L13 2z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

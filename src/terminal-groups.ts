@@ -5,6 +5,28 @@ export interface TerminalGroups<T> {
   right: T[];
 }
 
+export interface DrawerState {
+  open: boolean;
+  heightPx: number;
+}
+
+export const DRAWER_KEY = "sutra.drawer";
+
+/** Clamp persisted drawer state; fall back to closed/280px on junk. */
+export function clampDrawerState(value: unknown): DrawerState {
+  const v = (value ?? {}) as Partial<DrawerState>;
+  const h = typeof v.heightPx === "number" && v.heightPx >= 120 && v.heightPx <= 800 ? v.heightPx : 280;
+  return { open: v.open === true, heightPx: h };
+}
+
+export function loadDrawerState(raw: string | null): DrawerState {
+  try {
+    return clampDrawerState(raw ? JSON.parse(raw) : null);
+  } catch {
+    return clampDrawerState(null);
+  }
+}
+
 export function groupSideForItem<T>(groups: TerminalGroups<T>, item: T): TerminalGroupSide | null {
   if (groups.left.includes(item)) return "left";
   if (groups.right.includes(item)) return "right";

@@ -1,6 +1,14 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { loadDrawerState } from "../src/terminal-groups";
+
+test("loadDrawerState defaults and clamps", () => {
+  assert.deepEqual(loadDrawerState(null), { open: false, heightPx: 280 });
+  assert.deepEqual(loadDrawerState('{"open":true,"heightPx":50}'), { open: true, heightPx: 280 });
+  assert.deepEqual(loadDrawerState("not json"), { open: false, heightPx: 280 });
+  assert.equal(loadDrawerState('{"open":true,"heightPx":400}').heightPx, 400);
+});
 
 test("terminal settings are remembered and applied to live sessions", () => {
   const terminalTs = readFileSync("src/terminal.ts", "utf8");

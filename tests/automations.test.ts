@@ -9,6 +9,7 @@ import {
   removeAutomation,
   parseAutomationsFile,
   serializeAutomations,
+  automationMenuModel,
   type Automation,
 } from "../src/automations";
 
@@ -94,6 +95,14 @@ test("parseAutomationsFile tolerates missing / malformed / wrong-shape input", (
   assert.deepEqual(parseAutomationsFile("{}"), []);
   assert.deepEqual(parseAutomationsFile('{"version":1}'), []);
   assert.deepEqual(parseAutomationsFile('{"automations":"nope"}'), []);
+});
+
+test("automationMenuModel sorts running first then alpha", () => {
+  const list = [makeAutomation("test", "npm test", "a"), makeAutomation("dev", "npm run tauri dev", "b")];
+  const rows = automationMenuModel(list, new Set(["b"]), new Map([["a", "✓ 1.9s"]]));
+  assert.deepEqual(rows.map(r => r.name), ["dev", "test"]);
+  assert.equal(rows[0].running, true);
+  assert.equal(rows[1].status, "✓ 1.9s");
 });
 
 test("parseAutomationsFile filters out entries missing required fields", () => {

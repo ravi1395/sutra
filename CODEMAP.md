@@ -125,7 +125,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Build frontend | `npm run build` |
 | Run dev app | `npm run tauri dev` |
 | Build desktop app | `npm run tauri build` |
-| Cut draft release | `git tag v0.1.0 && git push origin v0.1.0` |
+| Cut draft release | `git tag vX.Y.Z && git push origin vX.Y.Z` |
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |

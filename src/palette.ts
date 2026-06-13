@@ -4,10 +4,26 @@ export interface Command {
   title: string;
   run: () => void;
   shortcut?: string;
+  section?: "recent" | "verbs";
 }
 
 export interface PaletteHandle {
   open(): void;
+}
+
+export interface PaletteSection {
+  head: string;
+  items: Command[];
+}
+
+/** Group filtered commands into ordered sections, dropping empty ones. */
+export function groupCommands(filtered: readonly Command[]): PaletteSection[] {
+  const recent = filtered.filter((cmd) => cmd.section === "recent");
+  const verbs = filtered.filter((cmd) => cmd.section !== "recent");
+  const out: PaletteSection[] = [];
+  if (recent.length) out.push({ head: "recent", items: recent });
+  if (verbs.length) out.push({ head: "verbs", items: verbs });
+  return out;
 }
 
 // Fuzzy-match score: higher = better. Returns null if no match.
@@ -27,11 +43,13 @@ function fuzzyScore(query: string, text: string): number | null {
   return queryIdx === q.length ? score : null;
 }
 
-export function mountPalette(commands: Command[]): PaletteHandle {
+export function mountPalette(commands: Command[] | (() => Command[])): PaletteHandle {
   let overlay: HTMLElement | null = null;
   let selectedIdx = 0;
   let filteredCommands: Command[] = [];
   let isOpen = false;
+
+  const currentCommands = (): Command[] => typeof commands === "function" ? commands() : commands;
 
   function close(): void {
     if (overlay) {
@@ -49,35 +67,43 @@ export function mountPalette(commands: Command[]): PaletteHandle {
     const query = input.value.trim();
 
     // Filter and sort commands
-    const scored = commands
+    const scored = currentCommands()
       .map((cmd) => ({ cmd, score: fuzzyScore(query, cmd.title) }))
       .filter((x) => x.score !== null)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-    filteredCommands = scored.map((x) => x.cmd);
+    // Flatten in grouped (visual) order so selectedIdx maps to the highlighted row.
+    const sections = groupCommands(scored.map((x) => x.cmd));
+    filteredCommands = sections.flatMap((section) => section.items);
     if (selectedIdx >= filteredCommands.length) selectedIdx = 0;
 
-    // Render list
     list.innerHTML = "";
-    for (let i = 0; i < filteredCommands.length; i++) {
-      const cmd = filteredCommands[i];
-      const row = document.createElement("div");
-      row.className = `palette-row${i === selectedIdx ? " selected" : ""}`;
-      const title = document.createElement("span");
-      title.className = "palette-title";
-      title.textContent = cmd.title;
-      row.appendChild(title);
-      if (cmd.shortcut) {
-        const shortcut = document.createElement("span");
-        shortcut.className = "palette-shortcut";
-        shortcut.textContent = cmd.shortcut;
-        row.appendChild(shortcut);
+    let flatIdx = 0;
+    for (const section of sections) {
+      const head = document.createElement("div");
+      head.className = "palette-section-head";
+      head.textContent = section.head;
+      list.appendChild(head);
+      for (const cmd of section.items) {
+        const idx = flatIdx++;
+        const row = document.createElement("div");
+        row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
+        const title = document.createElement("span");
+        title.className = "palette-title";
+        title.textContent = cmd.title;
+        row.appendChild(title);
+        if (cmd.shortcut) {
+          const shortcut = document.createElement("span");
+          shortcut.className = "palette-shortcut";
+          shortcut.textContent = cmd.shortcut;
+          row.appendChild(shortcut);
+        }
+        row.onclick = () => {
+          close();
+          cmd.run();
+        };
+        list.appendChild(row);
       }
-      row.onclick = () => {
-        close();
-        cmd.run();
-      };
-      list.appendChild(row);
     }
   }
 
@@ -97,15 +123,18 @@ export function mountPalette(commands: Command[]): PaletteHandle {
     const input = document.createElement("input");
     input.className = "palette-input";
     input.type = "text";
-    input.placeholder = "Command palette";
+    input.placeholder = "pull a thread…";
     input.spellcheck = false;
     input.autocomplete = "off";
 
     const list = document.createElement("div");
     list.className = "palette-list";
 
-    container.appendChild(input);
-    container.appendChild(list);
+    const footer = document.createElement("div");
+    footer.className = "palette-footer";
+    footer.innerHTML = `<span><span class="kbd">↑↓</span> select</span><span><span class="kbd">↵</span> run</span><span><span class="kbd">esc</span> close</span>`;
+
+    container.append(input, list, footer);
     overlay.appendChild(container);
     document.body.appendChild(overlay);
 

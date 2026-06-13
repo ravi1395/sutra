@@ -48,6 +48,13 @@ function row(label: string, control: HTMLElement): HTMLElement {
   return r;
 }
 
+function head(label: string): HTMLElement {
+  const h = document.createElement("div");
+  h.className = "menu-head settings-section-head";
+  h.textContent = label;
+  return h;
+}
+
 // −/value/+ stepper for font sizes; onChange receives the requested value (host clamps).
 function stepper(value: number, onChange: (v: number) => void): HTMLElement {
   const wrap = document.createElement("span");
@@ -145,6 +152,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
   function renderEditor(): void {
     const s = deps.get();
     content.replaceChildren(
+      head("Editor"),
       row("Font size", stepper(s.editorFontSize, (v) => patch({ editorFontSize: v }))),
       row("Font family", select(FONT_FAMILIES, s.editorFontFamily, fontLabel, (v) => patch({ editorFontFamily: v }))),
       row("Tab size", select(TAB_SIZES, s.editorTabSize, String, (v) => patch({ editorTabSize: v }))),
@@ -159,6 +167,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     note.className = "settings-note";
     note.textContent = "Default shell applies to new terminal sessions.";
     content.replaceChildren(
+      head("Terminal"),
       row("Font size", stepper(s.terminalFontSize, (v) => patch({ terminalFontSize: v }))),
       row("Font family", select(FONT_FAMILIES, s.terminalFontFamily, fontLabel, (v) => patch({ terminalFontFamily: v }))),
       row("Scrollback", select(SCROLLBACK_OPTIONS, s.terminalScrollback, (v) => `${v / 1000}k lines`, (v) => patch({ terminalScrollback: v }))),
@@ -167,13 +176,15 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     );
   }
 
-  // Behavior section: session restore, agent tracking, autosave toggles.
+  // Behavior section: session restore, agent tracking, autosave toggles, theme selector.
   function renderBehavior(): void {
     const s = deps.get();
     content.replaceChildren(
+      head("Behavior"),
       row("Restore session on launch", toggle(s.restoreSession, (v) => patch({ restoreSession: v }))),
       row("AI agent tracking", toggle(s.agentTracking, (v) => patch({ agentTracking: v }))),
       row("Autosave on focus loss", toggle(s.autosaveOnBlur, (v) => patch({ autosaveOnBlur: v }))),
+      row("Theme", select(["ink", "washi"] as const, s.theme, (v) => v, (v) => patch({ theme: v }))),
     );
   }
 
@@ -191,7 +202,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       r.append(t, k);
       table.append(r);
     }
-    content.replaceChildren(table);
+    content.replaceChildren(head("Shortcuts"), table);
   }
 
   // About section: description, runtime version, reset-all.
@@ -222,7 +233,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       deps.apply({ ...DEFAULT_SETTINGS });
       renderSection(activeSection);
     };
-    content.replaceChildren(wordmark, tagline, desc, ver, reset);
+    content.replaceChildren(head("About"), wordmark, tagline, desc, ver, reset);
   }
 
   const renderers: Record<Section, () => void> = {

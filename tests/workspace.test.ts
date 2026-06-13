@@ -30,13 +30,16 @@ import {
 import { fileTypeMeta, paneSideFromClientX } from "../src/tree";
 import {
   basenameOf,
+  breadcrumbSegments,
   deserializeWorkspaceSession,
   filterWorkspaceTabs,
+  formatAge,
   pathBelongsToRoot,
   pruneWorkspaceSession,
   serializeWorkspaceSession,
   sessionFromTabs,
   upsertRecent,
+  workspaceMenuModel,
   type RecentWorkspace,
 } from "../src/workspace";
 import {
@@ -47,7 +50,6 @@ import {
   serializeSettings,
 } from "../src/settings";
 import {
-  agentBannerText,
   firstViewableAgentChange,
   isIntegratedAgentCommand,
   mergeChangedFiles,
@@ -59,7 +61,7 @@ interface TabLike {
   path: string | null;
 }
 
-test("app layout keeps notifications above terminal and inside webview bounds", () => {
+test("app layout keeps whisper bar below body and terminal inside webview bounds", () => {
   const html = readFileSync("index.html", "utf8");
   const css = readFileSync("src/styles.css", "utf8");
   const layout = readFileSync("src/layout.ts", "utf8");
@@ -69,8 +71,9 @@ test("app layout keeps notifications above terminal and inside webview bounds", 
   const main = html.slice(mainStart, mainEnd);
 
   assert.ok(mainEnd > mainStart);
-  assert.ok(main.indexOf('id="editor-area"') < main.indexOf('id="ai-banner"'));
-  assert.ok(main.indexOf('id="ai-banner"') < main.indexOf('id="terminal-area"'));
+  assert.ok(main.indexOf('id="editor-area"') < main.indexOf('id="terminal-area"'));
+  assert.ok(html.indexOf('id="body"') < html.indexOf('id="whisper-bar"'));
+  assert.equal(html.includes('id="ai-banner"'), false);
   assert.match(css, /#app\s*\{[^}]*height:\s*100%;[^}]*width:\s*100%;/s);
   assert.match(css, /#app\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*overflow:\s*hidden;/s);
   assert.match(css, /#body\s*\{[^}]*overflow:\s*hidden;/s);
@@ -129,6 +132,18 @@ test("basenameOf returns the final folder segment", () => {
   assert.equal(basenameOf("/tmp/project/"), "project");
   assert.equal(basenameOf("/tmp/project"), "project");
   assert.equal(basenameOf("/"), "/");
+});
+
+test("breadcrumbSegments splits path under root", () => {
+  const segs = breadcrumbSegments("/p/sutra", "/p/sutra/src/editor.ts");
+  assert.deepEqual(segs.map(s => s.label), ["src", "editor.ts"]);
+  assert.equal(segs[0].dirPath, "/p/sutra/src");
+  assert.equal(segs[1].leaf, true);
+});
+
+test("breadcrumbSegments empty for outside-root and null", () => {
+  assert.deepEqual(breadcrumbSegments("/p/sutra", "/elsewhere/x.ts"), []);
+  assert.deepEqual(breadcrumbSegments("/p/sutra", null), []);
 });
 
 test("sessionFromTabs persists ordered workspace file tabs and active path", () => {
@@ -258,16 +273,14 @@ test("preview shortcut is handled before focused editor paste handlers", () => {
   assert.equal(GLOBAL_SHORTCUT_OPTIONS.capture, true);
 });
 
-test("titlebar settings button opens the existing settings modal path", () => {
+test("settings shortcut opens the existing settings modal path", () => {
   const html = readFileSync("index.html", "utf8");
   const mainTs = readFileSync("src/main.ts", "utf8");
-  const iconsTs = readFileSync("src/icons.ts", "utf8");
 
-  assert.match(html, /id="btn-settings"/);
-  assert.match(mainTs, /const btnSettings = \$\("btn-settings"\)/);
-  assert.match(mainTs, /btnSettings\.innerHTML = icon\("settings", 17\)/);
-  assert.match(mainTs, /btnSettings\.onclick = \(\) => openSettings\(\)/);
-  assert.match(iconsTs, /\|\s*"settings"/);
+  assert.doesNotMatch(html, /id="btn-settings"/);
+  assert.match(mainTs, /mod && e\.code === "Comma"/);
+  assert.match(mainTs, /openSettingsModal\(/);
+  assert.match(mainTs, /function openSettings\(\): void/);
 });
 
 test("native Edit menu restores standard editing shortcuts", () => {
@@ -306,15 +319,29 @@ test("agent changes merge into git file list without duplicates", () => {
   assert.equal(merged.find((file) => file.path === "/repo/shared.ts")?.humanTouched, true);
 });
 
-test("agent banner and first viewable change handle unsafe deleted and binary files", () => {
+test("first viewable change handles unsafe deleted and binary files", () => {
   const changes: AgentChange[] = [
     { path: "/repo/deleted.ts", status: "D", humanTouched: false, binary: false },
     { path: "/repo/image.bin", status: "M", humanTouched: false, binary: true },
     { path: "/repo/view.ts", status: "M", humanTouched: true, binary: false },
   ];
 
-  assert.equal(agentBannerText(changes), "Integrated agent changed 2 files; 1 needs manual review.");
   assert.equal(firstViewableAgentChange(changes)?.path, "/repo/view.ts");
+});
+
+test("formatAge buckets", () => {
+  const d = 86_400_000;
+  assert.equal(formatAge(Date.now(), Date.now()), "today");
+  assert.equal(formatAge(0, 2 * d), "2d");
+  assert.equal(formatAge(0, 14 * d), "2w");
+  assert.equal(formatAge(0, 60 * d), "2mo");
+});
+
+test("workspaceMenuModel puts current first and dedupes it from recents", () => {
+  const recents = [{ path: "/p/sutra", name: "sutra", openedAt: 0 }, { path: "/p/lite", name: "lite", openedAt: 0 }];
+  const m = workspaceMenuModel("/p/sutra", recents, 86_400_000 * 3);
+  assert.equal(m[0].kind, "current");
+  assert.deepEqual(m.slice(1).map(x => x.name), ["lite"]);
 });
 
 test("integrated agent command hint recognizes direct Claude and Codex launches", () => {
@@ -329,6 +356,17 @@ test("main uses workspace agent tracking instead of open-tab mtime polling", () 
   assert.match(mainTs, /agentTrackingPoll\(currentRoot\)/);
   assert.doesNotMatch(mainTs, /async function checkExternal/);
   assert.match(mainTs, /diffViewer\.renderStatus/);
+});
+
+test("settings modal token sweep uses shared menu heads and tokenized controls", () => {
+  const modalTs = readFileSync("src/settings-modal.ts", "utf8");
+  const css = readFileSync("src/styles.css", "utf8");
+
+  assert.match(modalTs, /className = "menu-head settings-section-head"/);
+  assert.match(modalTs, /head\("Editor"\)/);
+  assert.match(modalTs, /head\("Shortcuts"\)/);
+  assert.match(css, /\.settings-select\s*\{[^}]*background:\s*var\(--bg-3\);[^}]*border:\s*1px solid var\(--line-menu\);/s);
+  assert.match(css, /\.settings-stepper\s*\{[^}]*background:\s*var\(--bg-3\);[^}]*border:\s*1px solid var\(--line-menu\);/s);
 });
 
 test("fileTypeMeta gives file tree rows type-specific icons and classes", () => {

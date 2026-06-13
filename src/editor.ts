@@ -14,7 +14,7 @@ import {
   Prec,
   type Extension,
 } from "@codemirror/state";
-import { EditorView, keymap, gutter, GutterMarker } from "@codemirror/view";
+import { EditorView, keymap, gutter, GutterMarker, Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import {
   indentWithTab,
@@ -27,8 +27,8 @@ import {
 } from "@codemirror/commands";
 import { openSearchPanel, selectNextOccurrence, search } from "@codemirror/search";
 import { buildSearchPanel } from "./search-panel";
-import { oneDark } from "@codemirror/theme-one-dark";
-import { StreamLanguage, indentUnit } from "@codemirror/language";
+import { HighlightStyle, StreamLanguage, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
 import { json } from "@codemirror/lang-json";
@@ -42,10 +42,12 @@ import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { readFile, gitHeadContent, fileMtime } from "./ipc";
 import { previewServerUrl } from "./ipc";
-import { computeLineDiff, hunkIndexAtLine, type Hunk, type LineMark } from "./diff";
+import { computeLineDiff, hunkIndexAtLine, lensModel, type Hunk, type LensModel, type LineMark } from "./diff";
 import { parseConflicts, resolveConflictAtIndex, type ConflictChoice } from "./conflict";
 import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
+import { marginEntries, type AiRange } from "./marginalia";
+import type { AgentChange } from "./ipc";
 
 export interface Tab {
   id: string;
@@ -82,6 +84,12 @@ export function firstHunkLineFromTabs(
 }
 
 const setDiffMarks = StateEffect.define<readonly LineMark[]>();
+const setLens = StateEffect.define<LensSpec | null>();
+
+interface LensSpec extends LensModel {
+  anchorLine: number;
+  onRevert: () => void;
+}
 
 class DiffMarker extends GutterMarker {
   constructor(cls: string) {
@@ -116,11 +124,150 @@ const diffField = StateField.define<RangeSet<GutterMarker>>({
   },
 });
 
+class LensWidget extends WidgetType {
+  constructor(
+    private spec: LensSpec,
+    private onRevert: () => void,
+  ) {
+    super();
+  }
+
+  eq(other: LensWidget): boolean {
+    return (
+      this.spec.title === other.spec.title &&
+      this.spec.attribution === other.spec.attribution &&
+      this.spec.oldLines.join("\n") === other.spec.oldLines.join("\n") &&
+      this.spec.newLines.join("\n") === other.spec.newLines.join("\n")
+    );
+  }
+
+  toDOM(): HTMLElement {
+    const root = document.createElement("div");
+    root.className = "lens";
+
+    const head = document.createElement("div");
+    head.className = "lens-head";
+    const title = document.createElement("span");
+    title.textContent = this.spec.title;
+    const revert = document.createElement("button");
+    revert.className = "lens-revert";
+    revert.textContent = "Revert";
+    revert.onclick = (event) => {
+      event.stopPropagation();
+      this.onRevert();
+    };
+    head.append(title, revert);
+    root.append(head);
+
+    const body = document.createElement("div");
+    body.className = "lens-body";
+    for (const line of this.spec.oldLines) body.append(lensRow("old", "- " + line));
+    for (const line of this.spec.newLines) body.append(lensRow("new", "+ " + line));
+    root.append(body);
+
+    if (this.spec.attribution) {
+      const footer = document.createElement("div");
+      footer.className = "lens-footer";
+      footer.textContent = this.spec.attribution;
+      root.append(footer);
+    }
+    return root;
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+function lensRow(kind: "old" | "new", text: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `lens-row ${kind}`;
+  row.textContent = text;
+  return row;
+}
+
+const lensField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setLens)) {
+        if (!e.value) return Decoration.none;
+        const line = Math.max(1, Math.min(e.value.anchorLine + 1, tr.state.doc.lines));
+        const pos = tr.state.doc.line(line).to;
+        const widget = new LensWidget(e.value, e.value.onRevert);
+        value = Decoration.set([Decoration.widget({ widget, block: true, side: 1 }).range(pos)]);
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 const rubyLanguage = StreamLanguage.define(ruby);
+const editorThemeCompartment = new Compartment();
 
 // Indent width as both the display tab size and the unit inserted by indent commands.
 export function indentSettings(size: number): Extension {
   return [EditorState.tabSize.of(size), indentUnit.of(" ".repeat(size))];
+}
+
+function cssVar(name: string, fallback: string): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function cmThreadTheme(): Extension {
+  const washi = document.documentElement.classList.contains("theme-washi");
+  const fg = cssVar("--fg", washi ? "#1f231f" : "#e8eae4");
+  const fgDim = cssVar("--fg-dim", washi ? "#6e7268" : "#8b9189");
+  const fgFaint = cssVar("--fg-faint", washi ? "#9c988a" : "#565c54");
+  const bg = cssVar("--bg-1", washi ? "#f5f2eb" : "#131614");
+  const bg2 = cssVar("--bg-2", washi ? "#f1ede3" : "#0e110f");
+  const line = cssVar("--line", washi ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
+  const em = cssVar("--em", washi ? "#0f8a5f" : "#4ade93");
+  const synKw = cssVar("--syn-kw", washi ? "#0f8a5f" : "#5cc99b");
+  const synType = cssVar("--syn-type", washi ? "#3b6aa0" : "#86aedc");
+  const synStr = cssVar("--syn-str", washi ? "#b07b2e" : "#d9b47c");
+  const synComment = cssVar("--syn-comment", fgFaint);
+  const cursorLine = washi ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
+  const selection = washi ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
+
+  return [
+    EditorView.theme(
+      {
+        "&": { color: fg, backgroundColor: bg },
+        ".cm-content": { caretColor: em },
+        ".cm-cursor, .cm-dropCursor": { borderLeftColor: em, borderLeftWidth: "2px" },
+        "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+          backgroundColor: selection,
+        },
+        ".cm-activeLine": { backgroundColor: cursorLine },
+        ".cm-activeLineGutter": { backgroundColor: cursorLine },
+        ".cm-gutters": { backgroundColor: bg2, color: fgFaint, borderRight: `1px solid ${line}` },
+        ".cm-lineNumbers .cm-gutterElement": { color: fgFaint },
+        ".cm-foldGutter .cm-gutterElement": { color: fgDim },
+        ".cm-matchingBracket, .cm-nonmatchingBracket": { backgroundColor: cursorLine, outline: `1px solid ${line}` },
+        ".cm-panels": { backgroundColor: bg2, color: fg, borderColor: line },
+        ".cm-searchMatch": { backgroundColor: "rgba(227,179,65,0.22)" },
+        ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: selection },
+      },
+      { dark: !washi },
+    ),
+    syntaxHighlighting(
+      HighlightStyle.define([
+        { tag: [tags.keyword, tags.controlKeyword, tags.operatorKeyword, tags.modifier], color: synKw },
+        { tag: [tags.typeName, tags.className, tags.tagName, tags.namespace], color: synType },
+        { tag: [tags.string, tags.character, tags.special(tags.string), tags.regexp], color: synStr },
+        { tag: [tags.comment, tags.docComment], color: synComment, fontStyle: "italic" },
+        { tag: [tags.number, tags.bool, tags.null, tags.atom], color: synStr },
+        { tag: [tags.propertyName, tags.attributeName, tags.labelName], color: synType },
+        { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: synType },
+        { tag: [tags.operator, tags.punctuation, tags.bracket], color: fgDim },
+        { tag: tags.invalid, color: cssVar("--deleted", "#f0716a") },
+      ]),
+    ),
+  ];
 }
 
 export function detectLanguage(name: string): Extension | null {
@@ -204,6 +351,11 @@ export class Pane {
   readonly el: HTMLElement; // .pane root
   private tabsEl: HTMLElement;
   private hostEl: HTMLElement;
+  private editorShell: HTMLElement;
+  private codeHostEl: HTMLElement;
+  private marginaliaEl: HTMLElement;
+  private marginaliaInnerEl: HTMLElement;
+  private activeLensIndex: number | null = null;
   readonly previewEl: HTMLElement; // .preview-host (used in Phase 5)
   private welcomeEl: HTMLElement;
   private languageCompartment = new Compartment();
@@ -223,6 +375,21 @@ export class Pane {
     this.hostEl = document.createElement("div");
     this.hostEl.className = "pane-host";
 
+    this.editorShell = document.createElement("div");
+    this.editorShell.className = "editor-shell";
+
+    this.codeHostEl = document.createElement("div");
+    this.codeHostEl.className = "code-host";
+
+    this.marginaliaEl = document.createElement("div");
+    this.marginaliaEl.id = "marginalia";
+    this.marginaliaEl.className = "hidden";
+    this.marginaliaInnerEl = document.createElement("div");
+    this.marginaliaInnerEl.className = "marginalia-inner";
+    this.marginaliaEl.append(this.marginaliaInnerEl);
+    this.editorShell.append(this.codeHostEl, this.marginaliaEl);
+    this.hostEl.append(this.editorShell);
+
     this.previewEl = document.createElement("div");
     this.previewEl.className = "preview-host hidden";
 
@@ -234,21 +401,37 @@ export class Pane {
     this.el.append(this.tabsEl, this.hostEl, this.previewEl, this.welcomeEl);
     mount.append(this.el);
 
-    this.view = new EditorView({ parent: this.hostEl });
+    this.view = new EditorView({ parent: this.codeHostEl });
     this.view.dom.style.display = "none";
+    this.view.scrollDOM.addEventListener("scroll", () => this.syncMarginaliaScroll());
 
     // Tab clicks activate through their own handler; rerendering on press would detach a drag source.
     this.el.addEventListener("mousedown", (e) => {
       if (!(e.target as Element).closest(".pane-tabs")) this.mgr.setFocused(this);
     });
+    document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
+
+  /** Release document-level listeners and the CM view when the pane is removed. */
+  destroy(): void {
+    document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    this.view.destroy();
+  }
+
+  private onOutsideLensMouseDown = (event: MouseEvent): void => {
+    if (this.activeLensIndex == null) return;
+    const target = event.target as Element | null;
+    if (target?.closest(".lens,.margin-pill")) return;
+    this.closeLens();
+  };
 
   private extensions(name: string): Extension {
     return [
       basicSetup,
       search({ createPanel: buildSearchPanel }),
-      oneDark,
+      editorThemeCompartment.of(cmThreadTheme()),
       diffField,
+      lensField,
       gutter({
         class: "cm-diff-gutter",
         markers: (view) => view.state.field(diffField),
@@ -277,6 +460,7 @@ export class Pane {
           { key: "Alt-ArrowDown", run: moveLineDown },
           { key: "Alt-ArrowUp", run: moveLineUp },
           { key: "Shift-Mod-k", run: deleteLine },
+          { key: "Escape", run: () => this.closeLens() },
           indentWithTab,
         ]),
       ),
@@ -285,6 +469,7 @@ export class Pane {
           this.active.dirty = this.view.state.doc.toString() !== this.active.savedContent;
           this.mgr.onPaneDocChanged(this);
         }
+        if (u.selectionSet && this.active) this.mgr.onSelectionChanged?.();
       }),
     ];
   }
@@ -308,6 +493,81 @@ export class Pane {
     });
   }
 
+  openLens(hunkIndex: number): void {
+    if (!this.active) return;
+    const hunk = this.active.hunks[hunkIndex];
+    if (!hunk) return;
+    const model = lensModel(this.active.hunks, hunkIndex, this.mgr.attributionForTab(this.active));
+    this.activeLensIndex = hunkIndex;
+    this.view.dispatch({
+      effects: setLens.of({
+        ...model,
+        anchorLine: hunk.newTo > hunk.newFrom ? hunk.newTo - 1 : hunk.newFrom,
+        onRevert: () => {
+          this.mgr.setFocused(this);
+          this.mgr.revertHunk(hunk);
+          this.closeLens();
+        },
+      }),
+    });
+  }
+
+  closeLens(): boolean {
+    if (this.activeLensIndex == null) return false;
+    this.activeLensIndex = null;
+    this.view.dispatch({ effects: setLens.of(null) });
+    return true;
+  }
+
+  syncMarginalia(): void {
+    this.marginaliaInnerEl.innerHTML = "";
+    if (!this.active || this.previewSource) {
+      this.marginaliaEl.classList.add("hidden");
+      return;
+    }
+
+    const ai = this.mgr.aiRangesForTab(this.active, this.view.state.doc.lines);
+    const entries = marginEntries(this.active.hunks, ai, this.view.defaultLineHeight);
+    if (entries.length === 0) {
+      this.marginaliaEl.classList.add("hidden");
+      return;
+    }
+
+    this.marginaliaEl.classList.remove("hidden");
+    for (const entry of entries) {
+      if (entry.kind === "hunk") {
+        const pill = document.createElement("button");
+        pill.className = `margin-pill kind-${entry.color}`;
+        pill.style.top = `${entry.topPx}px`;
+        pill.style.minHeight = `${entry.heightPx}px`;
+        pill.textContent = entry.color;
+        pill.onclick = (event) => {
+          event.stopPropagation();
+          this.mgr.setFocused(this);
+          this.openLens(entry.hunkIndex);
+        };
+        this.marginaliaInnerEl.append(pill);
+      } else {
+        const stitch = document.createElement("div");
+        stitch.className = "margin-ai";
+        stitch.style.top = `${entry.topPx}px`;
+        const line = document.createElement("span");
+        line.className = "stitch";
+        line.style.height = `${entry.heightPx}px`;
+        const who = document.createElement("span");
+        who.className = "who";
+        who.textContent = entry.agent;
+        stitch.append(line, who);
+        this.marginaliaInnerEl.append(stitch);
+      }
+    }
+    this.syncMarginaliaScroll();
+  }
+
+  private syncMarginaliaScroll(): void {
+    this.marginaliaInnerEl.style.transform = `translateY(-${this.view.scrollDOM.scrollTop}px)`;
+  }
+
   // Live-reconfigures indent width for the currently displayed document.
   applyIndent(size: number): void {
     this.view.dispatch({ effects: this.indentCompartment.reconfigure(indentSettings(size)) });
@@ -316,6 +576,11 @@ export class Pane {
   // Live-toggles soft wrap for the currently displayed document.
   applyWrap(on: boolean): void {
     this.view.dispatch({ effects: this.wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []) });
+  }
+
+  applyEditorTheme(): void {
+    this.view.dispatch({ effects: editorThemeCompartment.reconfigure(cmThreadTheme()) });
+    if (this.active) this.active.state = this.view.state;
   }
 
   tabByPath(path: string): Tab | undefined {
@@ -363,7 +628,7 @@ export class Pane {
       btnBoth.onclick = () => this.applyConflictResolution(i, "both");
 
       banner.append(btnOurs, btnTheirs, btnBoth);
-      this.hostEl.insertBefore(banner, this.view.dom);
+      this.hostEl.insertBefore(banner, this.editorShell);
     }
   }
 
@@ -378,20 +643,24 @@ export class Pane {
 
   /** Show `tab` in this pane's view, checkpointing the outgoing tab's state. */
   activate(tab: Tab): void {
+    this.closeLens();
     if (this.previewSource) this.hidePreview();
     if (this.active && this.active !== tab) this.active.state = this.view.state;
     this.active = tab;
     this.view.setState(tab.state);
+    this.applyEditorTheme();
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    this.syncMarginalia();
     // Detect conflicts in the newly activated tab
     this.detectAndRenderConflicts();
   }
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */
   showWelcome(): void {
+    this.closeLens();
     this.clearConflictBanners();
     this.previewSource = null;
     this.previewCtl = null;
@@ -399,12 +668,15 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.previewEl.innerHTML = "";
     this.view.setState(EditorState.create({ extensions: this.extensions("") }));
+    this.applyEditorTheme();
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.remove("hidden");
   }
 
   /** Enter preview mode bound to `source`, rendering `text`. */
   async showPreview(source: Tab, text: string): Promise<void> {
+    this.closeLens();
     const { PreviewController, previewKind } = await import("./preview");
     const kind = previewKind(source.name);
     if (!kind) return;
@@ -413,6 +685,7 @@ export class Pane {
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
   }
@@ -423,6 +696,7 @@ export class Pane {
     text: string,
     label: string,
   ): Promise<void> {
+    this.closeLens();
     const { PreviewController } = await import("./preview");
     // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
     this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
@@ -430,6 +704,7 @@ export class Pane {
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
+    this.syncMarginalia();
     this.welcomeEl.classList.add("hidden");
     this.previewEl.classList.remove("hidden");
     this.renderTabs();
@@ -442,6 +717,7 @@ export class Pane {
 
   /** Leave preview mode, restoring the editor (or welcome if empty). */
   hidePreview(): void {
+    this.closeLens();
     this.previewSource = null;
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
@@ -452,6 +728,7 @@ export class Pane {
     } else {
       this.welcomeEl.classList.remove("hidden");
     }
+    this.syncMarginalia();
   }
 
   /** Remove `tab`; if it was active, activate a neighbour or show welcome. */
@@ -537,6 +814,8 @@ export class EditorManager {
   onTabsChanged?: () => void;
   onDiffChanged?: (hunks: Hunk[], label: string) => void;
   onGutterClick?: (hunkIndex: number) => void;
+  /** Fires on cursor/selection moves in the focused pane (whisper-bar ln display). */
+  onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
 
@@ -545,12 +824,16 @@ export class EditorManager {
   private diffTimer: number | undefined;
   private previewTimer: number | undefined;
   private workspaceRoot: string | null = null;
+  private agentChanges: readonly AgentChange[] = [];
+  private themeObserver: MutationObserver;
 
   constructor(container: HTMLElement) {
     this.container = container;
     const pane = new Pane(this, container);
     this.panes = [pane];
     this.focused = pane;
+    this.themeObserver = new MutationObserver(() => this.applyEditorTheme());
+    this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
   }
 
   /** Root hit target for internal editor tab split drags. */
@@ -568,6 +851,10 @@ export class EditorManager {
   setWordWrap(on: boolean): void {
     this.wordWrap = on;
     for (const p of this.panes) p.applyWrap(on);
+  }
+
+  applyEditorTheme(): void {
+    for (const p of this.panes) p.applyEditorTheme();
   }
 
   setFocused(pane: Pane): void {
@@ -612,6 +899,7 @@ export class EditorManager {
       }
     }
     this.panes.pop();
+    right.destroy();
     right.el.remove();
     this.splitter?.remove();
     this.splitter = null;
@@ -692,6 +980,28 @@ export class EditorManager {
 
   renderAllTabs(): void {
     for (const p of this.panes) p.renderTabs();
+  }
+
+  setAgentChanges(changes: readonly AgentChange[]): void {
+    this.agentChanges = changes;
+    for (const pane of this.panes) pane.syncMarginalia();
+  }
+
+  attributionForTab(tab: Tab): string | null {
+    if (!tab.path) return null;
+    const change = this.agentChanges.find(
+      (candidate) => candidate.path === tab.path && !candidate.humanTouched && !candidate.binary && candidate.status !== "D",
+    );
+    return change ? "stitched by AI" : null;
+  }
+
+  aiRangesForTab(tab: Tab, lineCount: number): AiRange[] {
+    if (!tab.path) return [];
+    const change = this.agentChanges.find(
+      (candidate) => candidate.path === tab.path && !candidate.humanTouched && !candidate.binary && candidate.status !== "D",
+    );
+    if (!change) return [];
+    return [{ startLine: 0, endLine: Math.max(0, lineCount - 1), agent: "AI" }];
   }
 
   private baselineOf(tab: Tab): string | null {
@@ -920,12 +1230,14 @@ export class EditorManager {
     if (baseline == null) {
       active.hunks = [];
       pane.view.dispatch({ effects: setDiffMarks.of([]) });
+      pane.syncMarginalia();
       this.onDiffChanged?.([], active.name);
       return;
     }
     const { marks, hunks } = computeLineDiff(baseline, current);
     active.hunks = hunks;
     pane.view.dispatch({ effects: setDiffMarks.of(marks) });
+    pane.syncMarginalia();
     const label = active.override != null ? `${active.name} — AI edits` : active.name;
     this.onDiffChanged?.(hunks, label);
   }
@@ -1002,6 +1314,7 @@ export class EditorManager {
   /** Called by a pane when its active doc changes. */
   onPaneDocChanged(pane: Pane): void {
     this.focused = pane;
+    pane.closeLens();
     this.scheduleDiff();
     if (pane.active) this.schedulePreviewRefresh(pane.active, pane.getContent());
     this.renderAllTabs();

@@ -19,9 +19,7 @@ import { DiffViewer } from "./diff";
 import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
 import {
-  agentTrackingAccept,
   agentTrackingPoll,
-  agentTrackingRevert,
   readFile,
   writeFile,
   fileMtime,
@@ -41,12 +39,11 @@ import {
   onFsChanged,
   watchStart,
   watchStop,
-  type AgentChange,
   type AgentTrackingStatus,
 } from "./ipc";
-import { agentBannerText, aiChanges, firstViewableAgentChange, mergeChangedFiles } from "./agent-tracking";
+import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, type PaletteHandle } from "./palette";
+import { mountPalette, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -62,6 +59,7 @@ import {
 import { icon } from "./icons";
 import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import {
+  breadcrumbSegments,
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
@@ -81,6 +79,7 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
+import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -170,7 +169,7 @@ void onFsChanged((payload) => {
   void refreshFileSystemState(root);
 });
 
-const banner = $("ai-banner");
+const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -187,8 +186,37 @@ editor.onGutterClick = (idx) => {
   setDiff(true);
   diffViewer.highlightHunk(idx);
 };
-editor.onActiveTabChanged = (tab) => tree.setActive(tab?.path ?? null);
-editor.onTabsChanged = () => persistWorkspaceSession();
+// Render the loom-bar breadcrumb for the active file; dir segments reveal in the tree.
+function renderBreadcrumb(path: string | null): void {
+  const host = $("breadcrumb");
+  host.innerHTML = "";
+  if (!currentRoot) return;
+  for (const seg of breadcrumbSegments(currentRoot, path)) {
+    const sep = document.createElement("span");
+    sep.className = "sep";
+    sep.textContent = "/";
+    host.appendChild(sep);
+    const el = document.createElement("span");
+    el.className = "seg" + (seg.leaf ? " leaf" : " dir");
+    el.textContent = seg.label;
+    if (seg.dirPath) {
+      const dir = seg.dirPath;
+      el.onclick = () => void tree.reveal(dir);
+    }
+    host.appendChild(el);
+  }
+}
+
+editor.onActiveTabChanged = (tab) => {
+  tree.setActive(tab?.path ?? null);
+  renderBreadcrumb(tab?.path ?? null);
+  renderWhisperBar();
+};
+editor.onTabsChanged = () => {
+  persistWorkspaceSession();
+  renderWhisperBar();
+};
+editor.onSelectionChanged = () => renderWhisperBar();
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
 diffViewer.onRevert = (h) => editor.revertHunk(h);
@@ -335,9 +363,15 @@ async function restoreWorkspaceTabs(root: string): Promise<void> {
   }
 }
 
+// Apply the active theme by toggling the washi class on the document root.
+function applyTheme(theme: "ink" | "washi"): void {
+  document.documentElement.classList.toggle("theme-washi", theme === "washi");
+}
+
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
   settings = clampSettings(next);
+  applyTheme(settings.theme);
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
   rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
@@ -387,6 +421,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   }
   const mt = await fileMtime(path).catch(() => null);
   editor.markSaved(tab, path, basename(path), mt);
+  renderWhisperBar();
   if (path !== prevPath) {
     // brand-new file or Save As → it now exists on disk; seed git baseline + tree
     tab.gitHead = await gitHeadContent(path).catch(() => null);
@@ -414,6 +449,8 @@ async function openWorkspace(dir: string): Promise<void> {
       for (const w of warnings) console.warn("MCP config:", w);
     });
     agentStatus = { enabled: false, agentActive: false, changes: [] };
+    editor.setAgentChanges([]);
+    renderWhisperBar();
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
     if (settings.restoreSession) await restoreWorkspaceTabs(dir);
@@ -423,8 +460,7 @@ async function openWorkspace(dir: string): Promise<void> {
   persistWorkspaceSession();
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
-  hideBanner();
-  await terminals.reset(dir, !termArea.classList.contains("hidden"));
+  await terminals.reset(dir, drawerState.open);
   saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
   void refreshGitState(dir);
   automations = await loadAutomations(dir);
@@ -456,16 +492,48 @@ async function closeActiveTab(): Promise<void> {
 const termArea = $("terminal-area");
 const hres = $("hresizer");
 const btnTerm = $("btn-term");
+let drawerState: DrawerState = loadDrawerState(localStorage.getItem(DRAWER_KEY));
+const terminalSeam = document.createElement("button");
+terminalSeam.id = "terminal-seam";
+terminalSeam.type = "button";
+terminalSeam.onclick = () => setTerminal(true);
+termArea.prepend(terminalSeam);
+
+function saveDrawerState(next: DrawerState): void {
+  drawerState = clampDrawerState(next);
+  localStorage.setItem(DRAWER_KEY, JSON.stringify(drawerState));
+}
+
+function renderTerminalSeam(): void {
+  terminalSeam.innerHTML = "";
+  const chevron = document.createElement("span");
+  chevron.className = "terminal-seam-chevron";
+  chevron.textContent = drawerState.open ? "⌄" : "⌃";
+  const label = document.createElement("span");
+  label.className = "terminal-seam-label";
+  label.textContent = `terminal · ${terminals.count} ${terminals.count === 1 ? "thread" : "threads"}`;
+  const rule = document.createElement("span");
+  rule.className = "terminal-seam-rule";
+  const kbd = document.createElement("span");
+  kbd.className = "kbd";
+  kbd.textContent = "⌘J";
+  terminalSeam.append(chevron, label, rule, kbd);
+}
+
 function setTerminal(on: boolean): void {
-  termArea.classList.toggle("hidden", !on);
+  saveDrawerState({ ...drawerState, open: on });
+  termArea.classList.toggle("terminal-collapsed", !on);
   hres.classList.toggle("hidden", !on);
   btnTerm.classList.toggle("on", on);
+  termArea.style.flex = on ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+  renderTerminalSeam();
   if (on) {
     if (terminals.count === 0) void terminals.create();
     else requestAnimationFrame(() => terminals.refit());
   }
 }
-btnTerm.onclick = () => setTerminal(termArea.classList.contains("hidden"));
+btnTerm.onclick = () => setTerminal(!drawerState.open);
+terminals.onTabsChanged = renderTerminalSeam;
 
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {
@@ -514,7 +582,8 @@ $("diff-close").onclick = () => setDiff(false);
 const browserArea = $("browser-area");
 const browserRes = $("browser-resizer");
 const btnBrowser = $("btn-browser");
-const btnSettings = $("btn-settings");
+const btnPalette = $("btn-palette");
+const btnMenu = $("btn-menu");
 function setBrowser(on: boolean): void {
   browserArea.classList.toggle("hidden", !on);
   browserRes.classList.toggle("hidden", !on);
@@ -539,7 +608,6 @@ function togglePreview(): void {
 // ---- search view toggle ----
 const treeEl = $("tree");
 const searchView = $("search-view");
-const sidebarTitle = $("sidebar-title");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
 let searchIconHtml = "";
@@ -548,7 +616,6 @@ function openSearchView(): void {
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
-  sidebarTitle.textContent = "SEARCH";
   searchIconHtml = btnSearchToggle.innerHTML;
   btnSearchToggle.innerHTML = "←";
   btnSearchToggle.title = "Back to files";
@@ -559,7 +626,6 @@ function closeSearchView(): void {
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
-  sidebarTitle.textContent = "FILES";
   if (searchIconHtml) btnSearchToggle.innerHTML = searchIconHtml;
   btnSearchToggle.title = "Search folder (⇧⌘F)";
 }
@@ -576,13 +642,15 @@ function startAgentTrackingPoll(): void {
   pollTimer = window.setInterval(pollAgentChanges, 1500);
 }
 
-// Halts agent-change polling and clears any banner it surfaced.
+// Halts agent-change polling and clears any whisper text it surfaced.
 function stopAgentTrackingPoll(): void {
   if (pollTimer !== undefined) {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
-  hideAgentBanner();
+  editor.setAgentChanges([]);
+  agentStatus = { enabled: false, agentActive: false, changes: [] };
+  renderWhisperBar();
 }
 
 // ---- git-index mtime watcher — refreshes tree badges after terminal git ops ----
@@ -639,8 +707,8 @@ async function pollAgentChanges(): Promise<void> {
     const next = await agentTrackingPoll(currentRoot);
     if (currentRoot !== root) return;
     agentStatus = next;
-    if (aiChanges(next.changes).length > 0) showAgentBanner(next.changes);
-    else hideAgentBanner();
+    editor.setAgentChanges(next.changes);
+    renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
     // Poll failures must not interrupt editing.
@@ -666,95 +734,54 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-function bannerBtn(text: string, fn: () => void, tone = "secondary"): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.textContent = text;
-  b.className = `ai-banner-btn ${tone}`;
-  b.onclick = fn;
-  return b;
-}
+function renderWhisperBar(): void {
+  whisperBar.innerHTML = "";
+  const left = document.createElement("div");
+  left.className = "whisper-left";
+  const saveState = document.createElement("span");
+  saveState.className = "whisper-save" + (editor.tabs.some((tab) => tab.dirty) ? " dirty" : "");
+  saveState.textContent = editor.tabs.some((tab) => tab.dirty) ? "unsaved changes" : "all changes saved";
+  left.append(saveState);
 
-function showAgentBanner(changes: AgentChange[]): void {
-  banner.innerHTML = "";
-  banner.dataset.kind = "agent";
-  const mark = document.createElement("span");
-  mark.className = "ai-banner-mark";
-  mark.innerHTML = icon("trackAI", 16, 1.7);
-
-  const copy = document.createElement("span");
-  copy.className = "ai-banner-copy";
-  const kicker = document.createElement("span");
-  kicker.className = "ai-banner-kicker";
-  kicker.textContent = "Agent review";
-  const message = document.createElement("span");
-  message.className = "ai-banner-message";
-  message.textContent = agentBannerText(changes);
-  copy.append(kicker, message);
-
-  const actions = document.createElement("span");
-  actions.className = "ai-banner-actions";
-  actions.append(
-    bannerBtn("View", () => {
-      const change = firstViewableAgentChange(changes);
+  const activePath = editor.active?.path ?? null;
+  const agentCopy = whisperText(agentStatus, activePath);
+  if (agentCopy) {
+    const agent = document.createElement("button");
+    agent.className = "whisper-agent";
+    agent.textContent = agentCopy;
+    agent.onclick = () => {
+      const change = firstViewableAgentChange(agentStatus.changes);
       if (change) void viewChangedPath(change.path);
-    }, "primary"),
-    bannerBtn("Keep", () => {
-      if (!currentRoot) return;
-      void agentTrackingAccept(currentRoot).then((status) => {
-        agentStatus = status;
-        hideAgentBanner();
-        void refreshDiffFileList();
-      });
-    }),
-    bannerBtn("Revert", () => {
-      if (!currentRoot) return;
-      void agentTrackingRevert(currentRoot).then(async (result) => {
-        await tree.refresh();
-        await editor.reloadAllFromDisk();
-        await pollAgentChanges();
-        if (result.unsafePaths.length || result.errors.length) {
-          const unsafe = result.unsafePaths.length
-            ? `${result.unsafePaths.length} human-touched file(s) need manual review.`
-            : "";
-          const errors = result.errors.length ? ` ${result.errors.join("; ")}` : "";
-          void alertNative(`${unsafe}${errors}`.trim());
-        }
-      }).catch((e) => void alertNative(`Revert failed: ${e}`));
-    }, "danger"),
-  );
-  banner.append(
-    mark,
-    copy,
-    actions,
-  );
-  banner.classList.remove("hidden");
-}
-
-function hideAgentBanner(): void {
-  if (banner.dataset.kind === "agent") {
-    hideBanner();
+    };
+    left.append(agent);
   }
+
+  const right = document.createElement("div");
+  right.className = "whisper-right";
+  if (editor.active) {
+    const selection = editor.getSelection();
+    right.textContent = `ln ${selection.line}`;
+  }
+  whisperBar.append(left, right);
 }
 
-function hideBanner(): void {
-  banner.classList.add("hidden");
-  banner.innerHTML = "";
-  delete banner.dataset.kind;
-}
-
-/** One-off error banner (e.g. branch checkout rejected on a dirty tree). */
+/** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
 function showErrorBanner(message: string): void {
-  banner.innerHTML = "";
-  banner.dataset.kind = "error";
-  const span = document.createElement("span");
-  span.textContent = message;
-  banner.append(span, bannerBtn("Dismiss", hideBanner));
-  banner.classList.remove("hidden");
+  void alertNative(message);
 }
 
 // ---- resizers ----
 vResizer(vres, sidebar, { min: 120, max: 600, onResize: () => terminals.refit() });
-hResizer(hres, termArea, { min: 80, fromEnd: true, onResize: () => terminals.refit() });
+hResizer(hres, termArea, {
+  min: 120,
+  max: 800,
+  fromEnd: true,
+  onResize: () => {
+    const heightPx = Math.round(termArea.getBoundingClientRect().height);
+    saveDrawerState({ open: true, heightPx });
+    terminals.refit();
+  },
+});
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
 vResizer(browserRes, browserArea, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
@@ -815,7 +842,7 @@ window.addEventListener("keydown", (e) => {
     }
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
-    setTerminal(termArea.classList.contains("hidden"));
+    setTerminal(!drawerState.open);
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
@@ -835,7 +862,7 @@ window.addEventListener("keydown", (e) => {
     search.focus();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
-    setTerminal(termArea.classList.contains("hidden"));
+    setTerminal(!drawerState.open);
   } else if (mod && e.code === "Comma") {
     e.preventDefault();
     openSettings();
@@ -849,16 +876,50 @@ window.addEventListener("blur", () => {
 
 // ---- chrome: icon buttons + menu bar ----
 btnTerm.innerHTML = icon("terminal", 17);
-btnDiff.innerHTML = icon("diff", 17);
-btnBrowser.innerHTML = icon("browser", 17);
-btnSettings.innerHTML = icon("settings", 17);
+btnDiff.innerHTML = icon("git-compare", 17);
+btnBrowser.innerHTML = icon("world", 17);
+btnPalette.innerHTML = icon("command", 17);
+btnMenu.innerHTML = icon("menu", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
-btnSettings.onclick = () => openSettings();
+btnPalette.onclick = () => palette.open();
+// App menu: the global verbs that aren't pane toggles (palette + shortcuts own the rest).
+btnMenu.onclick = () => {
+  workspaceBar.openPopover(
+    btnMenu,
+    (el, close) => {
+      const mk = (label: string, kbd: string, run: () => void): void => {
+        const row = document.createElement("div");
+        row.className = "menu-row";
+        const text = document.createElement("span");
+        text.textContent = label;
+        row.appendChild(text);
+        if (kbd) {
+          const k = document.createElement("span");
+          k.className = "kbd";
+          k.textContent = kbd;
+          row.appendChild(k);
+        }
+        row.onclick = () => {
+          close();
+          run();
+        };
+        el.appendChild(row);
+      };
+      mk("open folder…", "⌘O", () => actions.openFolder());
+      mk("command palette", "⌘K", () => palette.open());
+      const foot = document.createElement("div");
+      foot.className = "menu-foot";
+      el.appendChild(foot);
+      mk("settings…", "⌘,", () => openSettings());
+    },
+    "menu-card",
+  );
+};
 
 const actions = {
   newFile: () => editor.newUntitled(),
@@ -873,7 +934,7 @@ const actions = {
   },
   openFolder: () => void openFolderDialog(),
   closeTab: () => void closeActiveTab(),
-  toggleTerminal: () => setTerminal(termArea.classList.contains("hidden")),
+  toggleTerminal: () => setTerminal(!drawerState.open),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
   toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
@@ -903,10 +964,11 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   switchWorkspace: actions.switchWorkspace,
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
+  openSettings: () => openSettings(),
 });
 workspaceBar.setCurrentWorkspace(null);
 
-gitBar = createGitBar($("gitbar"));
+gitBar = createGitBar($("branch-whisper"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
@@ -916,8 +978,12 @@ async function refreshGitState(root: string): Promise<void> {
 }
 
 // ---- automations ----
+let runningAutomationTermId: string | null = null;
 automationBar = mountAutomationBar($("automations"), {
   run: (a) => void runAutomation(a),
+  stop: () => {
+    if (runningAutomationTermId) terminals.interrupt(runningAutomationTermId);
+  },
   openCreate: () => openCreatePanel(),
 });
 
@@ -926,11 +992,15 @@ async function runAutomation(a: Automation): Promise<void> {
   setTerminal(true);
   const termId = await terminals.runCommand(a.command).catch(() => null);
   if (!termId) return;
+  runningAutomationTermId = termId;
   automationBar.setRunning(true);
   const poll = async (): Promise<void> => {
     const busy = await terminals.isBusyById(termId).catch(() => false);
     if (busy) window.setTimeout(() => void poll(), 1000);
-    else automationBar.setRunning(false);
+    else {
+      if (runningAutomationTermId === termId) runningAutomationTermId = null;
+      automationBar.setRunning(false);
+    }
   };
   window.setTimeout(() => void poll(), 800); // let the command take the foreground first
 }
@@ -1050,12 +1120,12 @@ async function switchBranch(branch: string): Promise<void> {
   void tree.refresh();
   void refreshGitState(currentRoot);
   editor.recomputeDiff();
-  hideBanner();
+  renderWhisperBar();
 }
 
 // ---- command palette ----
 // Named so the settings shortcuts reference can reuse it as the single source of truth.
-const paletteCommands = [
+const paletteCommands: Command[] = [
   { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
   { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
   { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
@@ -1082,7 +1152,20 @@ const paletteCommands = [
   }, shortcut: "⇧⌘F" },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
 ];
-palette = mountPalette(paletteCommands);
+
+function recentPaletteCommands(): Command[] {
+  return loadRecents()
+    .filter((recent) => recent.path !== currentRoot)
+    .slice(0, 5)
+    .map((recent) => ({
+      id: `recent:${recent.path}`,
+      title: `Open ${recent.name}`,
+      run: () => actions.switchWorkspace(recent.path),
+      section: "recent" as const,
+    }));
+}
+
+palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {
@@ -1166,4 +1249,5 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 // ---- boot ----
 applySettings(settings);
 editor.renderAllTabs();
-setTerminal(true); // panel visible by default → spawns first shell
+renderWhisperBar();
+setTerminal(drawerState.open);

@@ -1,19 +1,25 @@
-// Workspace switcher + popover primitive. Retains the workspace pill (folder switcher
-// in titlebar) and provides the openPopover primitive for recents + context menus.
-// The command palette and keyboard shortcuts now own the menu actions.
+// Workspace switcher anchored on the #ws-wordmark button and the openPopover
+// primitive used by the app menu. The wordmark label shows the current folder name.
 import { icon } from "./icons";
 import type { RecentWorkspace } from "./workspace";
+import { workspaceMenuModel } from "./workspace";
 
 export interface WorkspaceActions {
   recents(): RecentWorkspace[];
   switchWorkspace(path: string): void;
   addFolder(): void;
   openFolder(): void;
+  /** Optional: open the settings modal (⌘,). */
+  openSettings?: () => void;
 }
 
 export interface WorkspaceBarHandle {
   setCurrentWorkspace(path: string | null): void;
-  openPopover: (anchor: HTMLElement, build: (el: HTMLElement) => void) => void;
+  openPopover: (
+    anchor: HTMLElement,
+    build: (el: HTMLElement, close: () => void) => void,
+    className?: string,
+  ) => void;
 }
 
 // Best-effort ~ collapse for display; the renderer has no HOME env, so match the
@@ -24,7 +30,7 @@ function homeCollapse(path: string): string {
 }
 
 export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions): WorkspaceBarHandle {
-  const wsEl = root.querySelector<HTMLElement>("#workspace")!;
+  const wordmark = root.querySelector<HTMLElement>("#ws-wordmark")!;
   let current: string | null = null;
 
   // ---- popover lifecycle ----
@@ -48,13 +54,17 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     el.style.left = `${left}px`;
   }
 
-  function openPopover(anchor: HTMLElement, build: (el: HTMLElement) => void): void {
+  function openPopover(
+    anchor: HTMLElement,
+    build: (el: HTMLElement, close: () => void) => void,
+    className = "popover",
+  ): void {
     const reopening = openBtn === anchor;
     closeAll();
     if (reopening) return; // click again on the open anchor → toggle shut
     const el = document.createElement("div");
-    el.className = "popover";
-    build(el);
+    el.className = className;
+    build(el, closeAll);
     root.appendChild(el);
     positionUnder(el, anchor);
     pop = el;
@@ -62,78 +72,92 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     anchor.classList.add("open");
   }
 
-  function openSwitcher(): void {
-    openPopover(pill, (el) => {
-      const title = document.createElement("div");
-      title.className = "po-title";
-      title.textContent = "Recent workspaces";
-      el.appendChild(title);
-
+  function openWorkspaceMenu(): void {
+    // Build the workspace selector menu using the shared .menu-card grammar.
+    openPopover(wordmark, (el, close) => {
       const recents = actions.recents();
-      if (recents.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "po-item disabled";
-        empty.innerHTML = `<span class="po-gi"></span><span>No recent folders</span>`;
-        el.appendChild(empty);
-      }
-      for (const r of recents) {
-        const isCur = current != null && r.path === current;
+      const items = current ? workspaceMenuModel(current, recents, Date.now()) : [];
+
+      for (const item of items) {
         const row = document.createElement("div");
-        row.className = "po-item" + (isCur ? " current" : "");
-        row.innerHTML =
-          `<span class="po-gi">${icon("folder", 16)}</span>` +
-          `<span class="po-meta"><div class="po-name">${r.name}</div>` +
-          `<div class="po-path">${homeCollapse(r.path)}</div></span>` +
-          (isCur ? `<span class="po-gi">${icon("check", 15)}</span>` : "");
-        row.onclick = () => {
-          closeAll();
-          if (!isCur) actions.switchWorkspace(r.path);
-        };
+        row.className = "menu-row" + (item.kind === "current" ? " current" : "");
+
+        const folderIco = document.createElement("span");
+        folderIco.innerHTML = icon("folder", 15);
+        row.appendChild(folderIco);
+
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = item.name;
+        row.appendChild(nameSpan);
+
+        const pathSpan = document.createElement("span");
+        pathSpan.className = "menu-path";
+        pathSpan.textContent = homeCollapse(item.path);
+        row.appendChild(pathSpan);
+
+        if (item.kind === "current") {
+          const checkIco = document.createElement("span");
+          checkIco.innerHTML = icon("check", 14);
+          row.appendChild(checkIco);
+        } else if (item.age) {
+          const age = document.createElement("span");
+          age.className = "menu-age";
+          age.textContent = item.age;
+          row.appendChild(age);
+        }
+
+        if (item.kind !== "current") {
+          row.onclick = () => { close(); actions.switchWorkspace(item.path); };
+        }
         el.appendChild(row);
       }
 
-      const s = document.createElement("div");
-      s.className = "po-sep";
-      el.appendChild(s);
+      // Recents section header when there are recent items beyond current.
+      if (items.length > 1) {
+        // Insert a section head before the first recent row (after the current row).
+        const head = document.createElement("div");
+        head.className = "menu-head";
+        head.textContent = "recent";
+        el.insertBefore(head, el.children[1]);
+      }
 
-      const openRow = document.createElement("div");
-      openRow.className = "po-item";
-      openRow.innerHTML =
-        `<span class="po-gi">${icon("folderAdd", 16)}</span><span>Open folder…</span>` +
-        `<span class="po-kbd">⌘O</span>`;
-      openRow.onclick = () => {
-        closeAll();
-        actions.openFolder();
-      };
-      el.appendChild(openRow);
+      // Footer verbs.
+      const foot = document.createElement("div");
+      foot.className = "menu-foot";
+      el.appendChild(foot);
 
-      const browseRow = document.createElement("div");
-      browseRow.className = "po-item";
-      browseRow.innerHTML = `<span class="po-gi">${icon("search", 16)}</span><span>Browse more…</span>`;
-      browseRow.onclick = () => {
-        closeAll();
-        actions.addFolder();
+      const mkRow = (label: string, kbd: string, run: () => void): void => {
+        const row = document.createElement("div");
+        row.className = "menu-row";
+        const text = document.createElement("span");
+        text.textContent = label;
+        row.appendChild(text);
+        if (kbd) {
+          const k = document.createElement("span");
+          k.className = "kbd";
+          k.textContent = kbd;
+          row.appendChild(k);
+        }
+        row.onclick = () => { close(); run(); };
+        el.appendChild(row);
       };
-      el.appendChild(browseRow);
-    });
+
+      mkRow("open folder…", "⌘O", () => actions.openFolder());
+      if (actions.openSettings) {
+        mkRow("settings…", "⌘,", () => actions.openSettings!());
+      }
+    }, "menu-card");
   }
 
-  // ---- render switcher (pill) ----
-  wsEl.innerHTML = "";
-  const pill = document.createElement("button");
-  pill.className = "ws-pill";
-  pill.title = "Switch workspace";
-  pill.onclick = () => openSwitcher();
-  wsEl.append(pill);
-
-  function renderPill(): void {
-    const name = current ? (current.split("/").pop() || current) : "No folder";
-    pill.innerHTML =
-      `<span class="fld">${icon("folder", 15)}</span>` +
-      `<span class="ws-name">${name}</span>` +
-      `<span class="chev">${icon("chevronDown", 11, 2.4)}</span>`;
+  // ---- render wordmark label ----
+  function renderWordmark(): void {
+    const name = current ? (current.split("/").pop() || current) : "sutra";
+    wordmark.innerHTML =
+      `<span class="wm-name">${name}</span>` +
+      `<span class="wm-chev">${icon("chevronDown", 11, 2.4)}</span>`;
   }
-  renderPill();
+  renderWordmark();
+  wordmark.onclick = () => openWorkspaceMenu();
 
   // ---- global dismissers ----
   document.addEventListener("mousedown", (e) => {
@@ -152,7 +176,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
   return {
     setCurrentWorkspace(path) {
       current = path;
-      renderPill();
+      renderWordmark();
     },
     openPopover,
   };
