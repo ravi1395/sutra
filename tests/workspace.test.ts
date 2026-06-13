@@ -358,6 +358,17 @@ test("main uses workspace agent tracking instead of open-tab mtime polling", () 
   assert.match(mainTs, /diffViewer\.renderStatus/);
 });
 
+test("settings modal token sweep uses shared menu heads and tokenized controls", () => {
+  const modalTs = readFileSync("src/settings-modal.ts", "utf8");
+  const css = readFileSync("src/styles.css", "utf8");
+
+  assert.match(modalTs, /className = "menu-head settings-section-head"/);
+  assert.match(modalTs, /head\("Editor"\)/);
+  assert.match(modalTs, /head\("Shortcuts"\)/);
+  assert.match(css, /\.settings-select\s*\{[^}]*background:\s*var\(--bg-3\);[^}]*border:\s*1px solid var\(--line-menu\);/s);
+  assert.match(css, /\.settings-stepper\s*\{[^}]*background:\s*var\(--bg-3\);[^}]*border:\s*1px solid var\(--line-menu\);/s);
+});
+
 test("fileTypeMeta gives file tree rows type-specific icons and classes", () => {
   assert.deepEqual(fileTypeMeta("src/component.TSX"), { icon: "TSX", className: "type-ts" });
   assert.deepEqual(fileTypeMeta("README.md"), { icon: "MD", className: "type-md" });
