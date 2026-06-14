@@ -268,22 +268,13 @@ tree.onDelete = async (path: string) => {
   }
 };
 
-tree.onCreate = async (parentDir: string, isDir: boolean) => {
-  const type = isDir ? "folder" : "file";
-  const name = await promptInput(`New ${type} name:`);
-  if (!name) return;
-  try {
-    if (isDir) {
-      const path = parentDir + "/" + name;
-      await createDir(path);
-    } else {
-      const path = parentDir + "/" + name;
-      await writeFile(path, "");
-    }
-    await tree.refresh();
-  } catch (e) {
-    void alertNative(`Create ${type} failed: ${e}`);
-  }
+// Pure FS write — the tree owns the inline name input, validation, refresh,
+// reveal, auto-open, and inline error display. Errors propagate so the tree
+// can render them inline.
+tree.onCreate = async (parentDir: string, name: string, isDir: boolean) => {
+  const path = parentDir + "/" + name;
+  if (isDir) await createDir(path);
+  else await writeFile(path, "");
 };
 
 tree.onMove = async (src: string, destDir: string) => {
@@ -921,6 +912,8 @@ $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
 $("btn-new-file").innerHTML = icon("fileAdd", 15);
 $("btn-new-folder").innerHTML = icon("folderAdd", 15);
+$("btn-new-file").onclick = () => void tree.beginCreate(tree.targetDirForCreate(), false);
+$("btn-new-folder").onclick = () => void tree.beginCreate(tree.targetDirForCreate(), true);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
 btnPalette.onclick = () => palette.open();
@@ -1238,54 +1231,6 @@ function openSettings(): void {
     apply: persistSettings,
     version: getVersion(),
     shortcuts: shortcutEntries(),
-  });
-}
-
-/** Custom input dialog replacing window.prompt() — WKWebView silently returns null for native JS dialogs. */
-function promptInput(message: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "prompt-overlay";
-
-    const box = document.createElement("div");
-    box.className = "prompt-box";
-
-    const lbl = document.createElement("div");
-    lbl.className = "prompt-label";
-    lbl.textContent = message;
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "prompt-input tree-edit-input";
-
-    const btns = document.createElement("div");
-    btns.className = "prompt-btns";
-
-    const btnOk = document.createElement("button");
-    btnOk.className = "prompt-btn";
-    btnOk.textContent = "OK";
-
-    const btnCancel = document.createElement("button");
-    btnCancel.className = "prompt-btn secondary";
-    btnCancel.textContent = "Cancel";
-
-    const done = (value: string | null) => {
-      overlay.remove();
-      resolve(value);
-    };
-
-    btnOk.onclick = () => done(input.value.trim() || null);
-    btnCancel.onclick = () => done(null);
-    input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") { ev.preventDefault(); done(input.value.trim() || null); }
-      if (ev.key === "Escape") { ev.preventDefault(); done(null); }
-    });
-
-    btns.append(btnCancel, btnOk);
-    box.append(lbl, input, btns);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    input.focus();
   });
 }
 
