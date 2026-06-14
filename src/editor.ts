@@ -421,7 +421,7 @@ export class Pane {
   private onOutsideLensMouseDown = (event: MouseEvent): void => {
     if (this.activeLensIndex == null) return;
     const target = event.target as Element | null;
-    if (target?.closest(".lens,.margin-pill")) return;
+    if (target?.closest(".lens")) return;
     this.closeLens();
   };
 
@@ -440,7 +440,10 @@ export class Pane {
             const lineNo = view.state.doc.lineAt(line.from).number - 1;
             if (this.active) {
               const idx = hunkIndexAtLine(this.active.hunks, lineNo);
-              if (idx >= 0) this.mgr.onGutterClick?.(idx);
+              if (idx >= 0) {
+                this.mgr.setFocused(this);
+                this.openLens(idx);
+              }
             }
             return false;
           },
@@ -527,7 +530,7 @@ export class Pane {
     }
 
     const ai = this.mgr.aiRangesForTab(this.active, this.view.state.doc.lines);
-    const entries = marginEntries(this.active.hunks, ai, this.view.defaultLineHeight);
+    const entries = marginEntries(ai, this.view.defaultLineHeight);
     if (entries.length === 0) {
       this.marginaliaEl.classList.add("hidden");
       return;
@@ -535,31 +538,17 @@ export class Pane {
 
     this.marginaliaEl.classList.remove("hidden");
     for (const entry of entries) {
-      if (entry.kind === "hunk") {
-        const pill = document.createElement("button");
-        pill.className = `margin-pill kind-${entry.color}`;
-        pill.style.top = `${entry.topPx}px`;
-        pill.style.minHeight = `${entry.heightPx}px`;
-        pill.textContent = entry.color;
-        pill.onclick = (event) => {
-          event.stopPropagation();
-          this.mgr.setFocused(this);
-          this.openLens(entry.hunkIndex);
-        };
-        this.marginaliaInnerEl.append(pill);
-      } else {
-        const stitch = document.createElement("div");
-        stitch.className = "margin-ai";
-        stitch.style.top = `${entry.topPx}px`;
-        const line = document.createElement("span");
-        line.className = "stitch";
-        line.style.height = `${entry.heightPx}px`;
-        const who = document.createElement("span");
-        who.className = "who";
-        who.textContent = entry.agent;
-        stitch.append(line, who);
-        this.marginaliaInnerEl.append(stitch);
-      }
+      const stitch = document.createElement("div");
+      stitch.className = "margin-ai";
+      stitch.style.top = `${entry.topPx}px`;
+      const line = document.createElement("span");
+      line.className = "stitch";
+      line.style.height = `${entry.heightPx}px`;
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = entry.agent;
+      stitch.append(line, who);
+      this.marginaliaInnerEl.append(stitch);
     }
     this.syncMarginaliaScroll();
   }
@@ -829,8 +818,7 @@ export class EditorManager {
   // wired by main.ts
   saveHandler?: (tab: Tab) => Promise<void>;
   onTabsChanged?: () => void;
-  onDiffChanged?: (hunks: Hunk[], label: string) => void;
-  onGutterClick?: (hunkIndex: number) => void;
+
   /** Fires on cursor/selection moves in the focused pane (whisper-bar ln display). */
   onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
@@ -1109,6 +1097,24 @@ export class EditorManager {
     view.focus();
   }
 
+  /**
+   * Open `path` (reloading latest disk content), scroll to the hunk at
+   * `startLine` (0-based), and open the inline peek for it. Falls back to a
+   * plain scroll when the live buffer has no hunk at that line.
+   */
+  async revealHunkPeek(path: string, startLine: number, status: string): Promise<void> {
+    try {
+      await this.openLatestFile(path, status);
+    } catch {
+      return; // file vanished / unreadable — nothing to peek
+    }
+    const tab = this.active;
+    if (!tab || tab.path !== path) return;
+    this.revealLine(startLine + 1); // revealLine is 1-based
+    const idx = hunkIndexAtLine(tab.hunks, startLine);
+    if (idx >= 0) this.focused.openLens(idx);
+  }
+
   newUntitled(): void {
     const pane = this.focused;
     const name = "untitled";
@@ -1172,8 +1178,6 @@ export class EditorManager {
     if (wasActive) {
       if (pane.active) {
         this.recomputeDiff();
-      } else {
-        this.onDiffChanged?.([], "Diff");
       }
       this.onActiveTabChanged?.(this.focused.active);
     }
@@ -1222,7 +1226,6 @@ export class EditorManager {
     }
     if (!changed) return;
     if (this.focused.active) this.recomputeDiff();
-    else this.onDiffChanged?.([], "Diff");
     this.renderAllTabs();
     this.onActiveTabChanged?.(this.focused.active);
     this.onTabsChanged?.();
@@ -1248,15 +1251,12 @@ export class EditorManager {
       active.hunks = [];
       pane.view.dispatch({ effects: setDiffMarks.of([]) });
       pane.syncMarginalia();
-      this.onDiffChanged?.([], active.name);
       return;
     }
     const { marks, hunks } = computeLineDiff(baseline, current);
     active.hunks = hunks;
     pane.view.dispatch({ effects: setDiffMarks.of(marks) });
     pane.syncMarginalia();
-    const label = active.override != null ? `${active.name} — AI edits` : active.name;
-    this.onDiffChanged?.(hunks, label);
   }
 
   /**

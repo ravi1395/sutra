@@ -1193,29 +1193,6 @@ button:hover {
   inset: 0;
   will-change: transform;
 }
-.margin-pill {
-  position: absolute;
-  left: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--fg-dim);
-  background: var(--bg-2);
-  border: 1px solid var(--line-menu);
-  border-radius: 9px;
-  padding: 3px 8px;
-  cursor: pointer;
-}
-.margin-pill.kind-added {
-  border-color: color-mix(in srgb, var(--added) 45%, var(--line-menu));
-}
-.margin-pill.kind-modified {
-  border-color: color-mix(in srgb, var(--modified) 45%, var(--line-menu));
-}
-.margin-pill.kind-deleted {
-  border-color: color-mix(in srgb, var(--deleted) 45%, var(--line-menu));
-}
 .margin-ai {
   position: absolute;
   left: 13px;
@@ -1418,60 +1395,49 @@ button:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-#diff-body {
-  flex: 1;
-  overflow: auto;
-  padding: 6px;
+.diff-file-chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 9px;
+  color: var(--fg-faint);
+  cursor: pointer;
 }
-.hunk {
-  border: 1px solid var(--line-menu);
-  border-radius: var(--r-sm);
-  margin-bottom: 10px;
-  overflow: hidden;
-  background: var(--bg-1);
+.diff-hunk-list {
+  display: flex;
+  flex-direction: column;
 }
-.hunk.highlight {
-  outline: 2px solid var(--em-dim);
+.diff-hunk-list.hidden {
+  display: none;
 }
-.hunk-head {
+.diff-hunk-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 3px 8px;
-  background: var(--bg-3);
+  gap: 7px;
+  padding: 4px 8px 4px 28px;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--fg-dim);
+  cursor: pointer;
 }
-.hunk-head .kind-modified {
-  color: var(--modified);
+.diff-hunk-row:hover {
+  background: var(--bg-3);
+  color: var(--fg);
 }
-.hunk-head .kind-added {
-  color: var(--added);
+.diff-hunk-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
 }
-.hunk-head .kind-deleted {
-  color: var(--deleted);
-}
-.hunk-revert {
-  padding: 2px 8px;
+.diff-hunk-dot.modified { background: var(--modified); }
+.diff-hunk-dot.added { background: var(--added); }
+.diff-hunk-dot.deleted { background: var(--deleted); }
+.diff-hunk-empty {
+  padding: 4px 8px 4px 28px;
   font-size: 11px;
+  color: var(--fg-faint);
 }
-.hunk pre {
-  margin: 0;
-  padding: 2px 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.hunk pre.old {
-  background: rgba(215, 78, 66, 0.14);
-  color: #e0a0a0;
-}
-.hunk pre.new {
-  background: rgba(60, 148, 255, 0.12);
-  color: #a9c7ff;
-}
+
 #diff-empty {
   color: var(--fg-dim);
   padding: 10px;
