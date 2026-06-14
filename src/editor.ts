@@ -1231,6 +1231,30 @@ export class EditorManager {
     this.onTabsChanged?.();
   }
 
+  /** Close every open tab across all panes in a single batch. */
+  closeAllTabs(): void {
+    let changed = false;
+    for (const pane of this.panes) {
+      if (pane.previewSource) {
+        pane.hidePreview();
+        changed = true;
+      }
+      if (pane.tabs.length === 0) continue;
+      changed = true;
+      pane.tabs = [];
+      pane.active = null;
+      pane.showWelcome();
+    }
+    if (!changed) return;
+    if (this.isSplit && this.panes[1].tabs.length === 0 && !this.panes[1].previewSource) {
+      void this.closeSplit();
+      return;
+    }
+    this.renderAllTabs();
+    this.onActiveTabChanged?.(this.focused.active);
+    this.onTabsChanged?.();
+  }
+
   /** Debounced, deferred diff recompute — safe to call from an update listener. */
   private scheduleDiff(): void {
     if (this.diffTimer !== undefined) clearTimeout(this.diffTimer);

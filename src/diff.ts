@@ -168,6 +168,7 @@ export function hunkIndexAtLine(hunks: Hunk[], line0: number): number {
 export class DiffViewer {
   private titleEl = document.getElementById("diff-title")!;
   private filesEl = document.getElementById("diff-files")!;
+  private expandedPaths = new Set<string>();
 
   // Show a one-line status (deleted/binary/unreadable) above the file list without clearing it.
   renderStatus(label: string, message: string): void {
@@ -194,6 +195,10 @@ export class DiffViewer {
   ): void {
     this.filesEl.innerHTML = "";
     if (!files.length) return;
+    const visiblePaths = new Set(files.map((file) => file.path));
+    for (const path of this.expandedPaths) {
+      if (!visiblePaths.has(path)) this.expandedPaths.delete(path);
+    }
 
     const list = document.createElement("div");
     list.className = "diff-file-list";
@@ -222,13 +227,11 @@ export class DiffViewer {
       hunksBox.className = "diff-hunk-list hidden";
       let loaded = false;
 
-      chevron.onclick = async (event) => {
-        event.stopPropagation();
-        const collapsed = hunksBox.classList.toggle("hidden");
-        chevron.textContent = collapsed ? "▸" : "▾";
-        if (collapsed || loaded) return;
+      const loadHunks = async () => {
+        if (loaded) return;
         loaded = true;
         const rows = await handlers.onExpand(file.path);
+        if (!this.expandedPaths.has(file.path)) return;
         if (!rows.length) {
           const empty = document.createElement("div");
           empty.className = "diff-hunk-empty";
@@ -253,12 +256,29 @@ export class DiffViewer {
         }
       };
 
+      const setExpanded = (expanded: boolean) => {
+        hunksBox.classList.toggle("hidden", !expanded);
+        chevron.textContent = expanded ? "▾" : "▸";
+        if (expanded) {
+          this.expandedPaths.add(file.path);
+          void loadHunks();
+        } else {
+          this.expandedPaths.delete(file.path);
+        }
+      };
+
+      chevron.onclick = (event) => {
+        event.stopPropagation();
+        setExpanded(hunksBox.classList.contains("hidden"));
+      };
+
       row.onclick = () => {
         list.querySelectorAll(".diff-file-row.active").forEach((e) => e.classList.remove("active"));
         row.classList.add("active");
         handlers.onFilePick(file.path);
       };
 
+      if (this.expandedPaths.has(file.path)) setExpanded(true);
       list.append(row, hunksBox);
     }
 
