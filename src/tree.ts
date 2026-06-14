@@ -1,7 +1,7 @@
 // File tree with VS Code-style compact folders. Single-subfolder chains arrive
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
-import { listDir, gitStatus, type Entry, type GitStatusEntry } from "./ipc";
+import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry } from "./ipc";
 import { showContextMenu } from "./contextmenu";
 import {
   FILE_DRAG_TYPE,
@@ -41,6 +41,38 @@ export function fileTypeMeta(name: string, isDir = false): FileTypeMeta {
   return fileTypeByExt[ext] ?? { icon: "TXT", className: "type-file" };
 }
 
+/** Validate a new file/folder name (may be a nested path). Returns an error
+ *  string to show inline, or null when the name is acceptable. Sibling-conflict
+ *  is only checked for simple (non-nested) names; nested paths merge into
+ *  existing folders and are conflict-checked authoritatively at commit time. */
+export function validateNewName(name: string, siblingNames: string[]): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "Name cannot be empty.";
+  if (trimmed.startsWith("/") || trimmed.endsWith("/")) return "Invalid name.";
+  if (trimmed.includes("\0")) return "Invalid name.";
+  const segs = trimmed.split("/");
+  for (const seg of segs) {
+    if (!seg || seg === "." || seg === "..") return "Invalid name.";
+  }
+  if (segs.length === 1 && siblingNames.includes(trimmed)) {
+    return `A file or folder "${trimmed}" already exists here.`;
+  }
+  return null;
+}
+
+/** Resolve the directory a header-button create should target: the selected
+ *  directory itself, the parent of a selected file, or the root when nothing
+ *  is selected. */
+export function resolveCreateTargetDir(
+  selectedPath: string | null,
+  selectedIsDir: boolean,
+  root: string,
+): string {
+  if (!selectedPath) return root;
+  if (selectedIsDir) return selectedPath;
+  return selectedPath.split("/").slice(0, -1).join("/");
+}
+
 /** Return absolute path prefixes needed to expand ancestors for `path`. */
 export function ancestorPathsForReveal(path: string): string[] {
   const out: string[] = [];
@@ -65,6 +97,8 @@ export class FileTree {
   private root: string | null = null;
   private expanded = new Set<string>();
   private activePath: string | null = null;
+  private selectedPath: string | null = null;
+  private selectedIsDir = false;
   private status = new Map<string, "M" | "A" | "D">();
   private changedDirs = new Set<string>();
   private deletedDirs = new Set<string>(); // dirs containing deleted entries (visible signal while collapsed)
@@ -73,17 +107,34 @@ export class FileTree {
   onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
   onRename?: (path: string, newName: string) => void;
   onDelete?: (path: string) => void;
-  onCreate?: (parentDir: string, isDir: boolean) => void;
+  onCreate?: (parentDir: string, name: string, isDir: boolean) => Promise<void>;
   onMove?: (src: string, destDir: string) => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
+    // Right-click on empty tree space (not a row) creates at the workspace root.
+    this.el.addEventListener("contextmenu", (ev) => {
+      if ((ev.target as HTMLElement).closest(".tree-row")) return; // row menu handles it
+      if (!this.root) return;
+      ev.preventDefault();
+      showContextMenu(
+        ev.clientX,
+        ev.clientY,
+        [
+          { label: "New File", action: () => void this.beginCreate(this.root!, false) },
+          { label: "New Folder", action: () => void this.beginCreate(this.root!, true) },
+        ],
+        this.el,
+      );
+    });
   }
 
   async setRoot(path: string): Promise<void> {
     this.root = path;
     this.expanded.clear();
     this.expanded.add(path);
+    this.selectedPath = null;
+    this.selectedIsDir = false;
     await this.loadStatus();
     await this.render();
     if (this.root !== path) return;
@@ -149,6 +200,130 @@ export class FileTree {
     }
     await this.render();
     this.setActive(path);
+  }
+
+  /** Directory a header-button create targets (selected dir, file's parent, or root). */
+  targetDirForCreate(): string {
+    return resolveCreateTargetDir(this.selectedPath, this.selectedIsDir, this.root ?? "");
+  }
+
+  /** Start inline creation of a file/folder inside `parentDir`. Shows a focused
+   *  input row; Enter commits (with validation), Esc/blur cancels. */
+  async beginCreate(parentDir: string, isDir: boolean): Promise<void> {
+    if (!this.root) return;
+    this.expanded.add(parentDir);
+    await this.render();
+
+    const siblingNames = Array.from(
+      this.el.querySelectorAll<HTMLElement>(".tree-row"),
+    )
+      .map((r) => r.dataset.path ?? "")
+      .filter(
+        (p) =>
+          p &&
+          p.startsWith(parentDir + "/") &&
+          !p.slice(parentDir.length + 1).includes("/"),
+      )
+      .map((p) => p.slice(parentDir.length + 1));
+
+    const parentRow = this.el.querySelector<HTMLElement>(
+      `.tree-row[data-path="${cssEscape(parentDir)}"]`,
+    );
+    const depth =
+      parentDir === this.root
+        ? 0
+        : Math.round((parseFloat(parentRow?.style.paddingLeft || "14") - 14) / 12) + 1;
+
+    const wrap = document.createElement("div");
+    wrap.className = "tree-create-wrap";
+
+    const inputRow = document.createElement("div");
+    inputRow.className = "tree-row " + (isDir ? "dir" : "file");
+    inputRow.style.paddingLeft = `${depth * 12 + 14}px`;
+    const meta = fileTypeMeta(isDir ? "" : "x", isDir);
+    const iconEl = document.createElement("span");
+    iconEl.className = `tree-icon ${meta.className}`;
+    iconEl.textContent = meta.icon;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tree-edit-input";
+    input.style.width = "100%";
+    inputRow.append(iconEl, input);
+
+    const errEl = document.createElement("div");
+    errEl.className = "tree-create-error";
+    errEl.style.paddingLeft = `${depth * 12 + 14}px`;
+    errEl.style.display = "none";
+
+    wrap.append(inputRow, errEl);
+
+    // Insert as the first child entry of the parent (or top of tree for root).
+    if (parentRow && parentRow.nextSibling) {
+      parentRow.parentElement!.insertBefore(wrap, parentRow.nextSibling);
+    } else {
+      this.el.insertBefore(wrap, this.el.firstChild);
+    }
+    input.focus();
+
+    const cleanup = () => {
+      input.removeEventListener("keydown", onKey);
+      input.removeEventListener("blur", onBlur);
+      wrap.remove();
+    };
+    const showError = (msg: string) => {
+      errEl.textContent = msg;
+      errEl.style.display = "";
+    };
+
+    const commit = async () => {
+      const name = input.value.trim();
+      const syncErr = validateNewName(name, siblingNames);
+      if (syncErr) {
+        showError(syncErr);
+        return;
+      }
+      const fullPath = parentDir + "/" + name;
+      if (await this.pathExists(fullPath)) {
+        showError(`A file or folder "${name}" already exists here.`);
+        return;
+      }
+      try {
+        await this.onCreate?.(parentDir, name, isDir);
+      } catch (err) {
+        showError(String(err));
+        return;
+      }
+      cleanup();
+      await this.refresh();
+      await this.reveal(fullPath);
+      this.selectedPath = fullPath;
+      this.selectedIsDir = isDir;
+      if (!isDir) this.onOpenFile?.(fullPath);
+    };
+
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        void commit();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        cleanup();
+      } else {
+        errEl.style.display = "none"; // clear error on next keystroke
+      }
+    };
+    const onBlur = () => cleanup();
+
+    input.addEventListener("keydown", onKey);
+    input.addEventListener("blur", onBlur);
+  }
+
+  /** Existence probe via file_mtime (resolves for existing paths). */
+  private async pathExists(path: string): Promise<boolean> {
+    return fileMtime(path).then(
+      () => true,
+      () => false,
+    );
   }
 
   private async renderDir(
@@ -274,6 +449,8 @@ export class FileTree {
     }
 
     row.onclick = () => {
+      this.selectedPath = e.path;
+      this.selectedIsDir = e.isDir;
       if (e.isDir) {
         if (this.expanded.has(e.path)) this.expanded.delete(e.path);
         else this.expanded.add(e.path);
@@ -303,14 +480,14 @@ export class FileTree {
             label: "New File",
             action: () => {
               const dir = e.isDir ? e.path : e.path.split("/").slice(0, -1).join("/");
-              this.onCreate?.(dir, false);
+              void this.beginCreate(dir, false);
             },
           },
           {
             label: "New Folder",
             action: () => {
               const dir = e.isDir ? e.path : e.path.split("/").slice(0, -1).join("/");
-              this.onCreate?.(dir, true);
+              void this.beginCreate(dir, true);
             },
           },
         ],
