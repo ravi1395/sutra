@@ -58,6 +58,7 @@ export function ancestorPathsForReveal(path: string): string[] {
 
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
+type TreeContainer = HTMLElement | DocumentFragment;
 
 export class FileTree {
   private el: HTMLElement;
@@ -67,6 +68,7 @@ export class FileTree {
   private status = new Map<string, "M" | "A" | "D">();
   private changedDirs = new Set<string>();
   private deletedDirs = new Set<string>(); // dirs containing deleted entries (visible signal while collapsed)
+  private renderSeq = 0;
   onOpenFile?: (path: string) => void;
   onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
   onRename?: (path: string, newName: string) => void;
@@ -84,6 +86,7 @@ export class FileTree {
     this.expanded.add(path);
     await this.loadStatus();
     await this.render();
+    if (this.root !== path) return;
     this.el.scrollTop = 0; // a fresh root starts at the top, not the prior tree's offset
   }
 
@@ -124,12 +127,17 @@ export class FileTree {
   }
 
   async render(): Promise<void> {
-    // Preserve scroll position: rebuilding innerHTML resets scrollTop to 0, which
-    // otherwise yanks the view to the top on every folder expand/collapse/refresh.
+    const root = this.root;
+    if (!root) {
+      this.el.replaceChildren();
+      return;
+    }
+    const seq = ++this.renderSeq;
     const prevScroll = this.el.scrollTop;
-    this.el.innerHTML = "";
-    if (!this.root) return;
-    await this.renderDir(this.root, 0, this.el);
+    const fragment = document.createDocumentFragment();
+    if (!(await this.renderDir(root, 0, fragment, seq, root))) return;
+    if (!this.isCurrentRender(seq, root)) return;
+    this.el.replaceChildren(fragment);
     this.el.scrollTop = prevScroll; // browser clamps if content shrank
   }
 
@@ -143,13 +151,21 @@ export class FileTree {
     this.setActive(path);
   }
 
-  private async renderDir(path: string, depth: number, container: HTMLElement): Promise<void> {
+  private async renderDir(
+    path: string,
+    depth: number,
+    container: TreeContainer,
+    renderSeq: number,
+    renderRoot: string,
+  ): Promise<boolean> {
+    if (!this.isCurrentRender(renderSeq, renderRoot)) return false;
     let entries: Entry[];
     try {
       entries = await listDir(path);
     } catch {
-      return;
+      return true;
     }
+    if (!this.isCurrentRender(renderSeq, renderRoot)) return false;
     const seen = new Set(entries.map((e) => e.path));
     entries = entries.concat(this.deletedEntriesForDir(path, seen));
     for (const e of entries) {
@@ -159,10 +175,17 @@ export class FileTree {
         const childBox = document.createElement("div");
         container.appendChild(childBox);
         if (this.expanded.has(e.path)) {
-          await this.renderDir(e.path, depth + 1, childBox);
+          if (!(await this.renderDir(e.path, depth + 1, childBox, renderSeq, renderRoot))) {
+            return false;
+          }
         }
       }
     }
+    return true;
+  }
+
+  private isCurrentRender(renderSeq: number, renderRoot: string): boolean {
+    return renderSeq === this.renderSeq && this.root === renderRoot;
   }
 
   private deletedEntriesForDir(path: string, seen: Set<string>): Entry[] {

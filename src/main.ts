@@ -167,7 +167,7 @@ void onFsChanged((payload) => {
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
     return;
   }
-  void refreshFileSystemState(root);
+  scheduleFileSystemRefresh(root);
 });
 
 const whisperBar = $("whisper-bar");
@@ -177,6 +177,8 @@ let gitBar: GitBarHandle; // assigned at boot
 let automationBar: AutomationBarHandle; // assigned at boot
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let fsRefreshRunning = false;
+let fsRefreshPendingRoot: string | null = null;
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
 let suppressSessionSave = false;
 let settings: UserSettings = loadSettings();
@@ -556,11 +558,34 @@ async function refreshDiffFileList(): Promise<void> {
 }
 
 async function refreshFileSystemState(root: string): Promise<void> {
+  if (currentRoot !== root) return;
   await tree.refresh();
   if (currentRoot !== root) return;
   await editor.refreshCleanGitBaselines();
   if (currentRoot !== root) return;
   void refreshGitState(root);
+}
+
+function scheduleFileSystemRefresh(root: string): void {
+  fsRefreshPendingRoot = root;
+  if (fsRefreshRunning) return;
+  fsRefreshRunning = true;
+  void (async () => {
+    try {
+      while (fsRefreshPendingRoot) {
+        const nextRoot = fsRefreshPendingRoot;
+        fsRefreshPendingRoot = null;
+        try {
+          await refreshFileSystemState(nextRoot);
+        } catch (e) {
+          console.warn("filesystem refresh failed", e);
+        }
+      }
+    } finally {
+      fsRefreshRunning = false;
+      if (fsRefreshPendingRoot) scheduleFileSystemRefresh(fsRefreshPendingRoot);
+    }
+  })();
 }
 
 // ---- diff toggle ----

@@ -377,6 +377,19 @@ test("fileTypeMeta gives file tree rows type-specific icons and classes", () => 
   assert.deepEqual(fileTypeMeta("unknown"), { icon: "TXT", className: "type-file" });
 });
 
+test("file tree refreshes swap atomically and watcher refreshes coalesce", () => {
+  const treeTs = readFileSync("src/tree.ts", "utf8");
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  assert.match(treeTs, /document\.createDocumentFragment\(\)/);
+  assert.match(treeTs, /replaceChildren\(fragment\)/);
+  assert.doesNotMatch(treeTs, /this\.el\.innerHTML\s*=\s*""/);
+  assert.match(mainTs, /function scheduleFileSystemRefresh\(root: string\): void/);
+  assert.match(mainTs, /fsRefreshPendingRoot/);
+  assert.match(mainTs, /fsRefreshRunning/);
+  assert.match(mainTs, /scheduleFileSystemRefresh\(root\)/);
+});
+
 test("paneSideFromClientX splits a drop target into left and right halves", () => {
   assert.equal(paneSideFromClientX(149, { left: 100, width: 100 }), "left");
   assert.equal(paneSideFromClientX(150, { left: 100, width: 100 }), "right");
