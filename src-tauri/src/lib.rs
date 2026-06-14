@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod agent_tracker;
+mod debug;
 mod fs_cmds;
 mod git;
 mod mcp;
@@ -36,6 +37,7 @@ pub fn run() {
         .manage(local_auth_token)
         .manage(preview_server::PreviewServerState::default())
         .manage(pty::PtyState::default())
+        .manage(debug::DebugState::default())
         .manage(mcp::McpState::default())
         .manage(watcher::WatcherState::default())
         .setup(|app| {
@@ -83,6 +85,9 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_is_busy,
+            debug::debug_start,
+            debug::debug_send,
+            debug::debug_stop,
             search::search_dir,
             watcher::watch_start,
             watcher::watch_stop,
