@@ -41,6 +41,38 @@ export function fileTypeMeta(name: string, isDir = false): FileTypeMeta {
   return fileTypeByExt[ext] ?? { icon: "TXT", className: "type-file" };
 }
 
+/** Validate a new file/folder name (may be a nested path). Returns an error
+ *  string to show inline, or null when the name is acceptable. Sibling-conflict
+ *  is only checked for simple (non-nested) names; nested paths merge into
+ *  existing folders and are conflict-checked authoritatively at commit time. */
+export function validateNewName(name: string, siblingNames: string[]): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "Name cannot be empty.";
+  if (trimmed.startsWith("/") || trimmed.endsWith("/")) return "Invalid name.";
+  if (trimmed.includes("\0")) return "Invalid name.";
+  const segs = trimmed.split("/");
+  for (const seg of segs) {
+    if (!seg || seg === "." || seg === "..") return "Invalid name.";
+  }
+  if (segs.length === 1 && siblingNames.includes(trimmed)) {
+    return `A file or folder "${trimmed}" already exists here.`;
+  }
+  return null;
+}
+
+/** Resolve the directory a header-button create should target: the selected
+ *  directory itself, the parent of a selected file, or the root when nothing
+ *  is selected. */
+export function resolveCreateTargetDir(
+  selectedPath: string | null,
+  selectedIsDir: boolean,
+  root: string,
+): string {
+  if (!selectedPath) return root;
+  if (selectedIsDir) return selectedPath;
+  return selectedPath.split("/").slice(0, -1).join("/");
+}
+
 /** Return absolute path prefixes needed to expand ancestors for `path`. */
 export function ancestorPathsForReveal(path: string): string[] {
   const out: string[] = [];
