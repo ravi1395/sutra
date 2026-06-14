@@ -1097,6 +1097,24 @@ export class EditorManager {
     view.focus();
   }
 
+  /**
+   * Open `path` (reloading latest disk content), scroll to the hunk at
+   * `startLine` (0-based), and open the inline peek for it. Falls back to a
+   * plain scroll when the live buffer has no hunk at that line.
+   */
+  async revealHunkPeek(path: string, startLine: number, status: string): Promise<void> {
+    try {
+      await this.openLatestFile(path, status);
+    } catch {
+      return; // file vanished / unreadable — nothing to peek
+    }
+    const tab = this.active;
+    if (!tab || tab.path !== path) return;
+    this.revealLine(startLine + 1); // revealLine is 1-based
+    const idx = hunkIndexAtLine(tab.hunks, startLine);
+    if (idx >= 0) this.focused.openLens(idx);
+  }
+
   newUntitled(): void {
     const pane = this.focused;
     const name = "untitled";
