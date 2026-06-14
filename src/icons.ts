@@ -27,7 +27,9 @@ export type IconName =
   | "expand"
   | "compress"
   | "bolt"
-  | "stop";
+  | "stop"
+  | "pencil"
+  | "trash";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -59,6 +61,8 @@ const paths: Record<IconName, string> = {
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
   bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H13L13 2z"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  pencil: '<path d="M4 20h4l10-10a2 2 0 0 0-2.8-2.8L5.2 17.2 4 20z"/><path d="M14 6l4 4"/>',
+  trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

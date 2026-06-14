@@ -653,9 +653,25 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    this.remeasureOnShow();
     this.syncMarginalia();
     // Detect conflicts in the newly activated tab
     this.detectAndRenderConflicts();
+  }
+
+  /**
+   * Force CodeMirror to re-measure after the view becomes visible. The view is
+   * constructed and measured while `display:none`, so CM caches a stale (0/short)
+   * viewport height. WKWebView does not reliably fire CM's resize observer on the
+   * display:none→"" transition, leaving the stale height in place — which makes
+   * scrollIntoView treat the caret as off-screen and scroll down on every
+   * keystroke. Reading clientHeight flushes layout; the rAF covers deferred
+   * settling. (Any real window resize, e.g. opening devtools, masks the bug.)
+   */
+  private remeasureOnShow(): void {
+    void this.view.scrollDOM.clientHeight; // flush layout before measuring
+    this.view.requestMeasure();
+    requestAnimationFrame(() => this.view.requestMeasure());
   }
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */
@@ -725,6 +741,7 @@ export class Pane {
     this.previewEl.innerHTML = "";
     if (this.active) {
       this.view.dom.style.display = "";
+      this.remeasureOnShow();
     } else {
       this.welcomeEl.classList.remove("hidden");
     }

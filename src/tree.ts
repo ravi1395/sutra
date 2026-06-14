@@ -84,6 +84,7 @@ export class FileTree {
     this.expanded.add(path);
     await this.loadStatus();
     await this.render();
+    this.el.scrollTop = 0; // a fresh root starts at the top, not the prior tree's offset
   }
 
   private async loadStatus(): Promise<void> {
@@ -123,9 +124,13 @@ export class FileTree {
   }
 
   async render(): Promise<void> {
+    // Preserve scroll position: rebuilding innerHTML resets scrollTop to 0, which
+    // otherwise yanks the view to the top on every folder expand/collapse/refresh.
+    const prevScroll = this.el.scrollTop;
     this.el.innerHTML = "";
     if (!this.root) return;
     await this.renderDir(this.root, 0, this.el);
+    this.el.scrollTop = prevScroll; // browser clamps if content shrank
   }
 
   /** Expand every ancestor of `path`, activate it, and re-render the tree. */

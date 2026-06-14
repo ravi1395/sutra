@@ -174,6 +174,28 @@ body {
   color: var(--fg-faint);
   margin-left: auto;
 }
+.menu-row-tools {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+  opacity: 0;
+}
+.menu-row:hover .menu-row-tools {
+  opacity: 1;
+}
+.menu-row-tool {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+}
+.menu-row-tool:hover {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.menu-row-tool.danger:hover {
+  color: var(--deleted);
+}
 .auto-chip {
   display: inline-flex;
   align-items: center;

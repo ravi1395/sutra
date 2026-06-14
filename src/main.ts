@@ -51,6 +51,7 @@ import {
   saveAutomations,
   makeAutomation,
   upsertAutomation,
+  removeAutomation,
   validateName,
   validateCommand,
   type Automation,
@@ -984,8 +985,24 @@ automationBar = mountAutomationBar($("automations"), {
   stop: () => {
     if (runningAutomationTermId) terminals.interrupt(runningAutomationTermId);
   },
-  openCreate: () => openCreatePanel(),
+  openCreate: () => openAutomationPanel(),
+  edit: (a) => openAutomationPanel(a),
+  remove: (a) => void deleteAutomation(a),
 });
+
+// Delete an automation after confirmation, then persist + refresh the picker.
+async function deleteAutomation(a: Automation): Promise<void> {
+  if (!currentRoot) return;
+  if (!(await confirmNative(`Delete automation "${a.name}"?`))) return;
+  automations = removeAutomation(automations, a.id);
+  try {
+    await saveAutomations(currentRoot, automations);
+  } catch (e) {
+    showErrorBanner(`Could not delete automation: ${e}`);
+    return;
+  }
+  automationBar.setAutomations(automations);
+}
 
 // Run an automation in a free terminal; mark the bar "running" until that terminal idles.
 async function runAutomation(a: Automation): Promise<void> {
@@ -1018,8 +1035,9 @@ async function persistAutomation(a: Automation): Promise<void> {
   automationBar.setAutomations(automations);
 }
 
-// Full-width "New automation" drawer fused under the titlebar (Variant 3).
-function openCreatePanel(): void {
+// Full-width automation drawer fused under the titlebar (Variant 3). Creates a
+// new automation, or edits `existing` in place when supplied (keeps its id).
+function openAutomationPanel(existing?: Automation): void {
   if (!currentRoot) {
     showErrorBanner("Open a folder before saving automations.");
     return;
@@ -1035,14 +1053,15 @@ function openCreatePanel(): void {
 
   const title = document.createElement("span");
   title.className = "auto-drawer-title";
-  title.innerHTML = `${icon("plus", 14)}<span>New automation</span>`;
+  title.innerHTML = `${icon(existing ? "pencil" : "plus", 14)}<span>${existing ? "Edit automation" : "New automation"}</span>`;
 
   const nameField = document.createElement("label");
   nameField.className = "auto-field name";
   const nameInput = document.createElement("input");
   nameInput.type = "text";
-  nameInput.placeholder = "Build";
+  nameInput.placeholder = "e.g. Dev server";
   nameInput.spellcheck = false;
+  nameInput.value = existing?.name ?? "";
   nameField.innerHTML = "<span>Name</span>";
   nameField.appendChild(nameInput);
 
@@ -1050,8 +1069,9 @@ function openCreatePanel(): void {
   cmdField.className = "auto-field cmd";
   const cmdInput = document.createElement("input");
   cmdInput.type = "text";
-  cmdInput.placeholder = "npm run tauri build";
+  cmdInput.placeholder = "e.g. npm run dev";
   cmdInput.spellcheck = false;
+  cmdInput.value = existing?.command ?? "";
   cmdField.innerHTML = "<span>Command</span>";
   cmdField.appendChild(cmdInput);
 
@@ -1085,14 +1105,14 @@ function openCreatePanel(): void {
   document.addEventListener("keydown", onKey);
 
   const submit = (): void => {
-    const nameErr = validateName(nameInput.value, automations);
+    const nameErr = validateName(nameInput.value, automations, existing?.id);
     const cmdErr = validateCommand(cmdInput.value);
     if (nameErr || cmdErr) {
       err.textContent = nameErr ?? cmdErr ?? "";
       (nameErr ? nameInput : cmdInput).focus();
       return;
     }
-    void persistAutomation(makeAutomation(nameInput.value, cmdInput.value)).then(close);
+    void persistAutomation(makeAutomation(nameInput.value, cmdInput.value, existing?.id)).then(close);
   };
 
   cancel.onclick = close;
@@ -1145,7 +1165,7 @@ const paletteCommands: Command[] = [
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
   { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
-  { id: "new-automation", title: "New Automation…", run: () => openCreatePanel() },
+  { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
     search.focus();
