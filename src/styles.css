@@ -1395,6 +1395,48 @@ button:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.diff-file-chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 9px;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.diff-hunk-list {
+  display: flex;
+  flex-direction: column;
+}
+.diff-hunk-list.hidden {
+  display: none;
+}
+.diff-hunk-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px 4px 28px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.diff-hunk-row:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.diff-hunk-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.diff-hunk-dot.modified { background: var(--modified); }
+.diff-hunk-dot.added { background: var(--added); }
+.diff-hunk-dot.deleted { background: var(--deleted); }
+.diff-hunk-empty {
+  padding: 4px 8px 4px 28px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
 
 #diff-empty {
   color: var(--fg-dim);

@@ -15,7 +15,7 @@ import {
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
-import { DiffViewer } from "./diff";
+import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
 import { vResizer, hResizer } from "./layout";
 import {
@@ -541,8 +541,23 @@ async function refreshDiffFileList(): Promise<void> {
     if (currentRoot !== root) return;
     const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
-    diffViewer.renderFileList(files, activePath, (path: string) => {
-      void viewChangedPath(path);
+    diffViewer.renderFileList(files, activePath, {
+      onFilePick: (path: string) => void viewChangedPath(path),
+      onExpand: async (path: string) => {
+        const file = files.find((candidate) => candidate.path === path);
+        if (!file || file.status === "D") return [];
+        try {
+          const base = (await gitHeadContent(path).catch(() => "")) ?? "";
+          const current = await readFile(path);
+          return hunkSummaries(computeLineDiff(base, current).hunks);
+        } catch {
+          return [];
+        }
+      },
+      onHunkPick: (path: string, startLine: number) => {
+        const file = files.find((candidate) => candidate.path === path);
+        void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+      },
     });
   } catch (e) {
     // Silently skip on error

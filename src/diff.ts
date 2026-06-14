@@ -181,8 +181,17 @@ export class DiffViewer {
     status.textContent = message;
   }
 
-  // Render list of changed files with clickable rows.
-  renderFileList(files: { path: string; status: string }[], active: string | null, onPick: (path: string) => void): void {
+  // Render the changed-files list; each row expands (lazily) into a per-hunk
+  // index, and hunk rows jump into the editor peek.
+  renderFileList(
+    files: { path: string; status: string }[],
+    active: string | null,
+    handlers: {
+      onFilePick: (path: string) => void;
+      onExpand: (path: string) => Promise<HunkRow[]>;
+      onHunkPick: (path: string, startLine: number) => void;
+    },
+  ): void {
     this.filesEl.innerHTML = "";
     if (!files.length) return;
 
@@ -194,26 +203,63 @@ export class DiffViewer {
       row.className = "diff-file-row";
       if (file.path === active) row.classList.add("active");
 
+      const chevron = document.createElement("span");
+      chevron.className = "diff-file-chevron";
+      chevron.textContent = "▸";
+
       const status = document.createElement("span");
       status.className = `diff-file-status status-${file.status.toLowerCase()}`;
       status.textContent = file.status;
 
       const name = document.createElement("span");
       name.className = "diff-file-name";
-      const basename = file.path.split("/").pop() || file.path;
-      name.textContent = basename;
+      name.textContent = file.path.split("/").pop() || file.path;
       name.title = file.path; // Full path in tooltip
 
-      row.appendChild(status);
-      row.appendChild(name);
-      row.onclick = () => {
-        // Highlight the active row
-        list.querySelectorAll(".diff-file-row.active").forEach((e) => e.classList.remove("active"));
-        row.classList.add("active");
-        onPick(file.path);
+      row.append(chevron, status, name);
+
+      const hunksBox = document.createElement("div");
+      hunksBox.className = "diff-hunk-list hidden";
+      let loaded = false;
+
+      chevron.onclick = async (event) => {
+        event.stopPropagation();
+        const collapsed = hunksBox.classList.toggle("hidden");
+        chevron.textContent = collapsed ? "▸" : "▾";
+        if (collapsed || loaded) return;
+        loaded = true;
+        const rows = await handlers.onExpand(file.path);
+        if (!rows.length) {
+          const empty = document.createElement("div");
+          empty.className = "diff-hunk-empty";
+          empty.textContent = "no text hunks";
+          hunksBox.append(empty);
+          return;
+        }
+        for (const hr of rows) {
+          const hrow = document.createElement("div");
+          hrow.className = "diff-hunk-row";
+          const dot = document.createElement("span");
+          dot.className = `diff-hunk-dot ${hr.kind}`;
+          const label = document.createElement("span");
+          label.className = "diff-hunk-label";
+          label.textContent = hr.label;
+          hrow.append(dot, label);
+          hrow.onclick = (ev) => {
+            ev.stopPropagation();
+            handlers.onHunkPick(file.path, hr.startLine);
+          };
+          hunksBox.append(hrow);
+        }
       };
 
-      list.appendChild(row);
+      row.onclick = () => {
+        list.querySelectorAll(".diff-file-row.active").forEach((e) => e.classList.remove("active"));
+        row.classList.add("active");
+        handlers.onFilePick(file.path);
+      };
+
+      list.append(row, hunksBox);
     }
 
     this.filesEl.appendChild(list);
