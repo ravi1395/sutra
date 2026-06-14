@@ -1081,6 +1081,12 @@ button:hover {
   font-family: inherit;
 }
 
+.tree-create-error {
+  color: var(--danger, #e24b4a);
+  font-size: 11px;
+  padding: 1px 0 4px;
+}
+
 .tree-row.dir .tree-label {
   color: inherit;
 }

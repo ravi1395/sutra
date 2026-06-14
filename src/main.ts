@@ -919,6 +919,8 @@ $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
+$("btn-new-file").innerHTML = icon("fileAdd", 15);
+$("btn-new-folder").innerHTML = icon("folderAdd", 15);
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
 btnPalette.onclick = () => palette.open();
