@@ -37,6 +37,26 @@ export function lensModel(hunks: readonly Hunk[], index: number, attribution: st
   };
 }
 
+export interface HunkRow {
+  kind: DiffKind;
+  startLine: number; // 0-based start line in current doc (= hunk.newFrom)
+  label: string;
+}
+
+/** Compact per-hunk index rows for the diff viewer; labels mirror lensModel. */
+export function hunkSummaries(hunks: readonly Hunk[]): HunkRow[] {
+  return hunks.map((h) => {
+    const last = Math.max(h.newFrom + 1, h.newTo);
+    const label =
+      h.kind === "deleted"
+        ? `at line ${h.newFrom + 1}`
+        : last > h.newFrom + 1
+          ? `lines ${h.newFrom + 1}–${last}`
+          : `line ${h.newFrom + 1}`;
+    return { kind: h.kind, startLine: h.newFrom, label };
+  });
+}
+
 function lineCount(p: Change): number {
   if (typeof p.count === "number") return p.count;
   const v = p.value;

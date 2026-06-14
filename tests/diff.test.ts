@@ -1,6 +1,32 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeLineDiff, hunkIndexAtLine, lensModel } from "../src/diff";
+import { computeLineDiff, hunkIndexAtLine, hunkSummaries, lensModel } from "../src/diff";
+
+test("hunkSummaries labels a single modified line", () => {
+  const { hunks } = computeLineDiff("one\ntwo\nthree", "one\ndos\nthree");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], { kind: "modified", startLine: 1, label: "line 2" });
+});
+
+test("hunkSummaries labels a multi-line added range", () => {
+  const { hunks } = computeLineDiff("one\nfour", "one\ntwo\nthree\nfour");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows[0].kind, "added");
+  assert.equal(rows[0].startLine, 1);
+  assert.equal(rows[0].label, "lines 2–3");
+});
+
+test("hunkSummaries labels a deletion at its boundary line", () => {
+  const { hunks } = computeLineDiff("a\nb\nc", "a\nc");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows[0].kind, "deleted");
+  assert.equal(rows[0].label, `at line ${rows[0].startLine + 1}`);
+});
+
+test("hunkSummaries returns empty for no hunks", () => {
+  assert.deepEqual(hunkSummaries([]), []);
+});
 
 test("computeLineDiff marks a pure addition", () => {
   const { marks, hunks } = computeLineDiff("one\nthree", "one\ntwo\nthree");
