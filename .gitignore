@@ -14,6 +14,8 @@ graphify-out/*
 .graphify*
 .vscode
 docs/*
+!docs/superpowers/
+!docs/superpowers/**
 node_modules
 dist
 dist-ssr
