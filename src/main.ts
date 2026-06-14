@@ -872,7 +872,7 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
-  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP")) {
+  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP") || (mod && e.code === "KeyK")) {
     e.preventDefault();
     palette.open();
   } else if (mod && e.code === "Backslash") {
@@ -904,7 +904,7 @@ window.addEventListener("blur", () => {
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
-btnPalette.innerHTML = icon("command", 17);
+btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;
 btnMenu.innerHTML = icon("menu", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
