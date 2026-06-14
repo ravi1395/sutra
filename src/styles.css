@@ -1193,29 +1193,6 @@ button:hover {
   inset: 0;
   will-change: transform;
 }
-.margin-pill {
-  position: absolute;
-  left: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--fg-dim);
-  background: var(--bg-2);
-  border: 1px solid var(--line-menu);
-  border-radius: 9px;
-  padding: 3px 8px;
-  cursor: pointer;
-}
-.margin-pill.kind-added {
-  border-color: color-mix(in srgb, var(--added) 45%, var(--line-menu));
-}
-.margin-pill.kind-modified {
-  border-color: color-mix(in srgb, var(--modified) 45%, var(--line-menu));
-}
-.margin-pill.kind-deleted {
-  border-color: color-mix(in srgb, var(--deleted) 45%, var(--line-menu));
-}
 .margin-ai {
   position: absolute;
   left: 13px;

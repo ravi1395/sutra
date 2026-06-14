@@ -421,7 +421,7 @@ export class Pane {
   private onOutsideLensMouseDown = (event: MouseEvent): void => {
     if (this.activeLensIndex == null) return;
     const target = event.target as Element | null;
-    if (target?.closest(".lens,.margin-pill")) return;
+    if (target?.closest(".lens")) return;
     this.closeLens();
   };
 
@@ -530,7 +530,7 @@ export class Pane {
     }
 
     const ai = this.mgr.aiRangesForTab(this.active, this.view.state.doc.lines);
-    const entries = marginEntries(this.active.hunks, ai, this.view.defaultLineHeight);
+    const entries = marginEntries(ai, this.view.defaultLineHeight);
     if (entries.length === 0) {
       this.marginaliaEl.classList.add("hidden");
       return;
@@ -538,31 +538,17 @@ export class Pane {
 
     this.marginaliaEl.classList.remove("hidden");
     for (const entry of entries) {
-      if (entry.kind === "hunk") {
-        const pill = document.createElement("button");
-        pill.className = `margin-pill kind-${entry.color}`;
-        pill.style.top = `${entry.topPx}px`;
-        pill.style.minHeight = `${entry.heightPx}px`;
-        pill.textContent = entry.color;
-        pill.onclick = (event) => {
-          event.stopPropagation();
-          this.mgr.setFocused(this);
-          this.openLens(entry.hunkIndex);
-        };
-        this.marginaliaInnerEl.append(pill);
-      } else {
-        const stitch = document.createElement("div");
-        stitch.className = "margin-ai";
-        stitch.style.top = `${entry.topPx}px`;
-        const line = document.createElement("span");
-        line.className = "stitch";
-        line.style.height = `${entry.heightPx}px`;
-        const who = document.createElement("span");
-        who.className = "who";
-        who.textContent = entry.agent;
-        stitch.append(line, who);
-        this.marginaliaInnerEl.append(stitch);
-      }
+      const stitch = document.createElement("div");
+      stitch.className = "margin-ai";
+      stitch.style.top = `${entry.topPx}px`;
+      const line = document.createElement("span");
+      line.className = "stitch";
+      line.style.height = `${entry.heightPx}px`;
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = entry.agent;
+      stitch.append(line, who);
+      this.marginaliaInnerEl.append(stitch);
     }
     this.syncMarginaliaScroll();
   }
