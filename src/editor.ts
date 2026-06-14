@@ -440,7 +440,10 @@ export class Pane {
             const lineNo = view.state.doc.lineAt(line.from).number - 1;
             if (this.active) {
               const idx = hunkIndexAtLine(this.active.hunks, lineNo);
-              if (idx >= 0) this.mgr.onGutterClick?.(idx);
+              if (idx >= 0) {
+                this.mgr.setFocused(this);
+                this.openLens(idx);
+              }
             }
             return false;
           },
@@ -829,8 +832,7 @@ export class EditorManager {
   // wired by main.ts
   saveHandler?: (tab: Tab) => Promise<void>;
   onTabsChanged?: () => void;
-  onDiffChanged?: (hunks: Hunk[], label: string) => void;
-  onGutterClick?: (hunkIndex: number) => void;
+
   /** Fires on cursor/selection moves in the focused pane (whisper-bar ln display). */
   onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
@@ -1172,8 +1174,6 @@ export class EditorManager {
     if (wasActive) {
       if (pane.active) {
         this.recomputeDiff();
-      } else {
-        this.onDiffChanged?.([], "Diff");
       }
       this.onActiveTabChanged?.(this.focused.active);
     }
@@ -1222,7 +1222,6 @@ export class EditorManager {
     }
     if (!changed) return;
     if (this.focused.active) this.recomputeDiff();
-    else this.onDiffChanged?.([], "Diff");
     this.renderAllTabs();
     this.onActiveTabChanged?.(this.focused.active);
     this.onTabsChanged?.();
@@ -1248,15 +1247,12 @@ export class EditorManager {
       active.hunks = [];
       pane.view.dispatch({ effects: setDiffMarks.of([]) });
       pane.syncMarginalia();
-      this.onDiffChanged?.([], active.name);
       return;
     }
     const { marks, hunks } = computeLineDiff(baseline, current);
     active.hunks = hunks;
     pane.view.dispatch({ effects: setDiffMarks.of(marks) });
     pane.syncMarginalia();
-    const label = active.override != null ? `${active.name} — AI edits` : active.name;
-    this.onDiffChanged?.(hunks, label);
   }
 
   /**

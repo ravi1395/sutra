@@ -146,72 +146,19 @@ export function hunkIndexAtLine(hunks: Hunk[], line0: number): number {
 // ---- Diff viewer panel ----
 
 export class DiffViewer {
-  private body = document.getElementById("diff-body")!;
   private titleEl = document.getElementById("diff-title")!;
   private filesEl = document.getElementById("diff-files")!;
-  onRevert?: (h: Hunk) => void;
-  onFileSelect?: (path: string) => void;
 
+  // Show a one-line status (deleted/binary/unreadable) above the file list without clearing it.
   renderStatus(label: string, message: string): void {
     this.titleEl.textContent = label;
-    this.body.innerHTML = "";
-    const status = document.createElement("div");
-    status.id = "diff-empty";
+    let status = this.filesEl.querySelector<HTMLDivElement>("#diff-empty");
+    if (!status) {
+      status = document.createElement("div");
+      status.id = "diff-empty";
+      this.filesEl.prepend(status);
+    }
     status.textContent = message;
-    this.body.appendChild(status);
-  }
-
-  render(hunks: Hunk[], label: string): void {
-    this.titleEl.textContent = label;
-    this.body.innerHTML = "";
-    if (!hunks.length) {
-      const e = document.createElement("div");
-      e.id = "diff-empty";
-      e.textContent = "No changes vs baseline.";
-      this.body.appendChild(e);
-      return;
-    }
-    hunks.forEach((h, idx) => {
-      const box = document.createElement("div");
-      box.className = "hunk";
-      box.dataset.idx = String(idx);
-
-      const head = document.createElement("div");
-      head.className = "hunk-head";
-      const k = document.createElement("span");
-      k.className = "kind-" + h.kind;
-      const range = h.kind === "deleted" ? `at line ${h.newFrom + 1}` : `lines ${h.newFrom + 1}-${h.newTo}`;
-      k.textContent = `${h.kind.toUpperCase()} · ${range}`;
-      const btn = document.createElement("button");
-      btn.className = "hunk-revert";
-      btn.textContent = "Revert";
-      btn.onclick = () => this.onRevert?.(h);
-      head.append(k, btn);
-      box.append(head);
-
-      if (h.oldText.length) {
-        const pre = document.createElement("pre");
-        pre.className = "old";
-        pre.textContent = h.oldText.map((l) => "- " + l).join("\n");
-        box.append(pre);
-      }
-      if (h.newText.length) {
-        const pre = document.createElement("pre");
-        pre.className = "new";
-        pre.textContent = h.newText.map((l) => "+ " + l).join("\n");
-        box.append(pre);
-      }
-      this.body.append(box);
-    });
-  }
-
-  highlightHunk(idx: number): void {
-    this.body.querySelectorAll(".hunk.highlight").forEach((e) => e.classList.remove("highlight"));
-    const el = this.body.querySelector<HTMLElement>(`.hunk[data-idx="${idx}"]`);
-    if (el) {
-      el.classList.add("highlight");
-      el.scrollIntoView({ block: "nearest" });
-    }
   }
 
   // Render list of changed files with clickable rows.

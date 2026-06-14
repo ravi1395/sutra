@@ -1419,59 +1419,6 @@ button:hover {
   white-space: nowrap;
 }
 
-#diff-body {
-  flex: 1;
-  overflow: auto;
-  padding: 6px;
-}
-.hunk {
-  border: 1px solid var(--line-menu);
-  border-radius: var(--r-sm);
-  margin-bottom: 10px;
-  overflow: hidden;
-  background: var(--bg-1);
-}
-.hunk.highlight {
-  outline: 2px solid var(--em-dim);
-}
-.hunk-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 3px 8px;
-  background: var(--bg-3);
-  font-size: 11px;
-  color: var(--fg-dim);
-}
-.hunk-head .kind-modified {
-  color: var(--modified);
-}
-.hunk-head .kind-added {
-  color: var(--added);
-}
-.hunk-head .kind-deleted {
-  color: var(--deleted);
-}
-.hunk-revert {
-  padding: 2px 8px;
-  font-size: 11px;
-}
-.hunk pre {
-  margin: 0;
-  padding: 2px 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.hunk pre.old {
-  background: rgba(215, 78, 66, 0.14);
-  color: #e0a0a0;
-}
-.hunk pre.new {
-  background: rgba(60, 148, 255, 0.12);
-  color: #a9c7ff;
-}
 #diff-empty {
   color: var(--fg-dim);
   padding: 10px;
