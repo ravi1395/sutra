@@ -176,7 +176,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     );
   }
 
-  // Behavior section: session restore, agent tracking, autosave toggles, theme selector.
+  // Behavior section: session restore, agent tracking, autosave, light-mode toggles.
   function renderBehavior(): void {
     const s = deps.get();
     content.replaceChildren(
@@ -184,7 +184,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       row("Restore session on launch", toggle(s.restoreSession, (v) => patch({ restoreSession: v }))),
       row("AI agent tracking", toggle(s.agentTracking, (v) => patch({ agentTracking: v }))),
       row("Autosave on focus loss", toggle(s.autosaveOnBlur, (v) => patch({ autosaveOnBlur: v }))),
-      row("Theme", select(["ink", "washi"] as const, s.theme, (v) => v, (v) => patch({ theme: v }))),
+      row("Light mode", toggle(s.theme === "washi", (v) => patch({ theme: v ? "washi" : "ink" }))),
     );
   }
 
