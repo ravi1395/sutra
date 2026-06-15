@@ -2,7 +2,13 @@
 // handling, state transitions, and the initialized-gated launch sequence.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DapClient, type DapTransport } from "../src/debug";
+import {
+  DapClient,
+  detectAdapter,
+  requiresTrustPrompt,
+  breakpointStore,
+  type DapTransport,
+} from "../src/debug";
 
 class MockTransport implements DapTransport {
   sent: any[] = [];
@@ -75,4 +81,46 @@ test("config sequence fires on initialized event, not the launch response", asyn
   // setBreakpoints is gated on the initialized event, which only fires after initialize
   assert.ok(order.indexOf("setBreakpoints") > order.indexOf("initialize"));
   assert.ok(order.indexOf("configurationDone") > order.indexOf("setExceptionBreakpoints"));
+});
+
+test("detects codelldb from Cargo.toml (stdio, not from workspace)", () => {
+  const spec = detectAdapter(new Set(["Cargo.toml"]), "/usr/local/bin/codelldb");
+  assert.equal(spec?.type, "lldb");
+  assert.equal(spec?.transport.kind, "stdio");
+  assert.equal(spec?.fromWorkspace, false);
+});
+
+test("detects debugpy from pyproject.toml", () => {
+  const spec = detectAdapter(new Set(["pyproject.toml"]), null);
+  assert.equal(spec?.type, "python");
+  assert.deepEqual((spec?.transport as any).args, ["-m", "debugpy.adapter"]);
+});
+
+test("returns null when no signal matches", () => {
+  assert.equal(detectAdapter(new Set(["README.md"]), null), null);
+});
+
+test("workspace-sourced adapter command requires a trust prompt the first time", () => {
+  const spec = {
+    type: "custom",
+    transport: { kind: "stdio", command: "/repo/x", args: [] },
+    fromWorkspace: true,
+  } as const;
+  assert.equal(requiresTrustPrompt(spec, new Set(), "/repo"), true);
+  assert.equal(requiresTrustPrompt(spec, new Set(["/repo"]), "/repo"), false);
+});
+
+test("auto-detected (non-workspace) adapter never prompts", () => {
+  const spec = {
+    type: "lldb",
+    transport: { kind: "stdio", command: "codelldb", args: [] },
+    fromWorkspace: false,
+  } as const;
+  assert.equal(requiresTrustPrompt(spec, new Set(), "/repo"), false);
+});
+
+test("breakpointStore persists across sessions (module-level)", () => {
+  breakpointStore.set("/a.rs", [{ line: 10 }]);
+  assert.deepEqual(breakpointStore.get("/a.rs"), [{ line: 10 }]);
+  breakpointStore.delete("/a.rs");
 });

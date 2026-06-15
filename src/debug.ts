@@ -193,5 +193,57 @@ export function tauriTransport(sessionId: string): TauriTransport {
   };
 }
 
+export interface AdapterSpec {
+  type: string;
+  transport: Transport;
+  fromWorkspace: boolean; // true when command/port came from a .sutra/*.json file
+}
+
+// Module-level breakpoint store — independent of any active session, so BPs
+// persist across debug sessions (spec: gutter BPs survive stop/terminate).
+export const breakpointStore: BreakpointStore = new Map();
+
+// Workspace roots the user has approved adapter execution for, this run.
+const trustedRoots = new Set<string>();
+/** Record that the user approved running workspace-sourced adapters under `root`. */
+export function markTrusted(root: string) {
+  trustedRoots.add(root);
+}
+
+/**
+ * True when this adapter's command originates from a workspace file and the
+ * root hasn't been approved yet — caller must show a confirm dialog first.
+ * Built-in adapters resolved from PATH/extensions never prompt.
+ */
+export function requiresTrustPrompt(spec: AdapterSpec, trusted: Set<string>, root: string): boolean {
+  return spec.fromWorkspace && !trusted.has(root);
+}
+/** Convenience over the module-level trustedRoots set. */
+export const isTrusted = (spec: AdapterSpec, root: string) =>
+  !requiresTrustPrompt(spec, trustedRoots, root);
+
+/**
+ * Map present project-root files to a v1 stdio adapter. `codelldbPath` is the
+ * resolved codelldb binary (PATH or ~/.vscode/extensions) or null if missing.
+ * Returns null when no signal matches. Socket adapters (Java/Scala/Node) are
+ * post-v1 and intentionally not returned here.
+ */
+export function detectAdapter(signals: Set<string>, codelldbPath: string | null): AdapterSpec | null {
+  if (signals.has("Cargo.toml") && codelldbPath) {
+    return { type: "lldb", transport: { kind: "stdio", command: codelldbPath, args: [] }, fromWorkspace: false };
+  }
+  if (signals.has("requirements.txt") || signals.has("pyproject.toml")) {
+    return {
+      type: "python",
+      transport: { kind: "stdio", command: "python", args: ["-m", "debugpy.adapter"] },
+      fromWorkspace: false,
+    };
+  }
+  if (signals.has("go.mod")) {
+    return { type: "go", transport: { kind: "stdio", command: "dlv", args: ["dap"] }, fromWorkspace: false };
+  }
+  return null;
+}
+
 // Re-export backend hooks the launcher (main.ts) needs.
 export { debugStart, debugStop, type Transport };
