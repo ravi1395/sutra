@@ -47,3 +47,28 @@ export function hResizer(handle: HTMLElement, target: HTMLElement, opts: ResizeO
     document.body.style.cursor = "row-resize";
   });
 }
+
+export interface DebuggerSidebarSlot {
+  show: (content: HTMLElement) => void;
+  hide: () => void;
+}
+
+// Mounts a right-sidebar slot in `container`. Hidden (width 0) until show() is
+// called with the session sidebar; collapses back on hide() at session end.
+export function mountDebuggerSidebarSlot(container: HTMLElement): DebuggerSidebarSlot {
+  const slot = document.createElement("aside");
+  slot.className = "debugger-sidebar-slot";
+  slot.style.width = "0";
+  slot.style.overflow = "hidden";
+  container.append(slot);
+  return {
+    show(content) {
+      slot.replaceChildren(content);
+      slot.style.width = "320px";
+    },
+    hide() {
+      slot.replaceChildren();
+      slot.style.width = "0";
+    },
+  };
+}

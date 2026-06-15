@@ -170,3 +170,23 @@ export const searchDir = (
 // Clipboard wrappers over tauri-plugin-clipboard-manager.
 export const clipboardRead = (): Promise<string> => readText();
 export const clipboardWrite = (text: string): Promise<void> => writeText(text);
+
+// --- Debugger (DAP) ---
+// Transport selects how the Rust proxy reaches the adapter: spawn a process
+// (stdio) or connect to a listening port (socket).
+export type Transport =
+  | { kind: "stdio"; command: string; args: string[] }
+  | { kind: "socket"; host: string; port: number };
+
+export const debugStart = (sessionId: string, transport: Transport, cwd: string | null) =>
+  invoke<void>("debug_start", { sessionId, transport, cwd });
+export const debugSend = (sessionId: string, message: string) =>
+  invoke<void>("debug_send", { sessionId, message });
+export const debugStop = (sessionId: string) => invoke<void>("debug_stop", { sessionId });
+
+export interface DapEventPayload {
+  session_id: string;
+  message: string;
+}
+export const onDapEvent = (cb: (p: DapEventPayload) => void): Promise<UnlistenFn> =>
+  listen<DapEventPayload>("debug-dap-event", (e) => cb(e.payload));

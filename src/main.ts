@@ -17,9 +17,13 @@ import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
-import { vResizer, hResizer } from "./layout";
+import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
+import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
+import { DebugSession } from "./debug-session";
+import { detectAdapter, isTrusted, markTrusted, breakpointStore } from "./debug";
 import {
   agentTrackingPoll,
+  listDir,
   readFile,
   writeFile,
   fileMtime,
@@ -97,6 +101,43 @@ async function alertNative(msg: string): Promise<void> {
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("terminal-area"), $("main"));
+
+// --- Debugger session ---
+const debugSlot = mountDebuggerSidebarSlot($("main"));
+const debugSession = new DebugSession({
+  editor,
+  slot: debugSlot,
+  // Only adapters using runInTerminal (debugpy/node, post-v1) hit this; codelldb
+  // launches directly. Returning the terminal id is a best-effort pid stand-in.
+  runInTerminal: async (args) => {
+    const a = args as { args?: string[] };
+    const id = await terminals.runCommand((a.args ?? []).join(" ")).catch(() => null);
+    return typeof id === "number" ? id : 0;
+  },
+});
+// Gutter clicks toggle the persistent breakpoint store + push to the live session.
+setBreakpointToggleHandler((path, line) => debugSession.toggleBreakpoint(path, line));
+
+// Resolve the project's debug adapter and launch a session from the palette.
+async function startDebugging(): Promise<void> {
+  if (!currentRoot) return;
+  const root = currentRoot;
+  const entries = await listDir(root).catch(() => []);
+  const signals = new Set(entries.map((e) => e.name));
+  // codelldb is resolved on PATH by the Rust spawn; a spawn failure surfaces in the console.
+  const spec = detectAdapter(signals, "codelldb");
+  if (!spec) {
+    await message("No debug adapter detected for this project.", { title: "Sutra", kind: "warning" });
+    return;
+  }
+  if (!isTrusted(spec, root)) {
+    const cmd = spec.transport.kind === "stdio" ? spec.transport.command : "";
+    if (!window.confirm(`Run debug adapter from this workspace?\n${cmd}`)) return;
+    markTrusted(root);
+  }
+  const program = editor.active?.path ?? "";
+  await debugSession.start(spec, root, program);
+}
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
   $<HTMLInputElement>("search-input"),
@@ -209,6 +250,14 @@ editor.onActiveTabChanged = (tab) => {
   tree.setActive(tab?.path ?? null);
   renderBreadcrumb(tab?.path ?? null);
   renderWhisperBar();
+  // Repaint stored breakpoints in the gutter when a file becomes active.
+  if (tab?.path) {
+    const bps = breakpointStore.get(tab.path) ?? [];
+    editor.applyDebugEffects(
+      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: b.verified ?? false }))),
+      tab.path,
+    );
+  }
 };
 editor.onTabsChanged = () => {
   persistWorkspaceSession();
@@ -1202,6 +1251,8 @@ const paletteCommands: Command[] = [
     search.focus();
   }, shortcut: "⇧⌘F" },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
+  { id: "debug-start", title: "Debug: Start", run: () => void startDebugging() },
+  { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop() },
 ];
 
 function recentPaletteCommands(): Command[] {
