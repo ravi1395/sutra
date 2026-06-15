@@ -48,6 +48,7 @@ import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 import { marginEntries, type AiRange } from "./marginalia";
 import type { AgentChange } from "./ipc";
+import type { InlineHint } from "./debug-hints";
 
 export interface Tab {
   id: string;
@@ -197,6 +198,113 @@ const lensField = StateField.define<DecorationSet>({
         const pos = tr.state.doc.line(line).to;
         const widget = new LensWidget(e.value, e.value.onRevert);
         value = Decoration.set([Decoration.widget({ widget, block: true, side: 1 }).range(pos)]);
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+// --- Debugger decorations (mirror the diff gutter / lens pattern above) ---
+
+/** Rebuild the breakpoint gutter from the full set of marks (one effect, no paired dispatch). */
+export const setBreakpointMarks = StateEffect.define<readonly { line: number; verified: boolean }[]>();
+/** Highlight the paused line (1-based), or clear with null. */
+export const setPausedLine = StateEffect.define<number | null>();
+/** Render inline value hints on the given 1-based line, or clear with null. */
+export const setInlineHints = StateEffect.define<{ line: number; hints: readonly InlineHint[] } | null>();
+
+// Module-level callback so the breakpoint gutter (created per-editor) can report
+// a toggle to the session layer (main.ts) without editor.ts importing the store.
+let onBreakpointToggle: ((path: string, line: number, view: EditorView) => void) | undefined;
+/** Wire the breakpoint-toggle handler (main.ts owns the persistent store). */
+export function setBreakpointToggleHandler(fn: (path: string, line: number, view: EditorView) => void) {
+  onBreakpointToggle = fn;
+}
+
+class BpMarker extends GutterMarker {
+  constructor(private verified: boolean) {
+    super();
+  }
+  toDOM(): Node {
+    const el = document.createElement("span");
+    el.textContent = this.verified ? "●" : "◌";
+    el.className = this.verified ? "cm-bp cm-bp-verified" : "cm-bp cm-bp-unverified";
+    return el;
+  }
+}
+
+const bpField = StateField.define<RangeSet<GutterMarker>>({
+  create: () => RangeSet.empty,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setBreakpointMarks)) {
+        const builder = new RangeSetBuilder<GutterMarker>();
+        const doc = tr.state.doc;
+        for (const m of [...e.value].sort((a, b) => a.line - b.line)) {
+          if (m.line < 1 || m.line > doc.lines) continue;
+          const from = doc.line(m.line).from;
+          builder.add(from, from, new BpMarker(m.verified));
+        }
+        value = builder.finish();
+      }
+    }
+    return value;
+  },
+});
+
+const pausedLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setPausedLine)) {
+        if (e.value == null || e.value < 1 || e.value > tr.state.doc.lines) {
+          value = Decoration.none;
+        } else {
+          const from = tr.state.doc.line(e.value).from;
+          value = Decoration.set([Decoration.line({ class: "cm-paused-line" }).range(from)]);
+        }
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+class HintWidget extends WidgetType {
+  constructor(private text: string) {
+    super();
+  }
+  eq(other: HintWidget): boolean {
+    return other.text === this.text;
+  }
+  toDOM(): HTMLElement {
+    const el = document.createElement("span");
+    el.className = "cm-inline-hint";
+    el.textContent = ` ${this.text}`;
+    return el;
+  }
+}
+
+const inlineHintField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setInlineHints)) {
+        if (e.value == null || e.value.line < 1 || e.value.line > tr.state.doc.lines) {
+          value = Decoration.none;
+        } else {
+          const lineStart = tr.state.doc.line(e.value.line).from;
+          const ranges = e.value.hints.map((h) =>
+            Decoration.widget({ widget: new HintWidget(`${h.name}=${h.value}`), side: 1 }).range(
+              lineStart + h.col,
+            ),
+          );
+          value = Decoration.set(ranges, true);
+        }
       }
     }
     return value;
@@ -432,6 +540,21 @@ export class Pane {
       editorThemeCompartment.of(cmThreadTheme()),
       diffField,
       lensField,
+      bpField,
+      pausedLineField,
+      inlineHintField,
+      gutter({
+        class: "cm-bp-gutter",
+        markers: (view) => view.state.field(bpField),
+        domEventHandlers: {
+          mousedown: (view, line) => {
+            const lineNo = view.state.doc.lineAt(line.from).number;
+            const path = this.active?.path;
+            if (path) onBreakpointToggle?.(path, lineNo, view);
+            return true;
+          },
+        },
+      }),
       gutter({
         class: "cm-diff-gutter",
         markers: (view) => view.state.field(diffField),

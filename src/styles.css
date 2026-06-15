@@ -2462,3 +2462,10 @@ button:hover {
   cursor: pointer;
 }
 .settings-reset:hover { border-color: var(--deleted); color: var(--deleted); }
+
+/* Debugger: breakpoint gutter, paused line, inline value hints */
+.cm-bp-gutter { width: 14px; cursor: pointer; }
+.cm-bp-verified { color: #e51400; }
+.cm-bp-unverified { color: rgba(229, 20, 0, 0.4); }
+.cm-paused-line { background: rgba(255, 221, 0, 0.18); }
+.cm-inline-hint { color: #4ec9b0; font-style: italic; opacity: 0.8; }
