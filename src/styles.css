@@ -2469,3 +2469,15 @@ button:hover {
 .cm-bp-unverified { color: rgba(229, 20, 0, 0.4); }
 .cm-paused-line { background: rgba(255, 221, 0, 0.18); }
 .cm-inline-hint { color: #4ec9b0; font-style: italic; opacity: 0.8; }
+
+/* Debugger sidebar slot + panels */
+.debugger-sidebar-slot { transition: width 0.15s ease; border-left: 1px solid var(--border, #2a2a2a); }
+.debugger-sidebar { display: flex; flex-direction: column; height: 100%; overflow: auto; font-size: 12px; }
+.dbg-panel { border-bottom: 1px solid var(--border, #2a2a2a); padding: 6px 8px; }
+.dbg-panel h3 { font-size: 11px; text-transform: uppercase; opacity: 0.7; margin: 0 0 4px; }
+.dbg-list { list-style: none; margin: 0; padding: 0; }
+.dbg-list li { padding: 2px 0; }
+.dbg-list li.expandable, .dbg-frame { cursor: pointer; }
+.dbg-watch-rm { float: right; background: none; border: none; cursor: pointer; opacity: 0.6; }
+.dbg-watch-add { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; }
+.dbg-console { font-family: var(--mono, monospace); white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 0; }

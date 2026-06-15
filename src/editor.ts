@@ -619,6 +619,27 @@ export class Pane {
     });
   }
 
+  /** Dispatch debugger CM effects (breakpoint marks, paused line, inline hints) to this pane. */
+  dispatchDebugEffects(effects: StateEffect<unknown> | readonly StateEffect<unknown>[]): void {
+    this.view.dispatch({ effects });
+  }
+
+  /** Scroll to and place the cursor on a 1-based line (debugger frame jump / stop). */
+  revealLine(line: number): void {
+    const doc = this.view.state.doc;
+    if (line < 1 || line > doc.lines) return;
+    const pos = doc.line(line).from;
+    this.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    this.view.focus();
+  }
+
+  /** Source text of a 1-based line, or null when out of range (debugger inline hints). */
+  lineText(line: number): string | null {
+    const doc = this.view.state.doc;
+    if (line < 1 || line > doc.lines) return null;
+    return doc.line(line).text;
+  }
+
   openLens(hunkIndex: number): void {
     if (!this.active) return;
     const hunk = this.active.hunks[hunkIndex];
@@ -983,6 +1004,26 @@ export class EditorManager {
 
   applyEditorTheme(): void {
     for (const p of this.panes) p.applyEditorTheme();
+  }
+
+  /** Apply debugger CM effects to the pane showing `path`, else the focused pane. */
+  applyDebugEffects(
+    effects: StateEffect<unknown> | readonly StateEffect<unknown>[],
+    path?: string,
+  ): void {
+    const target = (path && this.panes.find((p) => p.active?.path === path)) || this.focused;
+    target.dispatchDebugEffects(effects);
+  }
+
+  /** Open a file and reveal a 1-based line — used on debug stop and frame selection. */
+  async revealAt(path: string, line: number): Promise<void> {
+    await this.openFile(path);
+    this.focused.revealLine(line);
+  }
+
+  /** Source text of a 1-based line in the focused pane (debugger inline hints). */
+  focusedLineText(line: number): string | null {
+    return this.focused.lineText(line);
   }
 
   setFocused(pane: Pane): void {
