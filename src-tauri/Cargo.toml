@@ -3,6 +3,7 @@ name = "sutra"
 version = "1.0.0"
 description = "Sutra — minimal Rust + Tauri code editor"
 authors = ["ravi1395"]
+license = "Apache-2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

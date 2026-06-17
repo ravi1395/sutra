@@ -356,3 +356,7 @@ correct.
 - MCP `render_html` executes agent-supplied scripts inside a separate
   `127.0.0.1:<port>` iframe origin — isolated from Tauri IPC (no `fs`/`pty`
   access), but it is not sandboxed against network/DOM within that iframe.
+
+## License
+
+Sutra is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
