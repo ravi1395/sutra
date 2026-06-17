@@ -1,7 +1,8 @@
 // File tree with VS Code-style compact folders. Single-subfolder chains arrive
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
-import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry } from "./ipc";
+// Also exports OutlineView for the Files/Outline sidebar toggle.
+import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
 import { showContextMenu } from "./contextmenu";
 import {
   FILE_DRAG_TYPE,
@@ -549,4 +550,178 @@ export class FileTree {
 
 function cssEscape(s: string): string {
   return s.replace(/["\\]/g, "\\$&");
+}
+
+// ---------------------------------------------------------------------------
+// Outline view: toggleable sidebar panel showing DocumentSymbol tree.
+// Reuses the same tree-row/tree-icon/tree-label CSS classes as FileTree.
+// ---------------------------------------------------------------------------
+
+/**
+ * Outline sidebar view — renders the DocumentSymbol tree for the active file.
+ * Handles the Files/Outline toggle and delegates navigation to the editor.
+ */
+export class OutlineView {
+  private toggleBar: HTMLElement;
+  private contentEl: HTMLElement;
+  private filesBtn: HTMLButtonElement;
+  private outlineBtn: HTMLButtonElement;
+  private mode: "files" | "outline" = "files";
+  private symbols: DocumentSymbol[] = [];
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Callback: navigate editor to a symbol's selection range start line (1-based). */
+  onRevealLine?: (path: string, line: number) => void;
+
+  constructor(
+    _sidebarEl: HTMLElement,
+    private treeEl: HTMLElement,
+    private getActivePath: () => string | null,
+    private fetchSymbols: () => Promise<DocumentSymbol[] | null>,
+  ) {
+    // Build a toggle bar above the existing tree container.
+    this.toggleBar = document.createElement("div");
+    this.toggleBar.className = "outline-toggle-bar";
+
+    this.filesBtn = document.createElement("button");
+    this.filesBtn.className = "outline-tab active";
+    this.filesBtn.textContent = "Files";
+    this.filesBtn.onclick = () => this.setMode("files");
+
+    this.outlineBtn = document.createElement("button");
+    this.outlineBtn.className = "outline-tab";
+    this.outlineBtn.textContent = "Outline";
+    this.outlineBtn.onclick = () => this.setMode("outline");
+
+    this.toggleBar.append(this.filesBtn, this.outlineBtn);
+
+    // Outline content area (sits alongside treeEl, shown/hidden by mode).
+    this.contentEl = document.createElement("div");
+    this.contentEl.className = "outline-content hidden";
+
+    // Insert toggle bar before the tree, then the outline panel after.
+    treeEl.before(this.toggleBar);
+    treeEl.after(this.contentEl);
+  }
+
+  /** Switch between "files" and "outline" modes. */
+  setMode(mode: "files" | "outline"): void {
+    this.mode = mode;
+    this.filesBtn.classList.toggle("active", mode === "files");
+    this.outlineBtn.classList.toggle("active", mode === "outline");
+    this.treeEl.classList.toggle("hidden", mode === "outline");
+    this.contentEl.classList.toggle("hidden", mode === "files");
+    if (mode === "outline") void this.refresh();
+  }
+
+  /** Notify the outline that the active file changed; refresh if visible. */
+  onActiveFileChanged(): void {
+    if (this.mode === "outline") void this.refresh();
+  }
+
+  /** Debounce outline refresh after doc changes (called from editor update listener). */
+  scheduleRefresh(): void {
+    if (this.mode !== "outline") return;
+    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.refresh();
+    }, 300);
+  }
+
+  /** Fetch and re-render the outline for the active file. */
+  async refresh(): Promise<void> {
+    const syms = await this.fetchSymbols();
+    this.symbols = syms ?? [];
+    this.render();
+  }
+
+  /** Render the symbol list into the outline content element. */
+  private render(): void {
+    this.contentEl.innerHTML = "";
+    if (this.symbols.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "outline-empty";
+      empty.textContent = "No symbols";
+      this.contentEl.appendChild(empty);
+      return;
+    }
+    const path = this.getActivePath();
+    this.renderSymbols(this.symbols, 0, path);
+  }
+
+  /** Recursively render a DocumentSymbol[] array at the given indentation depth. */
+  private renderSymbols(symbols: DocumentSymbol[], depth: number, path: string | null): void {
+    for (const sym of symbols) {
+      const row = this.makeSymbolRow(sym, depth, path);
+      this.contentEl.appendChild(row);
+      if (sym.children.length > 0) {
+        this.renderSymbols(sym.children, depth + 1, path);
+      }
+    }
+  }
+
+  /** Build a single tree-row element for a DocumentSymbol. */
+  private makeSymbolRow(sym: DocumentSymbol, depth: number, path: string | null): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "tree-row file outline-row";
+    row.style.paddingLeft = `${depth * 12 + 14}px`;
+
+    const meta = symbolMeta(sym.kind);
+    const icon = document.createElement("span");
+    icon.className = `tree-icon ${meta.className}`;
+    icon.textContent = meta.icon;
+
+    const label = document.createElement("span");
+    label.className = "tree-label";
+    label.textContent = sym.name;
+
+    const badge = document.createElement("span");
+    badge.className = "outline-kind-badge";
+    badge.textContent = sym.kind;
+
+    row.append(icon, label, badge);
+
+    row.onclick = () => {
+      if (path) {
+        const line = sym.selectionRange.start.line + 1;
+        this.onRevealLine?.(path, line);
+      }
+    };
+
+    return row;
+  }
+}
+
+/** Map a DocumentSymbol kind string to a tree icon/class pair for the outline. */
+function symbolMeta(kind: string): { icon: string; className: string } {
+  switch (kind) {
+    case "function":
+    case "method":
+      return { icon: "fn", className: "type-js" };
+    case "class":
+    case "struct":
+    case "interface":
+      return { icon: "cls", className: "type-ts" };
+    case "variable":
+    case "const":
+    case "let":
+      return { icon: "var", className: "type-file" };
+    case "module":
+    case "namespace":
+      return { icon: "mod", className: "type-folder" };
+    case "enum":
+    case "enumMember":
+      return { icon: "enm", className: "type-json" };
+    case "field":
+    case "property":
+      return { icon: "fld", className: "type-css" };
+    case "constructor":
+      return { icon: "ctr", className: "type-rs" };
+    case "type":
+    case "typeAlias":
+      return { icon: "typ", className: "type-ts" };
+    default:
+      return { icon: "sym", className: "type-file" };
+  }
 }
