@@ -1,11 +1,11 @@
-<!-- Sutra brand sheet: every logo variant on the dark-ink and washi-light grounds.
-     Preview/reference only — not shipped in the app bundle. -->
+<!-- Sutra brand sheet: the eternal-knot logo in every variant, on the dark-ink and
+     washi-light grounds. Preview/reference only — not shipped in the app bundle. -->
 <svg width="900" height="520" viewBox="0 0 900 520" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="th" x1="44" y1="14" x2="20" y2="50" gradientUnits="userSpaceOnUse">
+    <linearGradient id="k" x1="13" y1="13" x2="52" y2="52" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#6ef0ad"/><stop offset="1" stop-color="#1f8a63"/>
     </linearGradient>
-    <linearGradient id="thL" x1="44" y1="14" x2="20" y2="50" gradientUnits="userSpaceOnUse">
+    <linearGradient id="kL" x1="13" y1="13" x2="52" y2="52" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#15a06f"/><stop offset="1" stop-color="#0c6b4a"/>
     </linearGradient>
     <linearGradient id="tileBg" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
@@ -13,53 +13,48 @@
     </linearGradient>
   </defs>
 
+  <!-- knot path reused via <use> -->
+  <defs>
+    <path id="knot" d="M20 13 H32 A7 7 0 0 1 39 20 V32 A7 7 0 0 1 32 39 H30 M22 39 H20 A7 7 0 0 1 13 32 V20 A7 7 0 0 1 20 13 M33 26 H35 M43 26 H45 A7 7 0 0 1 52 33 V45 A7 7 0 0 1 45 52 H33 A7 7 0 0 1 26 45 V33 A7 7 0 0 1 33 26"/>
+  </defs>
+
   <!-- ===== dark half ===== -->
   <rect x="0" y="0" width="900" height="300" fill="#101311"/>
   <text x="40" y="44" font-family="Instrument Sans, system-ui, sans-serif" font-size="13" letter-spacing="2" fill="#565c54">DARK · INK</text>
 
   <!-- mark -->
-  <g transform="translate(40,72) scale(2)">
-    <path d="M44 16 C30 11 23 24 32 32 C41 40 34 53 20 48" stroke="url(#th)" stroke-width="5.5" stroke-linecap="round"/>
-    <circle cx="44" cy="16" r="5" fill="#6ef0ad"/><circle cx="20" cy="48" r="5" fill="#1f8a63"/>
-  </g>
+  <g transform="translate(40,70) scale(2)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
 
   <!-- tile -->
   <g transform="translate(210,76) scale(0.45)">
     <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tileBg)" stroke="rgba(255,255,255,0.06)" stroke-width="1.5"/>
-    <path d="M176 64 C120 44 92 96 128 128 C164 160 136 212 80 192" stroke="url(#th)" stroke-width="22" stroke-linecap="round"/>
-    <circle cx="176" cy="64" r="20" fill="#6ef0ad"/><circle cx="80" cy="192" r="20" fill="#1f8a63"/>
+    <g transform="translate(28,28) scale(3.125)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
   </g>
 
   <!-- wordmark -->
-  <g transform="translate(360,120)">
-    <g transform="translate(0,0)">
-      <path d="M58 22 C42 16.5 34 31 44 40 C54 49 46 64 30 58.5" stroke="url(#th)" stroke-width="6" stroke-linecap="round"/>
-      <circle cx="58" cy="22" r="5.5" fill="#6ef0ad"/><circle cx="30" cy="58.5" r="5.5" fill="#1f8a63"/>
-    </g>
-    <text x="86" y="42" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="44" fill="#4ade93">sutra</text>
-    <text x="88" y="66" font-family="Noto Sans Devanagari, system-ui, sans-serif" font-size="17" letter-spacing="2" fill="#8b9189">सूत्र</text>
+  <g transform="translate(360,116)">
+    <g transform="translate(0,2) scale(0.95)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <text x="84" y="42" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="44" fill="#4ade93">sutra</text>
+    <text x="86" y="66" font-family="Noto Sans Devanagari, system-ui, sans-serif" font-size="17" letter-spacing="2" fill="#8b9189">सूत्र</text>
   </g>
 
-  <!-- small sizes -->
+  <!-- favicon scale -->
   <g transform="translate(44,212)">
     <text x="0" y="0" font-family="Instrument Sans, system-ui, sans-serif" font-size="11" letter-spacing="1.5" fill="#565c54">FAVICON SCALE</text>
-    <g transform="translate(0,12) scale(0.66)"><path d="M44 16 C30 11 23 24 32 32 C41 40 34 53 20 48" stroke="url(#th)" stroke-width="5.5" stroke-linecap="round"/><circle cx="44" cy="16" r="5" fill="#6ef0ad"/><circle cx="20" cy="48" r="5" fill="#1f8a63"/></g>
-    <g transform="translate(62,24) scale(0.42)"><path d="M44 16 C30 11 23 24 32 32 C41 40 34 53 20 48" stroke="url(#th)" stroke-width="5.5" stroke-linecap="round"/><circle cx="44" cy="16" r="5" fill="#6ef0ad"/><circle cx="20" cy="48" r="5" fill="#1f8a63"/></g>
-    <g transform="translate(100,34) scale(0.26)"><path d="M44 16 C30 11 23 24 32 32 C41 40 34 53 20 48" stroke="url(#th)" stroke-width="5.5" stroke-linecap="round"/><circle cx="44" cy="16" r="5" fill="#6ef0ad"/><circle cx="20" cy="48" r="5" fill="#1f8a63"/></g>
+    <g transform="translate(0,10) scale(0.66)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g transform="translate(60,18) scale(0.42)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g transform="translate(100,28) scale(0.26)"><use href="#knot" stroke="url(#k)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
   </g>
 
   <!-- ===== light half ===== -->
   <rect x="0" y="300" width="900" height="220" fill="#f5f2eb"/>
   <text x="40" y="340" font-family="Instrument Sans, system-ui, sans-serif" font-size="13" letter-spacing="2" fill="#9c988a">LIGHT · WASHI</text>
 
-  <g transform="translate(40,360) scale(1.6)">
-    <path d="M44 16 C30 11 23 24 32 32 C41 40 34 53 20 48" stroke="url(#thL)" stroke-width="5.5" stroke-linecap="round"/>
-    <circle cx="44" cy="16" r="5" fill="#15a06f"/><circle cx="20" cy="48" r="5" fill="#0c6b4a"/>
-  </g>
+  <g transform="translate(40,356) scale(1.6)"><use href="#knot" stroke="url(#kL)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
 
-  <g transform="translate(220,392)">
-    <g><path d="M58 22 C42 16.5 34 31 44 40 C54 49 46 64 30 58.5" stroke="url(#thL)" stroke-width="6" stroke-linecap="round"/><circle cx="58" cy="22" r="5.5" fill="#15a06f"/><circle cx="30" cy="58.5" r="5.5" fill="#0c6b4a"/></g>
-    <text x="86" y="42" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="44" fill="#0f8a5f">sutra</text>
-    <text x="88" y="66" font-family="Noto Sans Devanagari, system-ui, sans-serif" font-size="17" letter-spacing="2" fill="#6e7268">सूत्र</text>
+  <g transform="translate(220,388)">
+    <g transform="translate(0,2) scale(0.95)"><use href="#knot" stroke="url(#kL)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <text x="84" y="42" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="44" fill="#0f8a5f">sutra</text>
+    <text x="86" y="66" font-family="Noto Sans Devanagari, system-ui, sans-serif" font-size="17" letter-spacing="2" fill="#6e7268">सूत्र</text>
   </g>
 </svg>

@@ -60,8 +60,8 @@ const paths: Record<IconName, string> = {
   compress: '<path d="M4 14h6v6M20 10h-6V4M10 14 3 21M21 3l-7 7"/>',
   bolt: '<path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H13L13 2z"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-  // Sutra brand mark: a thread tracing an "S" strung with a bead at each end.
-  brandMark: '<path d="M16.5 6C11 4.3 9 9 12 12c3 3 1 7.7-4.5 6"/><circle cx="16.5" cy="6" r="1.6"/><circle cx="7.5" cy="18" r="1.6"/>',
+  // Sutra brand mark: an eternal knot — two loops woven over-and-under.
+  brandMark: '<path d="M7.5 5 H12.5 A2.5 2.5 0 0 1 15 7.5 V12.5 A2.5 2.5 0 0 1 12.5 15 H11.6 M8.4 15 H7.5 A2.5 2.5 0 0 1 5 12.5 V7.5 A2.5 2.5 0 0 1 7.5 5 M11.5 9 H13.4 A2.5 2.5 0 0 1 19 11.5 V16.5 A2.5 2.5 0 0 1 16.5 19 H11.5 A2.5 2.5 0 0 1 9 16.5 V11.5 A2.5 2.5 0 0 1 11.5 9"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {
