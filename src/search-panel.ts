@@ -1,5 +1,5 @@
-import type { EditorView, Panel } from "@codemirror/view";
-import type { ViewUpdate } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
+import type { Panel, ViewUpdate } from "@codemirror/view";
 import {
   SearchQuery,
   getSearchQuery,
@@ -14,6 +14,12 @@ import {
 import { icon } from "./icons";
 
 const MAX_MATCHES = 1000;
+
+/** Run a find command, then vertically center the landed match in the viewport. */
+function findCentered(view: EditorView, find: (v: EditorView) => boolean): void {
+  if (!find(view)) return; // no match moved → nothing to center
+  view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.from, { y: "center" }) });
+}
 
 function btn(text: string, title: string, cls = "sf-btn"): HTMLButtonElement {
   const b = document.createElement("button");
@@ -139,7 +145,7 @@ export function buildSearchPanel(view: EditorView): Panel {
   findInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      e.shiftKey ? findPrevious(view) : findNext(view);
+      findCentered(view, e.shiftKey ? findPrevious : findNext);
     } else if (e.key === "Escape") {
       closeSearchPanel(view);
       view.focus();
@@ -153,8 +159,8 @@ export function buildSearchPanel(view: EditorView): Panel {
     }
   });
 
-  nextBtn.addEventListener("click", () => findNext(view));
-  prevBtn.addEventListener("click", () => findPrevious(view));
+  nextBtn.addEventListener("click", () => findCentered(view, findNext));
+  prevBtn.addEventListener("click", () => findCentered(view, findPrevious));
   allBtn.addEventListener("click", () => selectMatches(view));
   closeBtn.addEventListener("click", () => {
     closeSearchPanel(view);

@@ -16,12 +16,12 @@
           <div id="breadcrumb"></div>
         </div>
         <div class="spacer"></div>
-        <div id="automations"></div>
+        <button id="btn-palette" title="Palette (⌘K)" aria-label="Command palette"></button>
         <div id="view-tools">
           <button id="btn-term" class="glyph on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
           <button id="btn-diff" class="glyph" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
           <button id="btn-browser" class="glyph" title="Toggle browser" aria-label="Toggle browser"></button>
-          <button id="btn-palette" class="glyph" title="Palette (⌘K)" aria-label="Command palette"></button>
+          <div id="automations"></div>
           <button id="btn-menu" class="glyph" title="Menu" aria-label="Application menu"></button>
         </div>
         <div id="menubar-host" class="hidden"></div>
@@ -32,6 +32,9 @@
           <div id="sidebar-header">
             <button id="branch-whisper" class="whisper-btn" aria-label="Branch menu"></button>
             <div class="sidebar-actions">
+              <button id="btn-new-file" class="sbtn" title="New File" aria-label="New File"></button>
+              <button id="btn-new-folder" class="sbtn" title="New Folder" aria-label="New Folder"></button>
+              <button id="btn-close-all-editors" class="sbtn" title="Close All Editors" aria-label="Close All Editors"></button>
               <button id="btn-search-toggle" class="sbtn" title="Search folder (⇧⌘F)" aria-label="Search folder"></button>
               <button id="btn-refresh" class="sbtn reveal" title="Refresh folder" aria-label="Refresh folder"></button>
             </div>
@@ -57,7 +60,6 @@
                 <button id="diff-close" title="Close">×</button>
               </div>
               <div id="diff-files"></div>
-              <div id="diff-body"></div>
             </div>
             <div id="browser-resizer" class="resizer-v hidden" data-target="browser-area"></div>
             <div id="browser-area" class="hidden">

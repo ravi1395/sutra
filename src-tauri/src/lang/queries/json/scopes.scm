@@ -1,0 +1,2 @@
+(document) @scope
+(object) @scope

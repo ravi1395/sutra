@@ -134,6 +134,10 @@ export interface AutomationBarActions {
   stop?: () => void;
   /** Open the create-automation panel (the "＋ New automation…" row). */
   openCreate(): void;
+  /** Open the edit panel prefilled with `a` (pencil affordance on an idle row). */
+  edit(a: Automation): void;
+  /** Delete `a` after caller confirmation (trash affordance on an idle row). */
+  remove(a: Automation): void;
 }
 
 export interface AutomationBarHandle {
@@ -239,6 +243,22 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
             el.appendChild(status);
           }
           el.onclick = () => { closeDropdown(); const a = list.find(x => x.id === row.id); if (a) wrappedRun(a); };
+
+          // Hover affordances: edit + delete (stop row click from also running it).
+          const tools = document.createElement("span");
+          tools.className = "menu-row-tools";
+          const editBtn = document.createElement("span");
+          editBtn.className = "menu-row-tool";
+          editBtn.innerHTML = icon("pencil", 13);
+          editBtn.title = "Edit";
+          editBtn.onclick = (e) => { e.stopPropagation(); closeDropdown(); const a = list.find(x => x.id === row.id); if (a) actions.edit(a); };
+          const delBtn = document.createElement("span");
+          delBtn.className = "menu-row-tool danger";
+          delBtn.innerHTML = icon("trash", 13);
+          delBtn.title = "Delete";
+          delBtn.onclick = (e) => { e.stopPropagation(); closeDropdown(); const a = list.find(x => x.id === row.id); if (a) actions.remove(a); };
+          tools.append(editBtn, delBtn);
+          el.appendChild(tools);
         }
 
         dd.appendChild(el);
@@ -262,7 +282,7 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
     plusIco.innerHTML = icon("plus", 13);
     editRow.appendChild(plusIco);
     const editLabel = document.createElement("span");
-    editLabel.textContent = "edit automations…";
+    editLabel.textContent = "New automation…";
     editRow.appendChild(editLabel);
     editRow.onclick = () => { closeDropdown(); actions.openCreate(); };
     dd.appendChild(editRow);

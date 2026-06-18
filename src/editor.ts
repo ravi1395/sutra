@@ -40,14 +40,17 @@ import { sql } from "@codemirror/lang-sql";
 import { go } from "@codemirror/lang-go";
 import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
-import { readFile, gitHeadContent, fileMtime } from "./ipc";
+import { readFile, gitHeadContent, fileMtime, langDidOpen, langDidChange, langDidClose } from "./ipc";
 import { previewServerUrl } from "./ipc";
+import { langAutocompletionExt, langHoverTooltipExt, gotoDefinition } from "./lang";
+import { langDocumentSymbols, type DocumentSymbol } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, lensModel, type Hunk, type LensModel, type LineMark } from "./diff";
 import { parseConflicts, resolveConflictAtIndex, type ConflictChoice } from "./conflict";
 import { beginSplitPointerDrag } from "./split-drop";
 import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 import { marginEntries, type AiRange } from "./marginalia";
 import type { AgentChange } from "./ipc";
+import type { InlineHint } from "./debug-hints";
 
 export interface Tab {
   id: string;
@@ -197,6 +200,113 @@ const lensField = StateField.define<DecorationSet>({
         const pos = tr.state.doc.line(line).to;
         const widget = new LensWidget(e.value, e.value.onRevert);
         value = Decoration.set([Decoration.widget({ widget, block: true, side: 1 }).range(pos)]);
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+// --- Debugger decorations (mirror the diff gutter / lens pattern above) ---
+
+/** Rebuild the breakpoint gutter from the full set of marks (one effect, no paired dispatch). */
+export const setBreakpointMarks = StateEffect.define<readonly { line: number; verified: boolean }[]>();
+/** Highlight the paused line (1-based), or clear with null. */
+export const setPausedLine = StateEffect.define<number | null>();
+/** Render inline value hints on the given 1-based line, or clear with null. */
+export const setInlineHints = StateEffect.define<{ line: number; hints: readonly InlineHint[] } | null>();
+
+// Module-level callback so the breakpoint gutter (created per-editor) can report
+// a toggle to the session layer (main.ts) without editor.ts importing the store.
+let onBreakpointToggle: ((path: string, line: number, view: EditorView) => void) | undefined;
+/** Wire the breakpoint-toggle handler (main.ts owns the persistent store). */
+export function setBreakpointToggleHandler(fn: (path: string, line: number, view: EditorView) => void) {
+  onBreakpointToggle = fn;
+}
+
+class BpMarker extends GutterMarker {
+  constructor(private verified: boolean) {
+    super();
+  }
+  toDOM(): Node {
+    const el = document.createElement("span");
+    el.textContent = this.verified ? "●" : "◌";
+    el.className = this.verified ? "cm-bp cm-bp-verified" : "cm-bp cm-bp-unverified";
+    return el;
+  }
+}
+
+const bpField = StateField.define<RangeSet<GutterMarker>>({
+  create: () => RangeSet.empty,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setBreakpointMarks)) {
+        const builder = new RangeSetBuilder<GutterMarker>();
+        const doc = tr.state.doc;
+        for (const m of [...e.value].sort((a, b) => a.line - b.line)) {
+          if (m.line < 1 || m.line > doc.lines) continue;
+          const from = doc.line(m.line).from;
+          builder.add(from, from, new BpMarker(m.verified));
+        }
+        value = builder.finish();
+      }
+    }
+    return value;
+  },
+});
+
+const pausedLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setPausedLine)) {
+        if (e.value == null || e.value < 1 || e.value > tr.state.doc.lines) {
+          value = Decoration.none;
+        } else {
+          const from = tr.state.doc.line(e.value).from;
+          value = Decoration.set([Decoration.line({ class: "cm-paused-line" }).range(from)]);
+        }
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+class HintWidget extends WidgetType {
+  constructor(private text: string) {
+    super();
+  }
+  eq(other: HintWidget): boolean {
+    return other.text === this.text;
+  }
+  toDOM(): HTMLElement {
+    const el = document.createElement("span");
+    el.className = "cm-inline-hint";
+    el.textContent = ` ${this.text}`;
+    return el;
+  }
+}
+
+const inlineHintField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setInlineHints)) {
+        if (e.value == null || e.value.line < 1 || e.value.line > tr.state.doc.lines) {
+          value = Decoration.none;
+        } else {
+          const lineStart = tr.state.doc.line(e.value.line).from;
+          const ranges = e.value.hints.map((h) =>
+            Decoration.widget({ widget: new HintWidget(`${h.name}=${h.value}`), side: 1 }).range(
+              lineStart + h.col,
+            ),
+          );
+          value = Decoration.set(ranges, true);
+        }
       }
     }
     return value;
@@ -361,6 +471,9 @@ export class Pane {
   private languageCompartment = new Compartment();
   private indentCompartment = new Compartment();
   private wrapCompartment = new Compartment();
+  // Per-tab monotonic version counter and debounce timer for lang_did_change.
+  private langVersions = new Map<string, number>();
+  private langTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private mgr: EditorManager,
@@ -412,16 +525,38 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners and the CM view when the pane is removed. */
+  /** Release document-level listeners, the pending lang debounce, and the CM view. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
+  }
+
+  /** Debounce lang_did_change so typing doesn't flood the engine; fires after 200 ms. */
+  scheduleLangChange(): void {
+    if (!this.active?.path) return;
+    if (this.langTimer !== null) clearTimeout(this.langTimer);
+    const path = this.active.path;
+    const text = this.view.state.doc.toString();
+    this.langTimer = setTimeout(() => {
+      this.langTimer = null;
+      const prev = this.langVersions.get(path) ?? 0;
+      const version = prev + 1;
+      this.langVersions.set(path, version);
+      langDidChange(path, text, version).catch(() => {});
+    }, 200);
+  }
+
+  /** Notify the engine that a tab was closed and clean up its version counter. */
+  notifyLangClose(path: string): void {
+    this.langVersions.delete(path);
+    langDidClose(path).catch(() => {});
   }
 
   private onOutsideLensMouseDown = (event: MouseEvent): void => {
     if (this.activeLensIndex == null) return;
     const target = event.target as Element | null;
-    if (target?.closest(".lens,.margin-pill")) return;
+    if (target?.closest(".lens")) return;
     this.closeLens();
   };
 
@@ -432,6 +567,21 @@ export class Pane {
       editorThemeCompartment.of(cmThreadTheme()),
       diffField,
       lensField,
+      bpField,
+      pausedLineField,
+      inlineHintField,
+      gutter({
+        class: "cm-bp-gutter",
+        markers: (view) => view.state.field(bpField),
+        domEventHandlers: {
+          mousedown: (view, line) => {
+            const lineNo = view.state.doc.lineAt(line.from).number;
+            const path = this.active?.path;
+            if (path) onBreakpointToggle?.(path, lineNo, view);
+            return true;
+          },
+        },
+      }),
       gutter({
         class: "cm-diff-gutter",
         markers: (view) => view.state.field(diffField),
@@ -440,7 +590,10 @@ export class Pane {
             const lineNo = view.state.doc.lineAt(line.from).number - 1;
             if (this.active) {
               const idx = hunkIndexAtLine(this.active.hunks, lineNo);
-              if (idx >= 0) this.mgr.onGutterClick?.(idx);
+              if (idx >= 0) {
+                this.mgr.setFocused(this);
+                this.openLens(idx);
+              }
             }
             return false;
           },
@@ -449,6 +602,9 @@ export class Pane {
       this.languageCompartment.of(detectLanguage(name) ?? []),
       this.indentCompartment.of(indentSettings(this.mgr.indentSize)),
       this.wrapCompartment.of(this.mgr.wordWrap ? EditorView.lineWrapping : []),
+      // Language-intelligence: completion and hover extensions (degrade gracefully when backend absent).
+      langAutocompletionExt(() => this.active?.path ?? null),
+      langHoverTooltipExt(() => this.active?.path ?? null),
       Prec.high(
         keymap.of([
           { key: "Mod-s", run: () => (this.mgr.requestSave(this), true) },
@@ -461,6 +617,24 @@ export class Pane {
           { key: "Alt-ArrowUp", run: moveLineUp },
           { key: "Shift-Mod-k", run: deleteLine },
           { key: "Escape", run: () => this.closeLens() },
+          // F12: go to definition — resolves via lang engine; single result opens, multiple go to picker.
+          {
+            key: "F12",
+            run: (view) => {
+              const path = this.active?.path;
+              if (!path) return false;
+              void gotoDefinition(this.mgr, path, view).then((locs) => {
+                if (!locs) return;
+                if (locs.length === 1) {
+                  const loc = locs[0];
+                  void this.mgr.openFile(loc.path, loc.range.start.line + 1);
+                } else if (locs.length > 1) {
+                  this.mgr.onGotoDefinitionMulti?.(locs);
+                }
+              });
+              return true;
+            },
+          },
           indentWithTab,
         ]),
       ),
@@ -468,6 +642,8 @@ export class Pane {
         if (u.docChanged && this.active) {
           this.active.dirty = this.view.state.doc.toString() !== this.active.savedContent;
           this.mgr.onPaneDocChanged(this);
+          // Debounce lang_did_change notifications so we don't spam the engine on every keystroke.
+          this.scheduleLangChange();
         }
         if (u.selectionSet && this.active) this.mgr.onSelectionChanged?.();
       }),
@@ -491,6 +667,27 @@ export class Pane {
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: text },
     });
+  }
+
+  /** Dispatch debugger CM effects (breakpoint marks, paused line, inline hints) to this pane. */
+  dispatchDebugEffects(effects: StateEffect<unknown> | readonly StateEffect<unknown>[]): void {
+    this.view.dispatch({ effects });
+  }
+
+  /** Scroll to and place the cursor on a 1-based line (debugger frame jump / stop). */
+  revealLine(line: number): void {
+    const doc = this.view.state.doc;
+    if (line < 1 || line > doc.lines) return;
+    const pos = doc.line(line).from;
+    this.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    this.view.focus();
+  }
+
+  /** Source text of a 1-based line, or null when out of range (debugger inline hints). */
+  lineText(line: number): string | null {
+    const doc = this.view.state.doc;
+    if (line < 1 || line > doc.lines) return null;
+    return doc.line(line).text;
   }
 
   openLens(hunkIndex: number): void {
@@ -527,7 +724,7 @@ export class Pane {
     }
 
     const ai = this.mgr.aiRangesForTab(this.active, this.view.state.doc.lines);
-    const entries = marginEntries(this.active.hunks, ai, this.view.defaultLineHeight);
+    const entries = marginEntries(ai, this.view.defaultLineHeight);
     if (entries.length === 0) {
       this.marginaliaEl.classList.add("hidden");
       return;
@@ -535,31 +732,17 @@ export class Pane {
 
     this.marginaliaEl.classList.remove("hidden");
     for (const entry of entries) {
-      if (entry.kind === "hunk") {
-        const pill = document.createElement("button");
-        pill.className = `margin-pill kind-${entry.color}`;
-        pill.style.top = `${entry.topPx}px`;
-        pill.style.minHeight = `${entry.heightPx}px`;
-        pill.textContent = entry.color;
-        pill.onclick = (event) => {
-          event.stopPropagation();
-          this.mgr.setFocused(this);
-          this.openLens(entry.hunkIndex);
-        };
-        this.marginaliaInnerEl.append(pill);
-      } else {
-        const stitch = document.createElement("div");
-        stitch.className = "margin-ai";
-        stitch.style.top = `${entry.topPx}px`;
-        const line = document.createElement("span");
-        line.className = "stitch";
-        line.style.height = `${entry.heightPx}px`;
-        const who = document.createElement("span");
-        who.className = "who";
-        who.textContent = entry.agent;
-        stitch.append(line, who);
-        this.marginaliaInnerEl.append(stitch);
-      }
+      const stitch = document.createElement("div");
+      stitch.className = "margin-ai";
+      stitch.style.top = `${entry.topPx}px`;
+      const line = document.createElement("span");
+      line.className = "stitch";
+      line.style.height = `${entry.heightPx}px`;
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = entry.agent;
+      stitch.append(line, who);
+      this.marginaliaInnerEl.append(stitch);
     }
     this.syncMarginaliaScroll();
   }
@@ -653,9 +836,25 @@ export class Pane {
     this.previewEl.classList.add("hidden");
     this.view.dom.style.display = "";
     this.welcomeEl.classList.add("hidden");
+    this.remeasureOnShow();
     this.syncMarginalia();
     // Detect conflicts in the newly activated tab
     this.detectAndRenderConflicts();
+  }
+
+  /**
+   * Force CodeMirror to re-measure after the view becomes visible. The view is
+   * constructed and measured while `display:none`, so CM caches a stale (0/short)
+   * viewport height. WKWebView does not reliably fire CM's resize observer on the
+   * display:none→"" transition, leaving the stale height in place — which makes
+   * scrollIntoView treat the caret as off-screen and scroll down on every
+   * keystroke. Reading clientHeight flushes layout; the rAF covers deferred
+   * settling. (Any real window resize, e.g. opening devtools, masks the bug.)
+   */
+  private remeasureOnShow(): void {
+    void this.view.scrollDOM.clientHeight; // flush layout before measuring
+    this.view.requestMeasure();
+    requestAnimationFrame(() => this.view.requestMeasure());
   }
 
   /** Empty-pane state: blank editor hidden behind the welcome placeholder. */
@@ -725,6 +924,7 @@ export class Pane {
     this.previewEl.innerHTML = "";
     if (this.active) {
       this.view.dom.style.display = "";
+      this.remeasureOnShow();
     } else {
       this.welcomeEl.classList.remove("hidden");
     }
@@ -812,12 +1012,15 @@ export class EditorManager {
   // wired by main.ts
   saveHandler?: (tab: Tab) => Promise<void>;
   onTabsChanged?: () => void;
-  onDiffChanged?: (hunks: Hunk[], label: string) => void;
-  onGutterClick?: (hunkIndex: number) => void;
+
   /** Fires on cursor/selection moves in the focused pane (whisper-bar ln display). */
   onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
+  /** Fires when the focused pane's document content changes; main.ts wires the outline refresh. */
+  onDocChanged?: () => void;
+  /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
+  onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
 
   private container: HTMLElement;
   private splitter: HTMLElement | null = null;
@@ -855,6 +1058,26 @@ export class EditorManager {
 
   applyEditorTheme(): void {
     for (const p of this.panes) p.applyEditorTheme();
+  }
+
+  /** Apply debugger CM effects to the pane showing `path`, else the focused pane. */
+  applyDebugEffects(
+    effects: StateEffect<unknown> | readonly StateEffect<unknown>[],
+    path?: string,
+  ): void {
+    const target = (path && this.panes.find((p) => p.active?.path === path)) || this.focused;
+    target.dispatchDebugEffects(effects);
+  }
+
+  /** Open a file and reveal a 1-based line — used on debug stop and frame selection. */
+  async revealAt(path: string, line: number): Promise<void> {
+    await this.openFile(path);
+    this.focused.revealLine(line);
+  }
+
+  /** Source text of a 1-based line in the focused pane (debugger inline hints). */
+  focusedLineText(line: number): string | null {
+    return this.focused.lineText(line);
   }
 
   setFocused(pane: Pane): void {
@@ -959,6 +1182,17 @@ export class EditorManager {
     return firstHunkLineFromTabs(this.tabs, path);
   }
 
+  /** Fetch document symbols for the active file from the lang engine; returns null on error. */
+  async getDocumentSymbols(): Promise<DocumentSymbol[] | null> {
+    const path = this.focused.active?.path;
+    if (!path) return null;
+    try {
+      return await langDocumentSymbols(path);
+    } catch {
+      return null;
+    }
+  }
+
   tabByPath(path: string): Tab | undefined {
     for (const p of this.panes) {
       const t = p.tabByPath(path);
@@ -1036,6 +1270,8 @@ export class EditorManager {
     pane.addTab(tab);
     this.activateInPane(pane, tab);
     if (line !== undefined) this.revealLine(line);
+    // Notify the language engine that this document is now open (version 0 = initial load).
+    langDidOpen(path, content, 0).catch(() => {});
   }
 
   /** Open latest disk content for review without overwriting a dirty human buffer. */
@@ -1090,6 +1326,24 @@ export class EditorManager {
       effects: EditorView.scrollIntoView(pos, { y: "center" }),
     });
     view.focus();
+  }
+
+  /**
+   * Open `path` (reloading latest disk content), scroll to the hunk at
+   * `startLine` (0-based), and open the inline peek for it. Falls back to a
+   * plain scroll when the live buffer has no hunk at that line.
+   */
+  async revealHunkPeek(path: string, startLine: number, status: string): Promise<void> {
+    try {
+      await this.openLatestFile(path, status);
+    } catch {
+      return; // file vanished / unreadable — nothing to peek
+    }
+    const tab = this.active;
+    if (!tab || tab.path !== path) return;
+    this.revealLine(startLine + 1); // revealLine is 1-based
+    const idx = hunkIndexAtLine(tab.hunks, startLine);
+    if (idx >= 0) this.focused.openLens(idx);
   }
 
   newUntitled(): void {
@@ -1150,13 +1404,13 @@ export class EditorManager {
   private closeTabInPane(pane: Pane, tab: Tab): void {
     // closing a source tab tears down any preview bound to it
     for (const p of this.panes) if (p.previewSource === tab) p.hidePreview();
+    // Notify the language engine to drop the cached parse tree for this path.
+    if (tab.path) pane.notifyLangClose(tab.path);
     const wasActive = pane.active === tab;
     pane.removeTab(tab);
     if (wasActive) {
       if (pane.active) {
         this.recomputeDiff();
-      } else {
-        this.onDiffChanged?.([], "Diff");
       }
       this.onActiveTabChanged?.(this.focused.active);
     }
@@ -1205,7 +1459,30 @@ export class EditorManager {
     }
     if (!changed) return;
     if (this.focused.active) this.recomputeDiff();
-    else this.onDiffChanged?.([], "Diff");
+    this.renderAllTabs();
+    this.onActiveTabChanged?.(this.focused.active);
+    this.onTabsChanged?.();
+  }
+
+  /** Close every open tab across all panes in a single batch. */
+  closeAllTabs(): void {
+    let changed = false;
+    for (const pane of this.panes) {
+      if (pane.previewSource) {
+        pane.hidePreview();
+        changed = true;
+      }
+      if (pane.tabs.length === 0) continue;
+      changed = true;
+      pane.tabs = [];
+      pane.active = null;
+      pane.showWelcome();
+    }
+    if (!changed) return;
+    if (this.isSplit && this.panes[1].tabs.length === 0 && !this.panes[1].previewSource) {
+      void this.closeSplit();
+      return;
+    }
     this.renderAllTabs();
     this.onActiveTabChanged?.(this.focused.active);
     this.onTabsChanged?.();
@@ -1231,15 +1508,12 @@ export class EditorManager {
       active.hunks = [];
       pane.view.dispatch({ effects: setDiffMarks.of([]) });
       pane.syncMarginalia();
-      this.onDiffChanged?.([], active.name);
       return;
     }
     const { marks, hunks } = computeLineDiff(baseline, current);
     active.hunks = hunks;
     pane.view.dispatch({ effects: setDiffMarks.of(marks) });
     pane.syncMarginalia();
-    const label = active.override != null ? `${active.name} — AI edits` : active.name;
-    this.onDiffChanged?.(hunks, label);
   }
 
   /**
@@ -1319,6 +1593,7 @@ export class EditorManager {
     if (pane.active) this.schedulePreviewRefresh(pane.active, pane.getContent());
     this.renderAllTabs();
     this.onTabsChanged?.();
+    this.onDocChanged?.();
   }
 
   /** Revert one hunk in the focused pane back to baseline (newline-safe). */

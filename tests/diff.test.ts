@@ -1,6 +1,165 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeLineDiff, hunkIndexAtLine, lensModel } from "../src/diff";
+import { computeLineDiff, DiffViewer, hunkIndexAtLine, hunkSummaries, lensModel } from "../src/diff";
+
+class FakeClassList {
+  private values = new Set<string>();
+
+  add(...names: string[]): void {
+    names.forEach((name) => this.values.add(name));
+  }
+
+  remove(...names: string[]): void {
+    names.forEach((name) => this.values.delete(name));
+  }
+
+  contains(name: string): boolean {
+    return this.values.has(name);
+  }
+
+  toggle(name: string, force?: boolean): boolean {
+    const next = force ?? !this.values.has(name);
+    if (next) this.values.add(name);
+    else this.values.delete(name);
+    return next;
+  }
+
+  toString(): string {
+    return [...this.values].join(" ");
+  }
+
+  setFromString(value: string): void {
+    this.values = new Set(value.split(/\s+/).filter(Boolean));
+  }
+}
+
+class FakeElement {
+  id = "";
+  title = "";
+  textContent = "";
+  onclick: ((event: { stopPropagation(): void }) => void | Promise<void>) | null = null;
+  readonly classList = new FakeClassList();
+  readonly children: FakeElement[] = [];
+
+  get className(): string {
+    return this.classList.toString();
+  }
+
+  set className(value: string) {
+    this.classList.setFromString(value);
+  }
+
+  set innerHTML(value: string) {
+    if (value !== "") throw new Error("fake DOM only supports clearing innerHTML");
+    this.children.length = 0;
+  }
+
+  append(...nodes: FakeElement[]): void {
+    this.children.push(...nodes);
+  }
+
+  appendChild(node: FakeElement): FakeElement {
+    this.children.push(node);
+    return node;
+  }
+
+  prepend(node: FakeElement): void {
+    this.children.unshift(node);
+  }
+
+  querySelector<T extends FakeElement = FakeElement>(selector: string): T | null {
+    return this.querySelectorAll<T>(selector)[0] ?? null;
+  }
+
+  querySelectorAll<T extends FakeElement = FakeElement>(selector: string): T[] {
+    const matches: T[] = [];
+    const visit = (node: FakeElement) => {
+      if (node.matches(selector)) matches.push(node as T);
+      node.children.forEach(visit);
+    };
+    this.children.forEach(visit);
+    return matches;
+  }
+
+  private matches(selector: string): boolean {
+    if (selector.startsWith("#")) return this.id === selector.slice(1);
+    if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
+    return false;
+  }
+}
+
+function installDiffDom(): { filesEl: FakeElement; restore: () => void } {
+  const previousDocument = globalThis.document;
+  const titleEl = new FakeElement();
+  const filesEl = new FakeElement();
+  titleEl.id = "diff-title";
+  filesEl.id = "diff-files";
+  const byId: Record<string, FakeElement> = { "diff-title": titleEl, "diff-files": filesEl };
+  globalThis.document = {
+    getElementById: (id: string) => byId[id] ?? null,
+    createElement: () => new FakeElement(),
+  } as unknown as Document;
+  return {
+    filesEl,
+    restore: () => {
+      globalThis.document = previousDocument;
+    },
+  };
+}
+
+test("hunkSummaries labels a single modified line", () => {
+  const { hunks } = computeLineDiff("one\ntwo\nthree", "one\ndos\nthree");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], { kind: "modified", startLine: 1, label: "line 2" });
+});
+
+test("hunkSummaries labels a multi-line added range", () => {
+  const { hunks } = computeLineDiff("one\nfour", "one\ntwo\nthree\nfour");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows[0].kind, "added");
+  assert.equal(rows[0].startLine, 1);
+  assert.equal(rows[0].label, "lines 2–3");
+});
+
+test("hunkSummaries labels a deletion at its boundary line", () => {
+  const { hunks } = computeLineDiff("a\nb\nc", "a\nc");
+  const rows = hunkSummaries(hunks);
+  assert.equal(rows[0].kind, "deleted");
+  assert.equal(rows[0].label, `at line ${rows[0].startLine + 1}`);
+});
+
+test("hunkSummaries returns empty for no hunks", () => {
+  assert.deepEqual(hunkSummaries([]), []);
+});
+
+test("DiffViewer keeps expanded hunk rows visible across file-list rerenders", async () => {
+  const { filesEl, restore } = installDiffDom();
+  try {
+    const viewer = new DiffViewer();
+    let picks = 0;
+    const handlers = {
+      onFilePick: () => {
+        picks++;
+      },
+      onExpand: async () => [{ kind: "modified" as const, startLine: 4, label: "line 5" }],
+      onHunkPick: () => {},
+    };
+
+    viewer.renderFileList([{ path: "/repo/src/app.ts", status: "M" }], null, handlers);
+    await filesEl.querySelector(".diff-file-chevron")?.onclick?.({ stopPropagation() {} });
+    filesEl.querySelector(".diff-file-row")?.onclick?.({ stopPropagation() {} });
+    viewer.renderFileList([{ path: "/repo/src/app.ts", status: "M" }], "/repo/src/app.ts", handlers);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(picks, 1);
+    assert.equal(filesEl.querySelector(".diff-hunk-list")?.classList.contains("hidden"), false);
+    assert.equal(filesEl.querySelector(".diff-hunk-label")?.textContent, "line 5");
+  } finally {
+    restore();
+  }
+});
 
 test("computeLineDiff marks a pure addition", () => {
   const { marks, hunks } = computeLineDiff("one\nthree", "one\ntwo\nthree");

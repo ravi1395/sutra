@@ -170,3 +170,84 @@ export const searchDir = (
 // Clipboard wrappers over tauri-plugin-clipboard-manager.
 export const clipboardRead = (): Promise<string> => readText();
 export const clipboardWrite = (text: string): Promise<void> => writeText(text);
+
+// --- Debugger (DAP) ---
+// Transport selects how the Rust proxy reaches the adapter: spawn a process
+// (stdio) or connect to a listening port (socket).
+export type Transport =
+  | { kind: "stdio"; command: string; args: string[] }
+  | { kind: "socket"; host: string; port: number };
+
+export const debugStart = (sessionId: string, transport: Transport, cwd: string | null) =>
+  invoke<void>("debug_start", { sessionId, transport, cwd });
+export const debugSend = (sessionId: string, message: string) =>
+  invoke<void>("debug_send", { sessionId, message });
+export const debugStop = (sessionId: string) => invoke<void>("debug_stop", { sessionId });
+
+export interface DapEventPayload {
+  session_id: string;
+  message: string;
+}
+export const onDapEvent = (cb: (p: DapEventPayload) => void): Promise<UnlistenFn> =>
+  listen<DapEventPayload>("debug-dap-event", (e) => cb(e.payload));
+
+// --- Language-intelligence engine (in-house tree-sitter) ---
+// FROZEN CONTRACT between the TS frontend and the Rust `lang` engine. Both halves
+// build against these exact command names + shapes. All Rust return structs MUST
+// derive `#[serde(rename_all = "camelCase")]` so they serialize to these fields.
+// Positions are 0-based; `character` is a UTF-16 code-unit column (CM6 semantics).
+export interface Pos { line: number; character: number }
+export interface Range { start: Pos; end: Pos }
+
+export interface CompletionItem {
+  label: string;
+  kind: string;          // "function" | "class" | "variable" | "keyword" | "member" | ...
+  detail: string | null; // signature/preview shown beside the label
+  source: string;        // "scope" | "symbol" | "keyword" | "member"
+  score: number;         // fuzzy rank; higher = better (maps to CM6 boost)
+}
+export interface DocumentSymbol {
+  name: string;
+  kind: string;
+  range: Range;          // full declaration span
+  selectionRange: Range; // the name span (revealed on click)
+  children: DocumentSymbol[];
+}
+export interface Symbol {
+  name: string;
+  kind: string;
+  path: string;
+  range: Range;
+  selectionRange: Range;
+  container: string | null; // enclosing symbol, e.g. "Foo.bar"
+  detail: string | null;
+}
+export interface Location { path: string; range: Range }
+export interface Hover { signature: string; doc: string | null; kind: string }
+export interface IndexStats { indexedFiles: number; symbols: number }
+
+// Document lifecycle — keep the engine's view of an open buffer in sync.
+export const langDidOpen = (path: string, text: string, version: number) =>
+  invoke<void>("lang_did_open", { path, text, version });
+export const langDidChange = (path: string, text: string, version: number) =>
+  invoke<void>("lang_did_change", { path, text, version });
+export const langDidClose = (path: string) =>
+  invoke<void>("lang_did_close", { path });
+
+// Workspace symbol index lifecycle (reuses the existing fs-changed pipeline).
+export const langIndexBuild = (root: string) =>
+  invoke<IndexStats>("lang_index_build", { root });
+export const langIndexInvalidate = (paths: string[]) =>
+  invoke<void>("lang_index_invalidate", { paths });
+
+// Features.
+export const langCompletion = (path: string, pos: Pos, prefix: string) =>
+  invoke<CompletionItem[]>("lang_completion", { path, pos, prefix });
+export const langDocumentSymbols = (path: string) =>
+  invoke<DocumentSymbol[]>("lang_document_symbols", { path });
+export const langWorkspaceSymbols = (query: string, limit = 100) =>
+  invoke<Symbol[]>("lang_workspace_symbols", { query, limit });
+export const langGotoDefinition = (path: string, pos: Pos) =>
+  invoke<Location[]>("lang_goto_definition", { path, pos });
+export const langHover = (path: string, pos: Pos) =>
+  invoke<Hover | null>("lang_hover", { path, pos });

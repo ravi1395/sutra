@@ -14,6 +14,7 @@ export type IconName =
   | "reload"
   | "folder"
   | "folderAdd"
+  | "fileAdd"
   | "settings"
   | "check"
   | "chevronDown"
@@ -28,12 +29,16 @@ export type IconName =
   | "compress"
   | "bolt"
   | "stop"
-  | "brandMark";
+  | "brandMark"
+  | "pencil"
+  | "trash";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   folderAdd:
     '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
+  fileAdd:
+    '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 12v6M9 15h6"/>',
   trackAI:
     '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><circle cx="18.5" cy="17.5" r="2.4"/>',
   terminal: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3 3-3 3M13 15h4"/>',
@@ -41,7 +46,7 @@ const paths: Record<IconName, string> = {
   diff: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/><path d="M6 9.5h3M7.5 8v3"/><path d="M15 14.5h3"/>',
   world: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/>',
   browser: '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/>',
-  command: '<path d="M9 6a3 3 0 1 0-3 3h3V6ZM15 6a3 3 0 1 1 3 3h-3V6ZM9 18a3 3 0 1 1-3-3h3v3ZM15 18a3 3 0 1 0 3-3h-3v3ZM9 9h6v6H9z"/>',
+  command: '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6.5 10.5l2.5 1.5-2.5 1.5"/><path d="M12 12h7"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2 2 0 0 1-2.83 2.83l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.08 1.65V21a2 2 0 0 1-4 0v-.1a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-1.98.36l-.05.05a2 2 0 0 1-2.83-2.83l.05-.05A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.65-1.08H3a2 2 0 0 1 0-4h.1A1.8 1.8 0 0 0 4.75 8.84a1.8 1.8 0 0 0-.36-1.98l-.05-.05a2 2 0 0 1 2.83-2.83l.05.05a1.8 1.8 0 0 0 1.98.36A1.8 1.8 0 0 0 10.28 3V3a2 2 0 0 1 4 0v.1a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 1.98-.36l.05-.05a2 2 0 0 1 2.83 2.83l-.05.05a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.65 1.08H21a2 2 0 0 1 0 4h-.1A1.8 1.8 0 0 0 19.4 15z"/>',
@@ -62,6 +67,8 @@ const paths: Record<IconName, string> = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   // Sutra brand mark: an eternal knot — two loops woven over-and-under.
   brandMark: '<path d="M7.5 5 H12.5 A2.5 2.5 0 0 1 15 7.5 V12.5 A2.5 2.5 0 0 1 12.5 15 H11.6 M8.4 15 H7.5 A2.5 2.5 0 0 1 5 12.5 V7.5 A2.5 2.5 0 0 1 7.5 5 M11.5 9 H13.4 A2.5 2.5 0 0 1 19 11.5 V16.5 A2.5 2.5 0 0 1 16.5 19 H11.5 A2.5 2.5 0 0 1 9 16.5 V11.5 A2.5 2.5 0 0 1 11.5 9"/>',
+  pencil: '<path d="M4 20h4l10-10a2 2 0 0 0-2.8-2.8L5.2 17.2 4 20z"/><path d="M14 6l4 4"/>',
+  trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

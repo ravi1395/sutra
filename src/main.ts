@@ -4,7 +4,7 @@
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree } from "./tree";
+import { FileTree, OutlineView } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -15,11 +15,15 @@ import {
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
-import { DiffViewer } from "./diff";
+import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
-import { vResizer, hResizer } from "./layout";
+import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
+import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
+import { DebugSession } from "./debug-session";
+import { detectAdapter, isTrusted, markTrusted, breakpointStore } from "./debug";
 import {
   agentTrackingPoll,
+  listDir,
   readFile,
   writeFile,
   fileMtime,
@@ -39,11 +43,13 @@ import {
   onFsChanged,
   watchStart,
   watchStop,
+  langIndexBuild,
+  langIndexInvalidate,
   type AgentTrackingStatus,
 } from "./ipc";
 import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, type Command, type PaletteHandle } from "./palette";
+import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -51,6 +57,7 @@ import {
   saveAutomations,
   makeAutomation,
   upsertAutomation,
+  removeAutomation,
   validateName,
   validateCommand,
   type Automation,
@@ -96,6 +103,48 @@ async function alertNative(msg: string): Promise<void> {
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("terminal-area"), $("main"));
+
+// Wire goto-definition multi-candidate picker: opens a location chooser overlay.
+editor.onGotoDefinitionMulti = (locs) => {
+  mountLocationPicker(locs, (path, line) => void editor.openFile(path, line));
+};
+
+// --- Debugger session ---
+const debugSlot = mountDebuggerSidebarSlot($("main"));
+const debugSession = new DebugSession({
+  editor,
+  slot: debugSlot,
+  // Only adapters using runInTerminal (debugpy/node, post-v1) hit this; codelldb
+  // launches directly. Returning the terminal id is a best-effort pid stand-in.
+  runInTerminal: async (args) => {
+    const a = args as { args?: string[] };
+    const id = await terminals.runCommand((a.args ?? []).join(" ")).catch(() => null);
+    return typeof id === "number" ? id : 0;
+  },
+});
+// Gutter clicks toggle the persistent breakpoint store + push to the live session.
+setBreakpointToggleHandler((path, line) => debugSession.toggleBreakpoint(path, line));
+
+// Resolve the project's debug adapter and launch a session from the palette.
+async function startDebugging(): Promise<void> {
+  if (!currentRoot) return;
+  const root = currentRoot;
+  const entries = await listDir(root).catch(() => []);
+  const signals = new Set(entries.map((e) => e.name));
+  // codelldb is resolved on PATH by the Rust spawn; a spawn failure surfaces in the console.
+  const spec = detectAdapter(signals, "codelldb");
+  if (!spec) {
+    await message("No debug adapter detected for this project.", { title: "Sutra", kind: "warning" });
+    return;
+  }
+  if (!isTrusted(spec, root)) {
+    const cmd = spec.transport.kind === "stdio" ? spec.transport.command : "";
+    if (!window.confirm(`Run debug adapter from this workspace?\n${cmd}`)) return;
+    markTrusted(root);
+  }
+  const program = editor.active?.path ?? "";
+  await debugSession.start(spec, root, program);
+}
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
   $<HTMLInputElement>("search-input"),
@@ -166,26 +215,27 @@ void onFsChanged((payload) => {
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
     return;
   }
-  void refreshFileSystemState(root);
+  // Inform the lang engine to re-index changed files (gracefully degrades if backend absent).
+  if (payload.paths.length > 0) void langIndexInvalidate(payload.paths).catch(() => {});
+  scheduleFileSystemRefresh(root);
 });
 
 const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
+let symbolPalette: { open(): void }; // Cmd+T workspace symbol picker
 let gitBar: GitBarHandle; // assigned at boot
 let automationBar: AutomationBarHandle; // assigned at boot
+let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let fsRefreshRunning = false;
+let fsRefreshPendingRoot: string | null = null;
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
 let suppressSessionSave = false;
 let settings: UserSettings = loadSettings();
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
-editor.onDiffChanged = (hunks, label) => diffViewer.render(hunks, label);
-editor.onGutterClick = (idx) => {
-  setDiff(true);
-  diffViewer.highlightHunk(idx);
-};
 // Render the loom-bar breadcrumb for the active file; dir segments reveal in the tree.
 function renderBreadcrumb(path: string | null): void {
   const host = $("breadcrumb");
@@ -211,6 +261,14 @@ editor.onActiveTabChanged = (tab) => {
   tree.setActive(tab?.path ?? null);
   renderBreadcrumb(tab?.path ?? null);
   renderWhisperBar();
+  // Repaint stored breakpoints in the gutter when a file becomes active.
+  if (tab?.path) {
+    const bps = breakpointStore.get(tab.path) ?? [];
+    editor.applyDebugEffects(
+      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: b.verified ?? false }))),
+      tab.path,
+    );
+  }
 };
 editor.onTabsChanged = () => {
   persistWorkspaceSession();
@@ -219,7 +277,6 @@ editor.onTabsChanged = () => {
 editor.onSelectionChanged = () => renderWhisperBar();
 editor.confirmCloseTab = (tab) =>
   tab.dirty ? confirmNative(`Discard unsaved changes to ${tab.name}?`) : true;
-diffViewer.onRevert = (h) => editor.revertHunk(h);
 
 tree.onOpenFile = async (path) => {
   try {
@@ -271,22 +328,13 @@ tree.onDelete = async (path: string) => {
   }
 };
 
-tree.onCreate = async (parentDir: string, isDir: boolean) => {
-  const type = isDir ? "folder" : "file";
-  const name = await promptInput(`New ${type} name:`);
-  if (!name) return;
-  try {
-    if (isDir) {
-      const path = parentDir + "/" + name;
-      await createDir(path);
-    } else {
-      const path = parentDir + "/" + name;
-      await writeFile(path, "");
-    }
-    await tree.refresh();
-  } catch (e) {
-    void alertNative(`Create ${type} failed: ${e}`);
-  }
+// Pure FS write — the tree owns the inline name input, validation, refresh,
+// reveal, auto-open, and inline error display. Errors propagate so the tree
+// can render them inline.
+tree.onCreate = async (parentDir: string, name: string, isDir: boolean) => {
+  const path = parentDir + "/" + name;
+  if (isDir) await createDir(path);
+  else await writeFile(path, "");
 };
 
 tree.onMove = async (src: string, destDir: string) => {
@@ -470,6 +518,8 @@ async function openWorkspace(dir: string): Promise<void> {
   if (currentRoot !== dir) return;
   gitIndexPath = resolvedGitIndexPath;
   void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
+  // Kick off the workspace symbol index build (gracefully degrades if backend absent).
+  void langIndexBuild(dir).catch(() => {});
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
@@ -546,8 +596,23 @@ async function refreshDiffFileList(): Promise<void> {
     if (currentRoot !== root) return;
     const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
-    diffViewer.renderFileList(files, activePath, (path: string) => {
-      void viewChangedPath(path);
+    diffViewer.renderFileList(files, activePath, {
+      onFilePick: (path: string) => void viewChangedPath(path),
+      onExpand: async (path: string) => {
+        const file = files.find((candidate) => candidate.path === path);
+        if (!file || file.status === "D") return [];
+        try {
+          const base = (await gitHeadContent(path).catch(() => "")) ?? "";
+          const current = await readFile(path);
+          return hunkSummaries(computeLineDiff(base, current).hunks);
+        } catch {
+          return [];
+        }
+      },
+      onHunkPick: (path: string, startLine: number) => {
+        const file = files.find((candidate) => candidate.path === path);
+        void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+      },
     });
   } catch (e) {
     // Silently skip on error
@@ -555,11 +620,34 @@ async function refreshDiffFileList(): Promise<void> {
 }
 
 async function refreshFileSystemState(root: string): Promise<void> {
+  if (currentRoot !== root) return;
   await tree.refresh();
   if (currentRoot !== root) return;
   await editor.refreshCleanGitBaselines();
   if (currentRoot !== root) return;
   void refreshGitState(root);
+}
+
+function scheduleFileSystemRefresh(root: string): void {
+  fsRefreshPendingRoot = root;
+  if (fsRefreshRunning) return;
+  fsRefreshRunning = true;
+  void (async () => {
+    try {
+      while (fsRefreshPendingRoot) {
+        const nextRoot = fsRefreshPendingRoot;
+        fsRefreshPendingRoot = null;
+        try {
+          await refreshFileSystemState(nextRoot);
+        } catch (e) {
+          console.warn("filesystem refresh failed", e);
+        }
+      }
+    } finally {
+      fsRefreshRunning = false;
+      if (fsRefreshPendingRoot) scheduleFileSystemRefresh(fsRefreshPendingRoot);
+    }
+  })();
 }
 
 // ---- diff toggle ----
@@ -846,9 +934,13 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
-  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP")) {
+  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP") || (mod && e.code === "KeyK")) {
     e.preventDefault();
     palette.open();
+  } else if (mod && e.code === "KeyT") {
+    // Cmd+T / Ctrl+T: workspace symbol search backed by the lang engine.
+    e.preventDefault();
+    symbolPalette.open();
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
     if (editor.isSplit) void editor.closeSplit();
@@ -878,12 +970,18 @@ window.addEventListener("blur", () => {
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
-btnPalette.innerHTML = icon("command", 17);
+btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;
 btnMenu.innerHTML = icon("menu", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
 $("btn-search-toggle").innerHTML = icon("search", 15);
+$("btn-new-file").innerHTML = icon("fileAdd", 15);
+$("btn-new-folder").innerHTML = icon("folderAdd", 15);
+$("btn-close-all-editors").innerHTML = icon("x", 15);
+$("btn-new-file").onclick = () => void tree.beginCreate(tree.targetDirForCreate(), false);
+$("btn-new-folder").onclick = () => void tree.beginCreate(tree.targetDirForCreate(), true);
+$("btn-close-all-editors").onclick = () => editor.closeAllTabs();
 $("btn-refresh").onclick = () => void tree.refresh();
 btnSearchToggle.onclick = () => toggleSearchView();
 btnPalette.onclick = () => palette.open();
@@ -984,8 +1082,24 @@ automationBar = mountAutomationBar($("automations"), {
   stop: () => {
     if (runningAutomationTermId) terminals.interrupt(runningAutomationTermId);
   },
-  openCreate: () => openCreatePanel(),
+  openCreate: () => openAutomationPanel(),
+  edit: (a) => openAutomationPanel(a),
+  remove: (a) => void deleteAutomation(a),
 });
+
+// Delete an automation after confirmation, then persist + refresh the picker.
+async function deleteAutomation(a: Automation): Promise<void> {
+  if (!currentRoot) return;
+  if (!(await confirmNative(`Delete automation "${a.name}"?`))) return;
+  automations = removeAutomation(automations, a.id);
+  try {
+    await saveAutomations(currentRoot, automations);
+  } catch (e) {
+    showErrorBanner(`Could not delete automation: ${e}`);
+    return;
+  }
+  automationBar.setAutomations(automations);
+}
 
 // Run an automation in a free terminal; mark the bar "running" until that terminal idles.
 async function runAutomation(a: Automation): Promise<void> {
@@ -1018,8 +1132,9 @@ async function persistAutomation(a: Automation): Promise<void> {
   automationBar.setAutomations(automations);
 }
 
-// Full-width "New automation" drawer fused under the titlebar (Variant 3).
-function openCreatePanel(): void {
+// Full-width automation drawer fused under the titlebar (Variant 3). Creates a
+// new automation, or edits `existing` in place when supplied (keeps its id).
+function openAutomationPanel(existing?: Automation): void {
   if (!currentRoot) {
     showErrorBanner("Open a folder before saving automations.");
     return;
@@ -1035,14 +1150,15 @@ function openCreatePanel(): void {
 
   const title = document.createElement("span");
   title.className = "auto-drawer-title";
-  title.innerHTML = `${icon("plus", 14)}<span>New automation</span>`;
+  title.innerHTML = `${icon(existing ? "pencil" : "plus", 14)}<span>${existing ? "Edit automation" : "New automation"}</span>`;
 
   const nameField = document.createElement("label");
   nameField.className = "auto-field name";
   const nameInput = document.createElement("input");
   nameInput.type = "text";
-  nameInput.placeholder = "Build";
+  nameInput.placeholder = "e.g. Dev server";
   nameInput.spellcheck = false;
+  nameInput.value = existing?.name ?? "";
   nameField.innerHTML = "<span>Name</span>";
   nameField.appendChild(nameInput);
 
@@ -1050,8 +1166,9 @@ function openCreatePanel(): void {
   cmdField.className = "auto-field cmd";
   const cmdInput = document.createElement("input");
   cmdInput.type = "text";
-  cmdInput.placeholder = "npm run tauri build";
+  cmdInput.placeholder = "e.g. npm run dev";
   cmdInput.spellcheck = false;
+  cmdInput.value = existing?.command ?? "";
   cmdField.innerHTML = "<span>Command</span>";
   cmdField.appendChild(cmdInput);
 
@@ -1085,14 +1202,14 @@ function openCreatePanel(): void {
   document.addEventListener("keydown", onKey);
 
   const submit = (): void => {
-    const nameErr = validateName(nameInput.value, automations);
+    const nameErr = validateName(nameInput.value, automations, existing?.id);
     const cmdErr = validateCommand(cmdInput.value);
     if (nameErr || cmdErr) {
       err.textContent = nameErr ?? cmdErr ?? "";
       (nameErr ? nameInput : cmdInput).focus();
       return;
     }
-    void persistAutomation(makeAutomation(nameInput.value, cmdInput.value)).then(close);
+    void persistAutomation(makeAutomation(nameInput.value, cmdInput.value, existing?.id)).then(close);
   };
 
   cancel.onclick = close;
@@ -1145,12 +1262,14 @@ const paletteCommands: Command[] = [
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
   { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
-  { id: "new-automation", title: "New Automation…", run: () => openCreatePanel() },
+  { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
     search.focus();
   }, shortcut: "⇧⌘F" },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
+  { id: "debug-start", title: "Debug: Start", run: () => void startDebugging() },
+  { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop() },
 ];
 
 function recentPaletteCommands(): Command[] {
@@ -1166,6 +1285,9 @@ function recentPaletteCommands(): Command[] {
 }
 
 palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
+
+// Workspace symbol picker (Cmd+T) backed by the lang engine.
+symbolPalette = mountSymbolPalette((path, line) => void editor.openFile(path, line));
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {
@@ -1185,54 +1307,6 @@ function openSettings(): void {
   });
 }
 
-/** Custom input dialog replacing window.prompt() — WKWebView silently returns null for native JS dialogs. */
-function promptInput(message: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "prompt-overlay";
-
-    const box = document.createElement("div");
-    box.className = "prompt-box";
-
-    const lbl = document.createElement("div");
-    lbl.className = "prompt-label";
-    lbl.textContent = message;
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "prompt-input tree-edit-input";
-
-    const btns = document.createElement("div");
-    btns.className = "prompt-btns";
-
-    const btnOk = document.createElement("button");
-    btnOk.className = "prompt-btn";
-    btnOk.textContent = "OK";
-
-    const btnCancel = document.createElement("button");
-    btnCancel.className = "prompt-btn secondary";
-    btnCancel.textContent = "Cancel";
-
-    const done = (value: string | null) => {
-      overlay.remove();
-      resolve(value);
-    };
-
-    btnOk.onclick = () => done(input.value.trim() || null);
-    btnCancel.onclick = () => done(null);
-    input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") { ev.preventDefault(); done(input.value.trim() || null); }
-      if (ev.key === "Escape") { ev.preventDefault(); done(null); }
-    });
-
-    btns.append(btnCancel, btnOk);
-    box.append(lbl, input, btns);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    input.focus();
-  });
-}
-
 // ---- quit guard ----
 // Prompt before the window closes while unsaved buffers exist. Registering a
 // close-requested listener defers the close to JS; without preventDefault the
@@ -1245,6 +1319,27 @@ void getCurrentWindow().onCloseRequested(async (event) => {
   const quit = await confirmNative(`Quit and discard unsaved changes? ${names}${more}`);
   if (!quit) event.preventDefault();
 });
+
+// ---- outline view ----
+// Mount the Files/Outline toggle in the sidebar above the file tree.
+outlineView = new OutlineView(
+  $("sidebar"),
+  $("tree"),
+  () => editor.active?.path ?? null,
+  () => editor.getDocumentSymbols(),
+);
+outlineView.onRevealLine = (path, line) => {
+  void editor.openFile(path, line).then(() => editor.revealLine(line));
+};
+
+// Refresh the outline when the active file changes.
+const _origOnActiveTabChanged = editor.onActiveTabChanged;
+editor.onActiveTabChanged = (tab) => {
+  _origOnActiveTabChanged?.(tab);
+  outlineView.onActiveFileChanged();
+};
+// Debounced outline refresh while editing the active file.
+editor.onDocChanged = () => outlineView.scheduleRefresh();
 
 // ---- boot ----
 applySettings(settings);

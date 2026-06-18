@@ -75,6 +75,19 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   **Save As** (`⇧⌘S`), **Save All** (`⌥⌘S`), **Close Tab** (`⌘W`).
 - Deleting from the file tree moves files/folders to the macOS Trash instead
   of permanently removing them.
+
+#### Creating files and folders
+- Use the **New File** / **New Folder** icons at the top-right of the file
+  explorer (left of Refresh), or right-click a folder — or empty tree space —
+  and choose **New File** / **New Folder**.
+- The header icons target the selected folder, the parent of the selected file,
+  or the workspace root when nothing is selected. Empty-space right-click always
+  targets the root.
+- Type the name inline in the tree: Enter commits, Esc (or clicking away)
+  cancels.
+- Nested paths like `foo/bar/baz.ts` create intermediate folders.
+- Existing names are rejected inline — files are never overwritten.
+- New files open automatically in the editor.
 - Text files larger than 10 MB are refused before loading to keep the webview
   responsive.
 - Saving a **new / untitled** file opens the native Finder dialog to choose a
@@ -343,3 +356,7 @@ correct.
 - MCP `render_html` executes agent-supplied scripts inside a separate
   `127.0.0.1:<port>` iframe origin — isolated from Tauri IPC (no `fs`/`pty`
   access), but it is not sandboxed against network/DOM within that iframe.
+
+## License
+
+Sutra is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
