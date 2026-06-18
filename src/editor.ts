@@ -1017,6 +1017,8 @@ export class EditorManager {
   onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
+  /** Fires when the focused pane's document content changes; main.ts wires the outline refresh. */
+  onDocChanged?: () => void;
   /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
   onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
 
@@ -1591,6 +1593,7 @@ export class EditorManager {
     if (pane.active) this.schedulePreviewRefresh(pane.active, pane.getContent());
     this.renderAllTabs();
     this.onTabsChanged?.();
+    this.onDocChanged?.();
   }
 
   /** Revert one hunk in the focused pane back to baseline (newline-safe). */

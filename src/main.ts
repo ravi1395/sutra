@@ -1338,6 +1338,8 @@ editor.onActiveTabChanged = (tab) => {
   _origOnActiveTabChanged?.(tab);
   outlineView.onActiveFileChanged();
 };
+// Debounced outline refresh while editing the active file.
+editor.onDocChanged = () => outlineView.scheduleRefresh();
 
 // ---- boot ----
 applySettings(settings);
