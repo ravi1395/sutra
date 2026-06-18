@@ -79,9 +79,11 @@ pub struct IndexStats {
     pub symbols: usize,
 }
 
+/// Tauri-managed handle wrapping the shared `LangEngine` behind a mutex.
 #[derive(Default)]
 pub struct LangState(pub Mutex<engine::LangEngine>);
 
+/// Register or refresh an open document in the engine.
 #[tauri::command]
 pub fn lang_did_open(
     state: State<'_, LangState>,
@@ -92,6 +94,7 @@ pub fn lang_did_open(
     state.0.lock().unwrap().did_open(path, text, version)
 }
 
+/// Sync an edited document's text into the engine.
 #[tauri::command]
 pub fn lang_did_change(
     state: State<'_, LangState>,
@@ -102,17 +105,20 @@ pub fn lang_did_change(
     state.0.lock().unwrap().did_change(path, text, version)
 }
 
+/// Drop a closed document from the engine cache.
 #[tauri::command]
 pub fn lang_did_close(state: State<'_, LangState>, path: String) -> Result<(), String> {
     state.0.lock().unwrap().did_close(&path);
     Ok(())
 }
 
+/// Build the workspace symbol index under `root`.
 #[tauri::command]
 pub fn lang_index_build(state: State<'_, LangState>, root: String) -> Result<IndexStats, String> {
     state.0.lock().unwrap().index_build(&root)
 }
 
+/// Re-index the given paths after filesystem changes.
 #[tauri::command]
 pub fn lang_index_invalidate(
     state: State<'_, LangState>,
@@ -121,6 +127,7 @@ pub fn lang_index_invalidate(
     state.0.lock().unwrap().index_invalidate(paths)
 }
 
+/// Return completion items for `prefix` at `pos`.
 #[tauri::command]
 pub fn lang_completion(
     state: State<'_, LangState>,
@@ -131,6 +138,7 @@ pub fn lang_completion(
     state.0.lock().unwrap().completion(&path, pos, &prefix)
 }
 
+/// Return the nested outline for a single file.
 #[tauri::command]
 pub fn lang_document_symbols(
     state: State<'_, LangState>,
@@ -139,6 +147,7 @@ pub fn lang_document_symbols(
     state.0.lock().unwrap().document_symbols(&path)
 }
 
+/// Fuzzy-match workspace symbols by `query`, capped at `limit`.
 #[tauri::command]
 pub fn lang_workspace_symbols(
     state: State<'_, LangState>,
@@ -148,6 +157,7 @@ pub fn lang_workspace_symbols(
     Ok(state.0.lock().unwrap().workspace_symbols(&query, limit))
 }
 
+/// Resolve definition candidates for the identifier at `pos`.
 #[tauri::command]
 pub fn lang_goto_definition(
     state: State<'_, LangState>,
@@ -157,6 +167,7 @@ pub fn lang_goto_definition(
     state.0.lock().unwrap().goto_definition(&path, pos)
 }
 
+/// Return hover/signature info for the identifier at `pos`.
 #[tauri::command]
 pub fn lang_hover(
     state: State<'_, LangState>,

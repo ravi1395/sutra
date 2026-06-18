@@ -525,9 +525,10 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners and the CM view when the pane is removed. */
+  /** Release document-level listeners, the pending lang debounce, and the CM view. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
   }
 

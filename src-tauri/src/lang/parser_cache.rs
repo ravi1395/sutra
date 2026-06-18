@@ -1,3 +1,5 @@
+// Per-document parse cache: keeps tree-sitter parsers pooled per language and
+// parsed trees keyed by path, with version guarding and idle eviction.
 use super::language::LanguageId;
 use super::registry;
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ pub struct ParserCache {
 }
 
 impl ParserCache {
+    /// Parse and store a document, ignoring edits older than the cached version.
     pub fn upsert(&mut self, path: String, source: String, version: u64) -> Result<(), String> {
         let Some(lang) = registry::language_for_path(&path) else {
             return Ok(());
@@ -60,10 +63,12 @@ impl ParserCache {
         Ok(())
     }
 
+    /// Drop a document from the cache.
     pub fn remove(&mut self, path: &str) {
         self.docs.remove(path);
     }
 
+    /// Fetch a parsed document, refreshing its last-used timestamp.
     pub fn get(&mut self, path: &str) -> Option<&ParsedDocument> {
         if let Some(doc) = self.docs.get_mut(path) {
             doc.last_used = Instant::now();
@@ -71,12 +76,14 @@ impl ParserCache {
         self.docs.get(path)
     }
 
+    /// Evict documents untouched for longer than the TTL.
     pub fn evict_idle(&mut self, now: Instant) {
         self.docs
             .retain(|_, doc| now.duration_since(doc.last_used) <= PARSED_DOC_TTL);
     }
 }
 
+/// Validate a language's .scm queries compile, containing any tree-sitter panic.
 fn compile_queries(
     language: &tree_sitter::Language,
     spec: &super::language::LanguageSpec,
