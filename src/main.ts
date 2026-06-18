@@ -4,7 +4,7 @@
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree } from "./tree";
+import { FileTree, OutlineView } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -43,11 +43,13 @@ import {
   onFsChanged,
   watchStart,
   watchStop,
+  langIndexBuild,
+  langIndexInvalidate,
   type AgentTrackingStatus,
 } from "./ipc";
 import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, type Command, type PaletteHandle } from "./palette";
+import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -101,6 +103,11 @@ async function alertNative(msg: string): Promise<void> {
 const tree = new FileTree($("tree"));
 const editor = new EditorManager($("panes"));
 const terminals = new TerminalManager($("term-host"), $("terminal-area"), $("main"));
+
+// Wire goto-definition multi-candidate picker: opens a location chooser overlay.
+editor.onGotoDefinitionMulti = (locs) => {
+  mountLocationPicker(locs, (path, line) => void editor.openFile(path, line));
+};
 
 // --- Debugger session ---
 const debugSlot = mountDebuggerSidebarSlot($("main"));
@@ -208,14 +215,18 @@ void onFsChanged((payload) => {
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
     return;
   }
+  // Inform the lang engine to re-index changed files (gracefully degrades if backend absent).
+  if (payload.paths.length > 0) void langIndexInvalidate(payload.paths).catch(() => {});
   scheduleFileSystemRefresh(root);
 });
 
 const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
+let symbolPalette: { open(): void }; // Cmd+T workspace symbol picker
 let gitBar: GitBarHandle; // assigned at boot
 let automationBar: AutomationBarHandle; // assigned at boot
+let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
 let fsRefreshRunning = false;
@@ -507,6 +518,8 @@ async function openWorkspace(dir: string): Promise<void> {
   if (currentRoot !== dir) return;
   gitIndexPath = resolvedGitIndexPath;
   void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
+  // Kick off the workspace symbol index build (gracefully degrades if backend absent).
+  void langIndexBuild(dir).catch(() => {});
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
@@ -924,6 +937,10 @@ window.addEventListener("keydown", (e) => {
   } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP") || (mod && e.code === "KeyK")) {
     e.preventDefault();
     palette.open();
+  } else if (mod && e.code === "KeyT") {
+    // Cmd+T / Ctrl+T: workspace symbol search backed by the lang engine.
+    e.preventDefault();
+    symbolPalette.open();
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
     if (editor.isSplit) void editor.closeSplit();
@@ -1269,6 +1286,9 @@ function recentPaletteCommands(): Command[] {
 
 palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
 
+// Workspace symbol picker (Cmd+T) backed by the lang engine.
+symbolPalette = mountSymbolPalette((path, line) => void editor.openFile(path, line));
+
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {
   const fromPalette = paletteCommands
@@ -1299,6 +1319,27 @@ void getCurrentWindow().onCloseRequested(async (event) => {
   const quit = await confirmNative(`Quit and discard unsaved changes? ${names}${more}`);
   if (!quit) event.preventDefault();
 });
+
+// ---- outline view ----
+// Mount the Files/Outline toggle in the sidebar above the file tree.
+outlineView = new OutlineView(
+  $("sidebar"),
+  $("tree"),
+  () => editor.active?.path ?? null,
+  () => editor.getDocumentSymbols(),
+);
+outlineView.onRevealLine = (path, line) => {
+  void editor.openFile(path, line).then(() => editor.revealLine(line));
+};
+
+// Refresh the outline when the active file changes.
+const _origOnActiveTabChanged = editor.onActiveTabChanged;
+editor.onActiveTabChanged = (tab) => {
+  _origOnActiveTabChanged?.(tab);
+  outlineView.onActiveFileChanged();
+};
+// Debounced outline refresh while editing the active file.
+editor.onDocChanged = () => outlineView.scheduleRefresh();
 
 // ---- boot ----
 applySettings(settings);

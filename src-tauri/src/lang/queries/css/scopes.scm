@@ -1,0 +1,2 @@
+(stylesheet) @scope
+(block) @scope

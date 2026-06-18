@@ -1,4 +1,7 @@
-// Command palette: fuzzy-searchable list of global actions, bound to Cmd+P / Cmd+Shift+P
+// Command palette: fuzzy-searchable list of global actions, bound to Cmd+P / Cmd+Shift+P.
+// Also exports mountSymbolPalette (Cmd+T workspace symbols) and mountLocationPicker
+// (goto-definition multi-candidate chooser).
+import { langWorkspaceSymbols, type Symbol as WorkspaceSymbol, type Location } from "./ipc";
 export interface Command {
   id: string;
   title: string;
@@ -175,4 +178,225 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
   }
 
   return { open };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace symbol picker  (Cmd+T)
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a palette-style overlay for workspace symbols backed by lang_workspace_symbols.
+ * Accepts a navigation callback to open the selected symbol's file at its line.
+ */
+export function mountSymbolPalette(
+  onNavigate: (path: string, line: number) => void,
+): { open(): void } {
+  let overlay: HTMLElement | null = null;
+  let selectedIdx = 0;
+  let results: WorkspaceSymbol[] = [];
+  // Fuzzy-sorted render order; Enter/selection must index into THIS, not `results`.
+  let ordered: WorkspaceSymbol[] = [];
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function close(): void {
+    overlay?.remove();
+    overlay = null;
+    selectedIdx = 0;
+    results = [];
+    ordered = [];
+  }
+
+  function renderResults(list: HTMLElement, query: string): void {
+    // Fuzzy-rank in JS since the backend already returned a filtered set.
+    const scored = results
+      .map((s) => ({ sym: s, score: fuzzyScore(query, s.name) ?? fuzzyScore(query, s.path) ?? 0 }))
+      .sort((a, b) => b.score - a.score);
+    // Persist the sorted order so keyboard selection matches the rendered rows.
+    ordered = scored.map(({ sym }) => sym);
+    list.innerHTML = "";
+    ordered.forEach((sym, idx) => {
+      const row = document.createElement("div");
+      row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
+      const name = document.createElement("span");
+      name.className = "palette-title";
+      name.textContent = sym.name;
+      const detail = document.createElement("span");
+      detail.className = "palette-shortcut";
+      detail.textContent = `${sym.kind}  ${sym.path.split("/").pop() ?? sym.path}`;
+      row.append(name, detail);
+      row.onclick = () => {
+        close();
+        onNavigate(sym.path, sym.selectionRange.start.line + 1);
+      };
+      list.appendChild(row);
+    });
+  }
+
+  function open(): void {
+    if (overlay) { close(); return; }
+
+    overlay = document.createElement("div");
+    overlay.className = "palette-overlay";
+
+    const container = document.createElement("div");
+    container.className = "palette-container";
+
+    const input = document.createElement("input");
+    input.className = "palette-input";
+    input.type = "text";
+    input.placeholder = "Go to symbol in workspace…";
+    input.spellcheck = false;
+    input.autocomplete = "off";
+
+    const list = document.createElement("div");
+    list.className = "palette-list";
+
+    const footer = document.createElement("div");
+    footer.className = "palette-footer";
+    footer.innerHTML = `<span><span class="kbd">↑↓</span> select</span><span><span class="kbd">↵</span> go to</span><span><span class="kbd">esc</span> close</span>`;
+
+    container.append(input, list, footer);
+    overlay.appendChild(container);
+    document.body.appendChild(overlay);
+    input.focus();
+
+    // Debounce the IPC call to avoid spamming on every keystroke.
+    function scheduleQuery(query: string): void {
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        if (!overlay) return;
+        langWorkspaceSymbols(query, 100)
+          .then((syms) => {
+            if (!overlay) return;
+            results = syms ?? [];
+            selectedIdx = 0;
+            renderResults(list, query);
+          })
+          .catch(() => {});
+      }, 150);
+    }
+
+    scheduleQuery("");
+
+    input.addEventListener("input", () => {
+      selectedIdx = 0;
+      scheduleQuery(input.value.trim());
+    });
+
+    input.addEventListener("keydown", (e) => {
+      const count = ordered.length;
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selectedIdx = (selectedIdx - 1 + count) % Math.max(1, count);
+        renderResults(list, input.value.trim());
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selectedIdx = (selectedIdx + 1) % Math.max(1, count);
+        renderResults(list, input.value.trim());
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const sym = ordered[selectedIdx];
+        if (sym) { close(); onNavigate(sym.path, sym.selectionRange.start.line + 1); }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    });
+
+    overlay.addEventListener("mousedown", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { open };
+}
+
+// ---------------------------------------------------------------------------
+// Goto-definition multi-candidate picker
+// ---------------------------------------------------------------------------
+
+/**
+ * Show a palette-style overlay listing multiple goto-definition Location candidates.
+ * Calls onNavigate when the user selects one.
+ */
+export function mountLocationPicker(
+  locs: Location[],
+  onNavigate: (path: string, line: number) => void,
+): void {
+  let selectedIdx = 0;
+
+  const overlay = document.createElement("div");
+  overlay.className = "palette-overlay";
+  // Make the overlay focusable so it receives the keydown events below; without a
+  // tabindex it can never hold focus and arrow/Enter/Esc navigation is dead.
+  overlay.tabIndex = -1;
+
+  const container = document.createElement("div");
+  container.className = "palette-container";
+
+  const label = document.createElement("div");
+  label.className = "palette-section-head";
+  label.textContent = `${locs.length} definitions`;
+
+  const list = document.createElement("div");
+  list.className = "palette-list";
+
+  function close(): void {
+    overlay.remove();
+  }
+
+  function render(): void {
+    list.innerHTML = "";
+    locs.forEach((loc, idx) => {
+      const row = document.createElement("div");
+      row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
+      const name = document.createElement("span");
+      name.className = "palette-title";
+      name.textContent = loc.path.split("/").pop() ?? loc.path;
+      const detail = document.createElement("span");
+      detail.className = "palette-shortcut";
+      detail.textContent = `line ${loc.range.start.line + 1}`;
+      row.append(name, detail);
+      row.onclick = () => {
+        close();
+        onNavigate(loc.path, loc.range.start.line + 1);
+      };
+      list.appendChild(row);
+    });
+  }
+
+  const footer = document.createElement("div");
+  footer.className = "palette-footer";
+  footer.innerHTML = `<span><span class="kbd">↑↓</span> select</span><span><span class="kbd">↵</span> go to</span><span><span class="kbd">esc</span> close</span>`;
+
+  container.append(label, list, footer);
+  overlay.appendChild(container);
+  document.body.appendChild(overlay);
+
+  render();
+  overlay.focus();
+
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      selectedIdx = (selectedIdx - 1 + locs.length) % locs.length;
+      render();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      selectedIdx = (selectedIdx + 1) % locs.length;
+      render();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const loc = locs[selectedIdx];
+      if (loc) { close(); onNavigate(loc.path, loc.range.start.line + 1); }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
 }

@@ -40,8 +40,10 @@ import { sql } from "@codemirror/lang-sql";
 import { go } from "@codemirror/lang-go";
 import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
-import { readFile, gitHeadContent, fileMtime } from "./ipc";
+import { readFile, gitHeadContent, fileMtime, langDidOpen, langDidChange, langDidClose } from "./ipc";
 import { previewServerUrl } from "./ipc";
+import { langAutocompletionExt, langHoverTooltipExt, gotoDefinition } from "./lang";
+import { langDocumentSymbols, type DocumentSymbol } from "./ipc";
 import { computeLineDiff, hunkIndexAtLine, lensModel, type Hunk, type LensModel, type LineMark } from "./diff";
 import { parseConflicts, resolveConflictAtIndex, type ConflictChoice } from "./conflict";
 import { beginSplitPointerDrag } from "./split-drop";
@@ -469,6 +471,9 @@ export class Pane {
   private languageCompartment = new Compartment();
   private indentCompartment = new Compartment();
   private wrapCompartment = new Compartment();
+  // Per-tab monotonic version counter and debounce timer for lang_did_change.
+  private langVersions = new Map<string, number>();
+  private langTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private mgr: EditorManager,
@@ -520,10 +525,32 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners and the CM view when the pane is removed. */
+  /** Release document-level listeners, the pending lang debounce, and the CM view. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
+  }
+
+  /** Debounce lang_did_change so typing doesn't flood the engine; fires after 200 ms. */
+  scheduleLangChange(): void {
+    if (!this.active?.path) return;
+    if (this.langTimer !== null) clearTimeout(this.langTimer);
+    const path = this.active.path;
+    const text = this.view.state.doc.toString();
+    this.langTimer = setTimeout(() => {
+      this.langTimer = null;
+      const prev = this.langVersions.get(path) ?? 0;
+      const version = prev + 1;
+      this.langVersions.set(path, version);
+      langDidChange(path, text, version).catch(() => {});
+    }, 200);
+  }
+
+  /** Notify the engine that a tab was closed and clean up its version counter. */
+  notifyLangClose(path: string): void {
+    this.langVersions.delete(path);
+    langDidClose(path).catch(() => {});
   }
 
   private onOutsideLensMouseDown = (event: MouseEvent): void => {
@@ -575,6 +602,9 @@ export class Pane {
       this.languageCompartment.of(detectLanguage(name) ?? []),
       this.indentCompartment.of(indentSettings(this.mgr.indentSize)),
       this.wrapCompartment.of(this.mgr.wordWrap ? EditorView.lineWrapping : []),
+      // Language-intelligence: completion and hover extensions (degrade gracefully when backend absent).
+      langAutocompletionExt(() => this.active?.path ?? null),
+      langHoverTooltipExt(() => this.active?.path ?? null),
       Prec.high(
         keymap.of([
           { key: "Mod-s", run: () => (this.mgr.requestSave(this), true) },
@@ -587,6 +617,24 @@ export class Pane {
           { key: "Alt-ArrowUp", run: moveLineUp },
           { key: "Shift-Mod-k", run: deleteLine },
           { key: "Escape", run: () => this.closeLens() },
+          // F12: go to definition — resolves via lang engine; single result opens, multiple go to picker.
+          {
+            key: "F12",
+            run: (view) => {
+              const path = this.active?.path;
+              if (!path) return false;
+              void gotoDefinition(this.mgr, path, view).then((locs) => {
+                if (!locs) return;
+                if (locs.length === 1) {
+                  const loc = locs[0];
+                  void this.mgr.openFile(loc.path, loc.range.start.line + 1);
+                } else if (locs.length > 1) {
+                  this.mgr.onGotoDefinitionMulti?.(locs);
+                }
+              });
+              return true;
+            },
+          },
           indentWithTab,
         ]),
       ),
@@ -594,6 +642,8 @@ export class Pane {
         if (u.docChanged && this.active) {
           this.active.dirty = this.view.state.doc.toString() !== this.active.savedContent;
           this.mgr.onPaneDocChanged(this);
+          // Debounce lang_did_change notifications so we don't spam the engine on every keystroke.
+          this.scheduleLangChange();
         }
         if (u.selectionSet && this.active) this.mgr.onSelectionChanged?.();
       }),
@@ -967,6 +1017,10 @@ export class EditorManager {
   onSelectionChanged?: () => void;
   confirmCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
   onActiveTabChanged?: (tab: Tab | null) => void;
+  /** Fires when the focused pane's document content changes; main.ts wires the outline refresh. */
+  onDocChanged?: () => void;
+  /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
+  onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
 
   private container: HTMLElement;
   private splitter: HTMLElement | null = null;
@@ -1128,6 +1182,17 @@ export class EditorManager {
     return firstHunkLineFromTabs(this.tabs, path);
   }
 
+  /** Fetch document symbols for the active file from the lang engine; returns null on error. */
+  async getDocumentSymbols(): Promise<DocumentSymbol[] | null> {
+    const path = this.focused.active?.path;
+    if (!path) return null;
+    try {
+      return await langDocumentSymbols(path);
+    } catch {
+      return null;
+    }
+  }
+
   tabByPath(path: string): Tab | undefined {
     for (const p of this.panes) {
       const t = p.tabByPath(path);
@@ -1205,6 +1270,8 @@ export class EditorManager {
     pane.addTab(tab);
     this.activateInPane(pane, tab);
     if (line !== undefined) this.revealLine(line);
+    // Notify the language engine that this document is now open (version 0 = initial load).
+    langDidOpen(path, content, 0).catch(() => {});
   }
 
   /** Open latest disk content for review without overwriting a dirty human buffer. */
@@ -1337,6 +1404,8 @@ export class EditorManager {
   private closeTabInPane(pane: Pane, tab: Tab): void {
     // closing a source tab tears down any preview bound to it
     for (const p of this.panes) if (p.previewSource === tab) p.hidePreview();
+    // Notify the language engine to drop the cached parse tree for this path.
+    if (tab.path) pane.notifyLangClose(tab.path);
     const wasActive = pane.active === tab;
     pane.removeTab(tab);
     if (wasActive) {
@@ -1524,6 +1593,7 @@ export class EditorManager {
     if (pane.active) this.schedulePreviewRefresh(pane.active, pane.getContent());
     this.renderAllTabs();
     this.onTabsChanged?.();
+    this.onDocChanged?.();
   }
 
   /** Revert one hunk in the focused pane back to baseline (newline-safe). */

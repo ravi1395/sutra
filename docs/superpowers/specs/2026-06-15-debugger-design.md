@@ -190,7 +190,7 @@ All adapters speak DAP — over **stdio** or a **TCP socket** (see Transport Abs
 | `go.mod` | Go | stdio | `dlv dap` — **`dap` subcommand**, not bare `dlv`. | ✅ |
 | `*.csproj` / `*.sln` | C# / .NET | stdio | `netcoredbg --interpreter=vscode` | ⏳ post-v1 |
 | `package.json` | Node / JS / TS | socket | `node <js-debug>/src/dapDebugServer.js` — **not `node --inspect-brk`** (that's V8 inspector/CDP, not DAP). Port printed on startup; spawns child sessions via `startDebugging`. | ⏳ post-v1 (multi-session) |
-| `pom.xml` / `build.gradle` | Java / Kotlin | socket | **No standalone binary.** `java-debug` runs *inside* jdt.ls. Port returned by the `vscode.java.startDebugSession` LSP command. Depends on the LSP work in [[2026-06-08-lsp-more-languages-design]]. | ⏳ post-v1 |
+| `pom.xml` / `build.gradle` | Java / Kotlin | socket | **No standalone binary.** `java-debug` runs *inside* jdt.ls. Port returned by the `vscode.java.startDebugSession` LSP command. Needs a real Java language server (jdt.ls) — i.e. the optional out-of-process "Tier C" escape hatch in [[2026-06-17-lsp-engine-design]], not the in-house syntactic engine. | ⏳ post-v1 |
 | `build.sbt` / `build.sc` | Scala | socket | Metals exposes a DAP server; port from the Metals build-server handshake. | ⏳ post-v1 |
 | `.sutra/adapters.json` | Custom | stdio or socket | user-defined; transport declared in config | ✅ |
 
