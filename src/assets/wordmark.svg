@@ -1,0 +1,20 @@
+<!-- Sutra horizontal wordmark lockup: eternal-knot mark + the name set in the
+     brand "voice" serif, with the Devanagari सूत्र as a quiet Sanskrit anchor. -->
+<svg width="320" height="80" viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sutra">
+  <defs>
+    <linearGradient id="wmKnot" x1="13" y1="13" x2="52" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ef0ad"/>
+      <stop offset="1" stop-color="#1f8a63"/>
+    </linearGradient>
+  </defs>
+  <!-- mark -->
+  <g transform="translate(8,8)">
+    <path d="M20 13 H32 A7 7 0 0 1 39 20 V32 A7 7 0 0 1 32 39 H30 M22 39 H20 A7 7 0 0 1 13 32 V20 A7 7 0 0 1 20 13
+             M33 26 H35 M43 26 H45 A7 7 0 0 1 52 33 V45 A7 7 0 0 1 45 52 H33 A7 7 0 0 1 26 45 V33 A7 7 0 0 1 33 26"
+          stroke="url(#wmKnot)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- wordmark -->
+  <text x="92" y="44" font-family="Fraunces, Georgia, serif" font-style="italic" font-size="38" fill="#4ade93">sutra</text>
+  <!-- Sanskrit anchor -->
+  <text x="93" y="66" font-family="'Noto Sans Devanagari', system-ui, sans-serif" font-size="15" letter-spacing="1.5" fill="#8b9189">सूत्र</text>
+</svg>

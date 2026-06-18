@@ -1,0 +1,13 @@
+<!-- Sutra primary mark: an eternal knot — two rounded loops woven over-and-under
+     into one unbroken thread (sūtra). The gaps encode the weave. -->
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sutra">
+  <defs>
+    <linearGradient id="sutraKnot" x1="13" y1="13" x2="52" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ef0ad"/>
+      <stop offset="1" stop-color="#1f8a63"/>
+    </linearGradient>
+  </defs>
+  <path d="M20 13 H32 A7 7 0 0 1 39 20 V32 A7 7 0 0 1 32 39 H30 M22 39 H20 A7 7 0 0 1 13 32 V20 A7 7 0 0 1 20 13
+           M33 26 H35 M43 26 H45 A7 7 0 0 1 52 33 V45 A7 7 0 0 1 45 52 H33 A7 7 0 0 1 26 45 V33 A7 7 0 0 1 33 26"
+        stroke="url(#sutraKnot)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

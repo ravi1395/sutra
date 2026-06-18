@@ -153,6 +153,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
   function renderWordmark(): void {
     const name = current ? (current.split("/").pop() || current) : "sutra";
     wordmark.innerHTML =
+      `<span class="wm-mark">${icon("brandMark", 16, 2)}</span>` +
       `<span class="wm-name">${name}</span>` +
       `<span class="wm-chev">${icon("chevronDown", 11, 2.4)}</span>`;
   }
