@@ -194,6 +194,8 @@ export function mountSymbolPalette(
   let overlay: HTMLElement | null = null;
   let selectedIdx = 0;
   let results: WorkspaceSymbol[] = [];
+  // Fuzzy-sorted render order; Enter/selection must index into THIS, not `results`.
+  let ordered: WorkspaceSymbol[] = [];
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function close(): void {
@@ -201,6 +203,7 @@ export function mountSymbolPalette(
     overlay = null;
     selectedIdx = 0;
     results = [];
+    ordered = [];
   }
 
   function renderResults(list: HTMLElement, query: string): void {
@@ -208,8 +211,10 @@ export function mountSymbolPalette(
     const scored = results
       .map((s) => ({ sym: s, score: fuzzyScore(query, s.name) ?? fuzzyScore(query, s.path) ?? 0 }))
       .sort((a, b) => b.score - a.score);
+    // Persist the sorted order so keyboard selection matches the rendered rows.
+    ordered = scored.map(({ sym }) => sym);
     list.innerHTML = "";
-    scored.forEach(({ sym }, idx) => {
+    ordered.forEach((sym, idx) => {
       const row = document.createElement("div");
       row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
       const name = document.createElement("span");
@@ -280,7 +285,7 @@ export function mountSymbolPalette(
     });
 
     input.addEventListener("keydown", (e) => {
-      const count = list.querySelectorAll(".palette-row").length;
+      const count = ordered.length;
       if (e.key === "ArrowUp") {
         e.preventDefault();
         selectedIdx = (selectedIdx - 1 + count) % Math.max(1, count);
@@ -291,7 +296,7 @@ export function mountSymbolPalette(
         renderResults(list, input.value.trim());
       } else if (e.key === "Enter") {
         e.preventDefault();
-        const sym = results[selectedIdx];
+        const sym = ordered[selectedIdx];
         if (sym) { close(); onNavigate(sym.path, sym.selectionRange.start.line + 1); }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -323,6 +328,9 @@ export function mountLocationPicker(
 
   const overlay = document.createElement("div");
   overlay.className = "palette-overlay";
+  // Make the overlay focusable so it receives the keydown events below; without a
+  // tabindex it can never hold focus and arrow/Enter/Esc navigation is dead.
+  overlay.tabIndex = -1;
 
   const container = document.createElement("div");
   container.className = "palette-container";
@@ -367,7 +375,7 @@ export function mountLocationPicker(
   document.body.appendChild(overlay);
 
   render();
-  overlay.querySelector<HTMLElement>(".palette-row")?.focus();
+  overlay.focus();
 
   overlay.addEventListener("keydown", (e) => {
     if (e.key === "ArrowUp") {
