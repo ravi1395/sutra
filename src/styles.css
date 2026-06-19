@@ -425,11 +425,18 @@ button:hover {
   font-weight: 500;
 }
 
-/* ---- palette bar — VS Code-style centered command button ---- */
-#btn-palette {
+/* ---- palette bar — VS Code-style centered command button ----
+   The cluster owns the centering so the palette + (optional) update button
+   stay grouped; with the update button hidden this is identical to before. */
+#center-cluster {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#btn-palette {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -462,6 +469,37 @@ button:hover {
   border-radius: 3px;
   padding: 1px 5px;
   font-family: var(--mono);
+}
+
+/* ---- update pill — surfaces beside the palette when a release is ready ---- */
+#btn-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--em-dim);
+  background: var(--em-wash);
+  color: var(--em);
+  font-family: var(--ui);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#btn-update:hover {
+  background: var(--em-wash-row);
+  border-color: var(--em);
+}
+#btn-update[disabled] {
+  cursor: default;
+  opacity: 0.85;
+}
+#btn-update .upd-label {
+  font-weight: 500;
+}
+#btn-update.hidden {
+  display: none;
 }
 
 /* ---- automations picker (titlebar, Variant C) ---- */

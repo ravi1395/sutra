@@ -32,6 +32,7 @@ Main boot flow:
 | `src/menubar.ts` | Workspace wordmark menu and shared popover primitive reused by the app menu | `mountWorkspaceBar`, `WorkspaceBarHandle`, `openPopover`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
 | `src/palette.ts` | Command palette UI — fuzzy search over recent/workspace verbs, sectioned list, keyboard navigation | `mountPalette`, `groupCommands` |
+| `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, download+install+relaunch | `mountUpdater`, `progressPercent` |
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, theme-aware syntax styling, diff gutter, inline hunk lens, marginalia, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk`, `openLens` |
 | `src/diff.ts` | Line diff classification, inline hunk-lens display model, changed-file list, deleted/binary status rendering | `computeLineDiff`, `hunkIndexAtLine`, `lensModel`, `DiffViewer.render`, `DiffViewer.renderStatus`, `DiffViewer.renderFileList` |
 | `src/conflict.ts` | Merge conflict resolution UI — parses conflict markers in editor buffer, provides accept-ours/accept-theirs actions | conflict resolution classes and helpers |
@@ -50,7 +51,7 @@ Main boot flow:
 | `src/settings.ts` | Persisted editor/terminal/behavior/theme settings and clamp/update helpers | `loadSettings`, `saveSettings`, `nextFontSettings`, `clampSettings` |
 | `src/settings-modal.ts` | Cmd+, settings overlay UI with Editor/Terminal/Behavior/Shortcuts/About sections; host-driven live apply wiring | `openSettingsModal`, `SettingsModalDeps`, `ShortcutEntry` |
 | `src/preview.ts` | Markdown/HTML live preview in split pane; Markdown via `marked` + `DOMPurify`; HTML via static preview server | `PreviewController` |
-| `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply` |
+| `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply`, `checkForUpdate`, `installUpdate`, `relaunchApp` |
 | `src/git-index.ts` | Pure helpers for resolving the real Git index in regular repos and linked worktrees | `parseGitDirLine`, `resolveGitIndexPathFromGitDir` |
 | `src/layout.ts` | Drag resize behavior for vertical and horizontal splitters; horizontal targets may shrink to remain inside app bounds | `vResizer`, `hResizer` |
 | `src/styles.css` | Ink/Washi theme tokens, viewport-clipped app root, vendored `@font-face`, loom/titlebar chrome, shared `.menu-card` grammar, panes, tabs, breadcrumb, marginalia, diff lens/viewer, terminal drawer, whisper bar | CSS selectors only |

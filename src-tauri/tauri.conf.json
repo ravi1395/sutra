@@ -25,6 +25,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -32,5 +33,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ravi1395/sutra/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUwREI4NkQ0ODk4NThGRDUKUldUVmo0V0oxSWJiNEs2d09OcEZaOWFyYWRpanhRTFcrbHJYdG1kNmxHRjdrdm9oYzdHV0pCK3kK"
+    }
   }
 }
