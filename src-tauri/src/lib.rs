@@ -34,6 +34,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // process + updater power the in-app self-update (relaunch after install).
+        .plugin(tauri_plugin_process::init())
         .manage(agent_tracker::AgentTrackerState::default())
         .manage(local_auth_token)
         .manage(preview_server::PreviewServerState::default())
@@ -43,6 +45,11 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .manage(watcher::WatcherState::default())
         .setup(|app| {
+            // Desktop-only self-updater: registered here so the chain stays
+            // mobile-safe (no updater crate on Android/iOS).
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             let state = app.state::<mcp::McpState>();
             let token = app.state::<mcp::LocalAuthToken>().value().to_string();
             let port = mcp::start(

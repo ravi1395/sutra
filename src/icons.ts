@@ -31,6 +31,7 @@ export type IconName =
   | "stop"
   | "brandMark"
   | "pencil"
+  | "download"
   | "trash";
 
 const paths: Record<IconName, string> = {
@@ -68,6 +69,8 @@ const paths: Record<IconName, string> = {
   // Sutra brand mark: an eternal knot — two loops woven over-and-under.
   brandMark: '<path d="M7.5 5 H12.5 A2.5 2.5 0 0 1 15 7.5 V12.5 A2.5 2.5 0 0 1 12.5 15 H11.6 M8.4 15 H7.5 A2.5 2.5 0 0 1 5 12.5 V7.5 A2.5 2.5 0 0 1 7.5 5 M11.5 9 H13.4 A2.5 2.5 0 0 1 19 11.5 V16.5 A2.5 2.5 0 0 1 16.5 19 H11.5 A2.5 2.5 0 0 1 9 16.5 V11.5 A2.5 2.5 0 0 1 11.5 9"/>',
   pencil: '<path d="M4 20h4l10-10a2 2 0 0 0-2.8-2.8L5.2 17.2 4 20z"/><path d="M14 6l4 4"/>',
+  // Tray-with-down-arrow: surfaces an available app update.
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 19h14"/>',
   trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
 };
 

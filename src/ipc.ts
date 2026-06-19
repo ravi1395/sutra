@@ -3,6 +3,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 export interface Entry {
   name: string;
@@ -170,6 +172,21 @@ export const searchDir = (
 // Clipboard wrappers over tauri-plugin-clipboard-manager.
 export const clipboardRead = (): Promise<string> => readText();
 export const clipboardWrite = (text: string): Promise<void> => writeText(text);
+
+// --- Self-update (tauri-plugin-updater + plugin-process) ---
+// Centralizes the updater/process plugin surface so updater.ts stays
+// transport-agnostic. `Update` is treated as an opaque handle by callers.
+export type { Update, DownloadEvent };
+// Hit the release endpoint; resolves to an Update handle when a newer signed
+// release exists, or null when already current.
+export const checkForUpdate = (): Promise<Update | null> => check();
+// Download + install a resolved update, streaming progress to `onEvent`.
+export const installUpdate = (
+  update: Update,
+  onEvent: (e: DownloadEvent) => void,
+): Promise<void> => update.downloadAndInstall(onEvent);
+// Relaunch the app (used right after a successful install).
+export const relaunchApp = (): Promise<void> => relaunch();
 
 // --- Debugger (DAP) ---
 // Transport selects how the Rust proxy reaches the adapter: spawn a process
