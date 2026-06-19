@@ -374,4 +374,15 @@ def outside():
             .unwrap()
             .is_none());
     }
+
+
+    #[test]
+    fn typescript_document_symbols_returns_functions() {
+        let mut engine = LangEngine::default();
+        let src = r#"export function foo(x: number): string { return ""; }
+export class Bar { method(): void {} }"#;
+        engine.did_open("/tmp/test.ts".to_string(), src.to_string(), 1).unwrap();
+        let syms = engine.document_symbols("/tmp/test.ts").unwrap();
+        assert!(!syms.is_empty(), "expected symbols for TypeScript file, got none");
+    }
 }

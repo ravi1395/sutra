@@ -182,12 +182,23 @@ pub fn spec(id: LanguageId) -> LanguageSpec {
             doc_comment: DocCommentStyle::LeadingLinePrefix("///"),
             keywords: RUST_KEYWORDS,
         },
-        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => LanguageSpec {
+        LanguageId::JavaScript => LanguageSpec {
             id,
             ts_language: lang(id),
             symbols_query: include_str!("queries/javascript/symbols.scm"),
             scopes_query: include_str!("queries/javascript/scopes.scm"),
             members_query: Some(include_str!("queries/javascript/members.scm")),
+            doc_comment: DocCommentStyle::BlockBefore("/**", "*/"),
+            keywords: JS_KEYWORDS,
+        },
+        // TypeScript and TSX use type_identifier for class/interface/type names,
+        // so they need separate queries from JavaScript.
+        LanguageId::TypeScript | LanguageId::Tsx => LanguageSpec {
+            id,
+            ts_language: lang(id),
+            symbols_query: include_str!("queries/typescript/symbols.scm"),
+            scopes_query: include_str!("queries/typescript/scopes.scm"),
+            members_query: Some(include_str!("queries/typescript/members.scm")),
             doc_comment: DocCommentStyle::BlockBefore("/**", "*/"),
             keywords: JS_KEYWORDS,
         },
