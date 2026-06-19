@@ -14,9 +14,20 @@ pub fn hover(path: &str, doc: &ParsedDocument, pos: Pos, workspace: Vec<Symbol>)
             .find(|sym| sym.name == name)
             .cloned()
     })?;
-    let decl = symbols
+    let Some(decl) = symbols
         .iter()
-        .find(|sym| sym.selection_range == target.selection_range)?;
+        .find(|sym| sym.path == path && sym.selection_range == target.selection_range)
+    else {
+        return Some(Hover {
+            signature: target
+                .detail
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| target.name.clone()),
+            doc: None,
+            kind: target.kind.clone(),
+        });
+    };
     let node = doc.tree.root_node().named_descendant_for_byte_range(
         byte_for_line(&doc.source, decl.range.start.line),
         byte_for_line(&doc.source, decl.range.end.line.saturating_add(1)),

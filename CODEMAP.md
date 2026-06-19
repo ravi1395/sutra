@@ -42,6 +42,7 @@ Main boot flow:
 | `src/tree.ts` | Lazy folder tree rendering, active-file highlighting, MCP reveal expansion, file drag source, tree move payloads, file-type badge metadata | `FileTree`, `setRoot`, `setActive`, `reveal`, `render`, `renderDir`, `makeRow`, `refresh`, `fileTypeMeta` (6 callers), `cssEscape` |
 | `src/search.ts` | Project-wide search panel — query input, live results, file-line navigation | `SearchPanel` |
 | `src/search-panel.ts` | CodeMirror in-editor search panel extension (find/replace within active buffer) | `buildSearchPanel`, `btn` (7 callers) |
+| `src/lang.ts` | CodeMirror language-intelligence bridge: maps editor offsets to backend positions, wires completion, hover tooltips, and goto-definition IPC | `offsetToPos`, `posToOffset`, `langCompletionSource`, `langHoverTooltipExt`, `gotoDefinition` |
 | `src/split-drop.ts` | Pointer-driven editor/terminal tab drag tracking, left/right target detection, tree drag payload constants, split-drop overlay helpers | `beginSplitPointerDrag`, `pointerDragStarted`, `splitSideAtPoint` (6 callers), `splitSideFromClientX` (6 callers), `dragHasType`, `setSplitDropHint`, `FILE_DRAG_TYPE`, `TREE_ENTRY_DRAG_TYPE` |
 | `src/terminal-groups.ts` | Pure terminal drawer-state clamp/load helpers plus left/right terminal group movement | `DRAWER_KEY`, `loadDrawerState`, `clampDrawerState`, `moveItemToGroup`, `removeItemFromGroups`, `collapseAfterClose`, `groupSideForItem` |
 | `src/terminal.ts` | xterm frontends, multi-terminal split groups, PTY lifecycle, optional per-terminal cwd + shell override, agent-attached tab markers, direct Claude/Codex pre-execution tracking hint | `TerminalManager`, `create`, `activate`, `close`, `reset`, `refit`, `interrupt` |
@@ -71,6 +72,7 @@ Main boot flow:
 | `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
 | `src-tauri/src/search.rs` | Project-wide file search, literal by default with explicit regex opt-in | `search_dir`; structs: `SearchMatch`, `SearchResult` |
 | `src-tauri/src/watcher.rs` | Recursive native filesystem watching for the active workspace; debounces changed paths into `fs-changed` events | `WatcherState`, `watch_start`, `watch_stop` |
+| `src-tauri/src/lang/` | In-process Tree-sitter language engine for open-document parsing, query-backed symbols/outline, hover, completion, goto-definition, and workspace symbol indexing | `LangEngine`, `lang_did_open`, `lang_document_symbols`, `lang_hover`, `symbols_for_source`, `collect_query_symbols` |
 
 ## Important Call Paths
 
@@ -103,6 +105,9 @@ App menu / workspace wordmark menu / `Cmd+,` / Command Palette Settings → `mai
 
 **Project search:**
 `SearchPanel.query` → `ipc.searchDir` → Rust `search_dir` (literal by default, regex only when `isRegex` is true) → results rendered as file:line rows → clicking opens file in editor.
+
+**Language outline / hover:**
+`EditorManager.openFile` sends `lang_did_open` with the active text. Sidebar Outline calls `EditorManager.getDocumentSymbols` → `lang_document_symbols` → Rust `LangEngine.document_symbols` → `symbols_for_document`, which executes each language's `queries/*/symbols.scm` captures such as `@decl.variable` and `@name`. CodeMirror hover uses `langHoverTooltipExt` → `lang_hover`; hover resolves identifier-like nodes (`identifier`, `type_identifier`, property/field identifiers, etc.) against local symbols first, then workspace-indexed symbols when the declaration is external.
 
 **Drag-to-split editor:**
 `FileTree.makeRow` marks rows with `FILE_DRAG_TYPE`/`TREE_ENTRY_DRAG_TYPE`; editor tabs use `beginSplitPointerDrag` (avoids WKWebView HTML drag routing). Releasing over `#panes` → `EditorManager.moveTabToSide`, collapses empty right pane.
@@ -138,6 +143,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 ## Test Strategy
 
 - Workspace tab filtering/session restore, breadcrumb/menu models, settings, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups/drawer state, native Edit menu structure: `npm test`
+- Rust language engine outline/hover/completion/goto-definition behavior: `cargo test --manifest-path src-tauri/Cargo.toml lang::tests -- --nocapture`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
 - MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
 - Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`

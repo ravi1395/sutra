@@ -375,14 +375,196 @@ def outside():
             .is_none());
     }
 
-
     #[test]
     fn typescript_document_symbols_returns_functions() {
         let mut engine = LangEngine::default();
         let src = r#"export function foo(x: number): string { return ""; }
 export class Bar { method(): void {} }"#;
-        engine.did_open("/tmp/test.ts".to_string(), src.to_string(), 1).unwrap();
+        engine
+            .did_open("/tmp/test.ts".to_string(), src.to_string(), 1)
+            .unwrap();
         let syms = engine.document_symbols("/tmp/test.ts").unwrap();
-        assert!(!syms.is_empty(), "expected symbols for TypeScript file, got none");
+        assert!(
+            !syms.is_empty(),
+            "expected symbols for TypeScript file, got none"
+        );
+    }
+
+    #[test]
+    fn typescript_document_symbols_use_query_variable_captures() {
+        let mut engine = LangEngine::default();
+        let src = r#"// @ts-expect-error process is a nodejs global
+const host = process.env.TAURI_DEV_HOST;
+
+export default defineConfig(async () => ({
+  clearScreen: false,
+  server: {
+    port: 1420,
+  },
+}));"#;
+        engine
+            .did_open("/tmp/vite.config.ts".to_string(), src.to_string(), 1)
+            .unwrap();
+
+        let syms = engine.document_symbols("/tmp/vite.config.ts").unwrap();
+
+        assert!(
+            syms.iter()
+                .any(|sym| sym.name == "host" && sym.kind == "variable"),
+            "expected TypeScript lexical declarations from symbols.scm, got {syms:?}"
+        );
+        let hover = engine
+            .hover(
+                "/tmp/vite.config.ts",
+                Pos {
+                    line: 1,
+                    character: 6,
+                },
+            )
+            .unwrap()
+            .expect("expected hover for query-captured const");
+        assert_eq!(hover.kind, "variable");
+    }
+
+    #[test]
+    fn typescript_document_symbols_include_configured_query_declarations() {
+        let mut engine = LangEngine::default();
+        let src = r#"export interface Props {
+  label: string;
+}
+
+type Mode = "idle" | "busy";
+
+export enum Status {
+  Ready,
+}
+
+export class Widget {}
+
+export function renderWidget(props: Props): Mode {
+  return "idle";
+}
+
+const LocalWidget = () => renderWidget({ label: "ok" });"#;
+        engine
+            .did_open("/tmp/component.ts".to_string(), src.to_string(), 1)
+            .unwrap();
+
+        let symbols = engine.document_symbols("/tmp/component.ts").unwrap();
+        let names: Vec<_> = symbols.iter().map(|sym| sym.name.as_str()).collect();
+
+        for expected in [
+            "Props",
+            "Mode",
+            "Status",
+            "Widget",
+            "renderWidget",
+            "LocalWidget",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in TypeScript outline, got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_document_symbols_include_class_methods() {
+        let mut engine = LangEngine::default();
+        let src = r#"export class BrowserPane {
+  show(): void {
+    this.area.classList.remove("hidden");
+  }
+
+  hide(): void {
+    this.area.classList.add("hidden");
+  }
+
+  isHidden(): boolean {
+    return this.area.classList.contains("hidden");
+  }
+}"#;
+        engine
+            .did_open("/tmp/browser.ts".to_string(), src.to_string(), 1)
+            .unwrap();
+
+        let symbols = engine.document_symbols("/tmp/browser.ts").unwrap();
+        let class_symbol = symbols
+            .iter()
+            .find(|sym| sym.name == "BrowserPane")
+            .expect("expected BrowserPane class symbol");
+        let methods: Vec<_> = class_symbol
+            .children
+            .iter()
+            .map(|sym| (sym.name.as_str(), sym.kind.as_str()))
+            .collect();
+
+        assert_eq!(
+            methods,
+            vec![("show", "function"), ("hide", "function"), ("isHidden", "function")]
+        );
+    }
+
+    #[test]
+    fn typescript_hover_resolves_configured_type_identifier_use_sites() {
+        let mut engine = LangEngine::default();
+        let src = r#"interface Props {
+  label: string;
+}
+
+function renderWidget(props: Props): Props {
+  return props;
+}"#;
+        engine
+            .did_open("/tmp/component.ts".to_string(), src.to_string(), 1)
+            .unwrap();
+
+        let hover = engine
+            .hover(
+                "/tmp/component.ts",
+                Pos {
+                    line: 4,
+                    character: 30,
+                },
+            )
+            .unwrap()
+            .expect("expected hover for Props type use");
+
+        assert_eq!(hover.kind, "interface");
+        assert!(hover.signature.starts_with("interface Props"));
+    }
+
+    #[test]
+    fn typescript_hover_uses_workspace_symbol_when_declaration_is_external() {
+        let mut engine = LangEngine::default();
+        engine
+            .did_open(
+                "/tmp/Button.ts".to_string(),
+                "export function Button() { return null; }\n".to_string(),
+                1,
+            )
+            .unwrap();
+        engine.index_open_document("/tmp/Button.ts").unwrap();
+        engine
+            .did_open(
+                "/tmp/App.ts".to_string(),
+                "export function App() { return Button(); }\n".to_string(),
+                1,
+            )
+            .unwrap();
+
+        let hover = engine
+            .hover(
+                "/tmp/App.ts",
+                Pos {
+                    line: 0,
+                    character: 31,
+                },
+            )
+            .unwrap()
+            .expect("expected hover for external Button symbol");
+
+        assert_eq!(hover.kind, "function");
+        assert_eq!(hover.signature, "function Button()");
     }
 }

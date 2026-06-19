@@ -1,6 +1,8 @@
 use crate::lang::parser_cache::ParsedDocument;
+use crate::lang::registry;
 use crate::lang::{DocumentSymbol, Pos, Range, Symbol};
-use tree_sitter::Node;
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Node, Query, QueryCursor};
 
 pub fn symbols_for_document(doc: &ParsedDocument) -> Vec<DocumentSymbol> {
     let flat = collect_symbols("", doc);
@@ -12,10 +14,74 @@ pub fn symbols_for_source(path: &str, doc: &ParsedDocument) -> Vec<Symbol> {
 }
 
 fn collect_symbols(path: &str, doc: &ParsedDocument) -> Vec<Symbol> {
+    let queried = collect_query_symbols(path, doc);
+    if !queried.is_empty() {
+        return queried;
+    }
     let mut out = Vec::new();
     let root = doc.tree.root_node();
     collect_node(root, &doc.source, path, &mut Vec::new(), &mut out);
     out
+}
+
+fn collect_query_symbols(path: &str, doc: &ParsedDocument) -> Vec<Symbol> {
+    let spec = registry::spec(doc.lang);
+    let Some(ref language) = spec.ts_language else {
+        return Vec::new();
+    };
+    if spec.symbols_query.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(query) = Query::new(language, spec.symbols_query) else {
+        return Vec::new();
+    };
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, doc.tree.root_node(), doc.source.as_bytes());
+    let mut symbols = Vec::new();
+
+    while let Some(query_match) = matches.next() {
+        let mut decl_node = None;
+        let mut name_node = None;
+        let mut kind = None;
+        for capture in query_match.captures {
+            let capture_name = capture_names
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or_default();
+            if capture_name == "name" {
+                name_node = Some(capture.node);
+            } else if let Some(rest) = capture_name.strip_prefix("decl.") {
+                decl_node = Some(capture.node);
+                kind = Some(rest);
+            }
+        }
+        let (Some(decl_node), Some(name_node), Some(kind)) = (decl_node, name_node, kind) else {
+            continue;
+        };
+        let Some(name) = text_of(&doc.source, name_node) else {
+            continue;
+        };
+        symbols.push(Symbol {
+            name,
+            kind: kind.to_string(),
+            path: path.to_string(),
+            range: node_range(&doc.source, decl_node),
+            selection_range: node_range(&doc.source, name_node),
+            container: None,
+            detail: Some(signature_for_node(&doc.source, decl_node)),
+        });
+    }
+
+    assign_containers(&mut symbols);
+    symbols
+}
+
+fn assign_containers(symbols: &mut [Symbol]) {
+    let parents = parent_indices(symbols);
+    for idx in 0..symbols.len() {
+        symbols[idx].container = parents[idx].map(|parent| symbols[parent].name.clone());
+    }
 }
 
 fn collect_node(
@@ -138,16 +204,27 @@ pub fn pos_to_byte(source: &str, pos: Pos) -> usize {
 
 pub fn identifier_at(doc: &ParsedDocument, pos: Pos) -> Option<(String, Node<'_>)> {
     let byte = pos_to_byte(&doc.source, pos);
-    let node = doc
+    let mut node = doc
         .tree
         .root_node()
         .named_descendant_for_byte_range(byte, byte)?;
-    let node = if node.kind() == "identifier" {
-        node
-    } else {
-        node.parent().filter(|p| p.kind() == "identifier")?
-    };
+    while !is_identifier_like(node.kind()) {
+        node = node.parent()?;
+    }
     text_of(&doc.source, node).map(|name| (name, node))
+}
+
+fn is_identifier_like(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "type_identifier"
+            | "property_identifier"
+            | "field_identifier"
+            | "constant"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+    )
 }
 
 pub fn signature_for_node(source: &str, node: Node<'_>) -> String {
@@ -175,11 +252,13 @@ pub fn contains_pos(range: &Range, pos: Pos) -> bool {
 }
 
 fn nest_document_symbols(flat: Vec<Symbol>) -> Vec<DocumentSymbol> {
-    fn convert(sym: &Symbol, all: &[Symbol]) -> DocumentSymbol {
+    fn convert(idx: usize, all: &[Symbol], parents: &[Option<usize>]) -> DocumentSymbol {
+        let sym = &all[idx];
         let children = all
             .iter()
-            .filter(|child| child.container.as_deref() == Some(sym.name.as_str()))
-            .map(|child| convert(child, all))
+            .enumerate()
+            .filter(|(child_idx, _)| parents[*child_idx] == Some(idx))
+            .map(|(child_idx, _)| convert(child_idx, all, parents))
             .collect();
         DocumentSymbol {
             name: sym.name.clone(),
@@ -189,8 +268,51 @@ fn nest_document_symbols(flat: Vec<Symbol>) -> Vec<DocumentSymbol> {
             children,
         }
     }
+    let parents = parent_indices(&flat);
     flat.iter()
-        .filter(|sym| sym.container.is_none())
-        .map(|sym| convert(sym, &flat))
+        .enumerate()
+        .filter(|(idx, _)| parents[*idx].is_none())
+        .map(|(idx, _)| convert(idx, &flat, &parents))
         .collect()
+}
+
+fn parent_indices(symbols: &[Symbol]) -> Vec<Option<usize>> {
+    let mut parents = Vec::with_capacity(symbols.len());
+    for (idx, child) in symbols.iter().enumerate() {
+        let parent = symbols
+            .iter()
+            .enumerate()
+            .filter(|(candidate_idx, parent)| {
+                *candidate_idx != idx && range_strictly_contains(&parent.range, &child.range)
+            })
+            .min_by_key(|(_, parent)| range_span_key(&parent.range))
+            .map(|(candidate_idx, _)| candidate_idx);
+        parents.push(parent);
+    }
+    parents
+}
+
+fn range_strictly_contains(parent: &Range, child: &Range) -> bool {
+    range_contains(parent, child.start)
+        && range_contains(parent, child.end)
+        && (parent.start != child.start || parent.end != child.end)
+}
+
+fn range_contains(range: &Range, pos: Pos) -> bool {
+    pos_after_or_eq(pos, range.start) && pos_before_or_eq(pos, range.end)
+}
+
+fn pos_after_or_eq(pos: Pos, start: Pos) -> bool {
+    pos.line > start.line || pos.line == start.line && pos.character >= start.character
+}
+
+fn pos_before_or_eq(pos: Pos, end: Pos) -> bool {
+    pos.line < end.line || pos.line == end.line && pos.character <= end.character
+}
+
+fn range_span_key(range: &Range) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+    )
 }

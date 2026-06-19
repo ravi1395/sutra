@@ -3875,6 +3875,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "streaming-iterator",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
