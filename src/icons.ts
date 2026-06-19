@@ -32,7 +32,8 @@ export type IconName =
   | "brandMark"
   | "pencil"
   | "download"
-  | "trash";
+  | "trash"
+  | "list";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -72,6 +73,8 @@ const paths: Record<IconName, string> = {
   // Tray-with-down-arrow: surfaces an available app update.
   download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 19h14"/>',
   trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
+  // Indented-lines glyph representing a symbol outline / hierarchy tree.
+  list: '<path d="M3 6h18M7 12h14M10 18h11"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

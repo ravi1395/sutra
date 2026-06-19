@@ -4,6 +4,7 @@
 // Also exports OutlineView for the Files/Outline sidebar toggle.
 import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
 import { showContextMenu } from "./contextmenu";
+import { icon } from "./icons";
 import {
   FILE_DRAG_TYPE,
   TREE_ENTRY_DRAG_TYPE,
@@ -583,14 +584,15 @@ export class OutlineView {
     this.toggleBar = document.createElement("div");
     this.toggleBar.className = "outline-toggle-bar";
 
+    // Icon + label markup mirrors the file-tree row vocabulary (mono, gutter-aligned).
     this.filesBtn = document.createElement("button");
     this.filesBtn.className = "outline-tab active";
-    this.filesBtn.textContent = "Files";
+    this.filesBtn.innerHTML = `${icon("folder", 14)}<span>Files</span>`;
     this.filesBtn.onclick = () => this.setMode("files");
 
     this.outlineBtn = document.createElement("button");
     this.outlineBtn.className = "outline-tab";
-    this.outlineBtn.textContent = "Outline";
+    this.outlineBtn.innerHTML = `${icon("list", 14)}<span>Outline</span>`;
     this.outlineBtn.onclick = () => this.setMode("outline");
 
     this.toggleBar.append(this.filesBtn, this.outlineBtn);
