@@ -9,6 +9,8 @@ import {
   debugStop,
   breakpointStore,
   type AdapterSpec,
+  type LaunchConfig,
+  type TauriTransport,
 } from "./debug";
 import { DebuggerSidebar, emptyModel, type SidebarModel } from "./debugger-sidebar";
 import { setBreakpointMarks, setPausedLine, setInlineHints } from "./editor";
@@ -32,11 +34,16 @@ export interface SessionDeps {
 
 export class DebugSession {
   private client: DapClient | null = null;
+  private transport: TauriTransport | null = null;
   private sessionId = "";
   private sidebar: DebuggerSidebar;
   private model: SidebarModel = emptyModel();
   private watchExprs: string[] = [];
   private currentFrameId: number | null = null;
+  // Thread the last `stopped` event referenced — step/continue/pause are thread-scoped.
+  private currentThreadId = 1;
+  // Monotonic render token: a newer stop/frame-select aborts in-flight renders (latest wins).
+  private renderGen = 0;
 
   constructor(private deps: SessionDeps) {
     this.sidebar = new DebuggerSidebar({
@@ -54,10 +61,11 @@ export class DebugSession {
     });
   }
 
-  /** Start a session for an already-resolved adapter spec, launching `program`. */
-  async start(spec: AdapterSpec, cwd: string, program: string): Promise<void> {
+  /** Start a session for an already-resolved adapter spec and launch config. */
+  async start(spec: AdapterSpec, cwd: string, config: LaunchConfig): Promise<void> {
     this.sessionId = `dbg-${Date.now()}`;
     const transport = tauriTransport(this.sessionId);
+    this.transport = transport;
     await transport.ready;
     const client = new DapClient(transport);
     this.client = client;
@@ -75,7 +83,44 @@ export class DebugSession {
 
     await debugStart(this.sessionId, spec.transport, cwd);
     const filters = this.exceptionFilters(client).map((f) => f.filter);
-    await client.launch({ type: spec.type, request: "launch", program }, breakpointStore, filters);
+    await client.launch(config, breakpointStore, filters, (path, bps) =>
+      this.applyVerified(path, bps),
+    );
+  }
+
+  /** True while a DAP session is live (used by F-key shortcuts to pick start vs continue). */
+  get active(): boolean {
+    return this.client != null;
+  }
+
+  /** Resume execution (DAP `continue`). No-op when no session is paused. */
+  async continue(): Promise<void> {
+    if (!this.client) return;
+    this.clearPaused();
+    await this.client.request("continue", { threadId: this.currentThreadId }).catch(() => {});
+  }
+
+  /** Step over (`next`) / into (`stepIn`) / out (`stepOut`) the current line. */
+  stepOver(): Promise<void> {
+    return this.step("next");
+  }
+  stepIn(): Promise<void> {
+    return this.step("stepIn");
+  }
+  stepOut(): Promise<void> {
+    return this.step("stepOut");
+  }
+
+  /** Pause a running debuggee (DAP `pause`). No-op when no session is active. */
+  async pause(): Promise<void> {
+    if (!this.client) return;
+    await this.client.request("pause", { threadId: this.currentThreadId }).catch(() => {});
+  }
+
+  private async step(command: "next" | "stepIn" | "stepOut"): Promise<void> {
+    if (!this.client) return;
+    this.clearPaused(); // optimistic: drop the paused line until the next `stopped`
+    await this.client.request(command, { threadId: this.currentThreadId }).catch(() => {});
   }
 
   /** Stop the session: DAP disconnect, then drop the proxy + reset the UI. */
@@ -102,14 +147,36 @@ export class DebugSession {
       path,
     );
     if (this.client) {
-      void this.client.request("setBreakpoints", {
-        source: { path },
-        breakpoints: bps.map((b) => ({ line: b.line })),
-      });
+      this.client
+        .request("setBreakpoints", {
+          source: { path },
+          breakpoints: bps.map((b) => ({ line: b.line })),
+        })
+        .then((resp) => this.applyVerified(path, resp?.breakpoints ?? []))
+        .catch(() => {});
     }
   }
 
   // --- internals ---
+
+  /**
+   * Reconcile gutter marks with the adapter's `setBreakpoints` response: flip the
+   * verified dot (◌→●) and adopt any line the adapter relocated the breakpoint to.
+   * DAP returns breakpoints positionally matching the request order.
+   */
+  private applyVerified(path: string, dapBps: { verified?: boolean; line?: number }[]): void {
+    const bps = breakpointStore.get(path);
+    if (!bps) return;
+    dapBps.forEach((d, i) => {
+      if (!bps[i]) return;
+      bps[i].verified = !!d.verified;
+      if (typeof d.line === "number") bps[i].line = d.line;
+    });
+    this.deps.editor.applyDebugEffects(
+      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: !!b.verified }))),
+      path,
+    );
+  }
 
   private exceptionFilters(client: DapClient) {
     const raw = (client.capabilities.exceptionBreakpointFilters as
@@ -121,8 +188,10 @@ export class DebugSession {
   private async onStopped(body: any): Promise<void> {
     const client = this.client;
     if (!client) return;
-    const threadId = body?.threadId ?? 1;
-    const stack = await client.request("stackTrace", { threadId, levels: 20 });
+    const gen = ++this.renderGen;
+    this.currentThreadId = body?.threadId ?? 1;
+    const stack = await client.request("stackTrace", { threadId: this.currentThreadId, levels: 20 });
+    if (this.stale(gen, client)) return;
     const frames = (stack?.stackFrames ?? []) as any[];
     this.model.callStack = frames.map((f) => ({
       id: f.id,
@@ -131,24 +200,38 @@ export class DebugSession {
       line: f.line,
     }));
     const top = frames[0];
-    if (top) await this.renderFrame(top.id, top.source?.path ?? "", top.line);
+    if (top) await this.renderFrame(top.id, top.source?.path ?? "", top.line, gen);
+    if (this.stale(gen, client)) return;
     this.model.exceptionFilters = this.exceptionFilters(client);
     this.sidebar.render(this.model);
   }
 
+  /** True when render token `gen` was superseded or the session changed mid-flight. */
+  private stale(gen: number, client: DapClient): boolean {
+    return gen !== this.renderGen || this.client !== client;
+  }
+
   /** Fetch scope variables + watches for a frame, paint paused line + inline hints. */
-  private async renderFrame(frameId: number, path: string, line: number): Promise<void> {
+  private async renderFrame(frameId: number, path: string, line: number, gen: number): Promise<void> {
     const client = this.client;
     if (!client) return;
     this.currentFrameId = frameId;
     if (path) await this.deps.editor.revealAt(path, line);
+    if (this.stale(gen, client)) return;
     if (path) this.deps.editor.applyDebugEffects(setPausedLine.of(line), path);
 
     const scopes = (await client.request("scopes", { frameId }))?.scopes ?? [];
-    const localRef = scopes[0]?.variablesReference ?? 0;
+    if (this.stale(gen, client)) return;
+    // Prefer the Locals scope — lldb/codelldb can order Registers/Statics first,
+    // so scopes[0] is not reliably locals.
+    const local =
+      scopes.find((s: any) => s.presentationHint === "locals" || /local/i.test(s.name ?? "")) ??
+      scopes[0];
+    const localRef = local?.variablesReference ?? 0;
     const vars = localRef
       ? ((await client.request("variables", { variablesReference: localRef }))?.variables ?? [])
       : [];
+    if (this.stale(gen, client)) return;
     this.model.variables = vars.map((v: any) => ({
       name: v.name,
       value: v.value,
@@ -167,15 +250,19 @@ export class DebugSession {
     for (const expr of this.watchExprs) {
       try {
         const r = await client.request("evaluate", { expression: expr, frameId, context: "watch" });
+        if (this.stale(gen, client)) return;
         this.model.watch.push({ expr, value: r?.result ?? "" });
       } catch {
+        if (this.stale(gen, client)) return;
         this.model.watch.push({ expr, value: "<error>" });
       }
     }
   }
 
   private async selectFrame(frameId: number, path: string, line: number): Promise<void> {
-    await this.renderFrame(frameId, path, line);
+    const gen = ++this.renderGen;
+    await this.renderFrame(frameId, path, line, gen);
+    if (gen !== this.renderGen) return;
     this.sidebar.render(this.model);
   }
 
@@ -184,8 +271,10 @@ export class DebugSession {
       this.sidebar.render(this.model);
       return;
     }
+    const gen = ++this.renderGen;
     const frame = this.model.callStack.find((f) => f.id === this.currentFrameId);
-    if (frame) await this.renderFrame(frame.id, frame.path, frame.line);
+    if (frame) await this.renderFrame(frame.id, frame.path, frame.line, gen);
+    if (gen !== this.renderGen) return;
     this.sidebar.render(this.model);
   }
 
@@ -209,8 +298,11 @@ export class DebugSession {
   private async reset(): Promise<void> {
     this.clearPaused();
     this.deps.slot.hide();
+    this.transport?.dispose(); // drop the per-session onDapEvent listener (else it leaks each run)
+    this.transport = null;
     this.client = null;
     this.currentFrameId = null;
+    this.renderGen++; // invalidate any in-flight render
     this.model = emptyModel();
     // Breakpoints intentionally remain in breakpointStore + gutter across sessions.
   }

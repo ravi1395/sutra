@@ -34,6 +34,8 @@ Main boot flow:
 | `src/palette.ts` | Command palette UI — fuzzy search over recent/workspace verbs, sectioned list, keyboard navigation | `mountPalette`, `groupCommands` |
 | `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, download+install+relaunch | `mountUpdater`, `progressPercent` |
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, theme-aware syntax styling, diff gutter, inline hunk lens, marginalia, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk`, `openLens` |
+| `src/debug.ts` | DAP client, adapter detection, and per-adapter launch config shaping for Rust/Go/Python | `DapClient`, `detectAdapter`, `resolveLaunchConfig`, `cargoPackageName` |
+| `src/debug-session.ts` | Debug session controller that starts/stops resolved adapters, wires breakpoints, and renders paused state | `DebugSession`, `start`, `stop`, `toggleBreakpoint` |
 | `src/diff.ts` | Line diff classification, inline hunk-lens display model, changed-file list, deleted/binary status rendering | `computeLineDiff`, `hunkIndexAtLine`, `lensModel`, `DiffViewer.render`, `DiffViewer.renderStatus`, `DiffViewer.renderFileList` |
 | `src/conflict.ts` | Merge conflict resolution UI — parses conflict markers in editor buffer, provides accept-ours/accept-theirs actions | conflict resolution classes and helpers |
 | `src/automations.ts` | Named shell automations — CRUD for workspace `.sutra/automations.json`, titlebar bolt/chip UI, run-state tracking | `mountAutomationBar`, `automationMenuModel`, `loadAutomations`, `saveAutomations`, `upsertAutomation`, `removeAutomation`, `makeAutomation`, `validateCommand`, `validateName`, `parseAutomationsFile`, `serializeAutomations`, `setRunning`, `automationsPath` |
@@ -67,6 +69,7 @@ Main boot flow:
 | `src-tauri/src/main.rs` | Native binary entrypoint | `main` |
 | `src-tauri/src/fs_cmds.rs` | Directory listing, symlink/depth-safe compact folders, capped text file read/write, Trash-backed delete, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
 | `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
+| `src-tauri/src/debug.rs` | DAP proxy, codelldb binary resolution, stdio adapter spawning, and socket adapter spawning/connection | `resolve_debug_adapter`, `debug_start`, `debug_send`, `debug_stop`, `drain_frames` |
 | `src-tauri/src/mcp.rs` | Token-gated in-process MCP server exposing display, drive, read tools, loopback edit ingest, agent config writers, and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `ingest_edit`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
 | `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON/TOML/Claude settings patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `merge_claude_settings`, `ensure_gitignore` |
 | `src-tauri/src/preview_server.rs` | Session-local token-gated static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
@@ -122,6 +125,9 @@ App menu / workspace wordmark menu / `Cmd+,` / Command Palette Settings → `mai
 **Integrated-agent workspace tracking:**
 Direct `claude`/`codex` terminal command → `agentTrackingBegin` captures pre-execution signatures. `pty_spawn` registers shell PID → `agentTrackingPoll` checks full process ancestry every 1.5s, reusing hashes when size+mtime are unchanged. Claude runs in report mode: `.sutra/hooks/report-edit.sh` posts edited paths to `/ingest/edit`, which records only reported paths as AI changes. Codex runs in discovery mode and keeps the workspace diff fallback. Sutra filesystem/config commands report known human mutations. The whisper bar shows save-state plus agent copy when non-human-touched AI changes exist. View uses Git `HEAD`; safe revert restores only non-human-touched candidates whose original bytes were captured or proven from matching Git `HEAD`.
 
+**Debugger:**
+Command Palette Debug: Start → `main.startDebugging` reads root signals, resolves CodeLLDB via `resolve_debug_adapter` (PATH then VS Code-compatible extension dirs), `detectAdapter` chooses lldb/debugpy/dlv, `resolveLaunchConfig` maps Rust to `target/debug/<package-name>`, Go to the active package dir with `mode: "debug"`, and Python to the active file → `DebugSession.start` → `debug_start` spawns stdio adapters or starts socket-mode CodeLLDB with `--port` and connects → `DapClient.launch`.
+
 **MCP drive/read control plane:**
 Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.1` URLs → Rust `mcp.rs` validates path-taking drive tools with `resolve_in_root` → emits `sutra://drive` → `main.ts` routes to `EditorManager.openFile`/`firstHunkLine`, `FileTree.reveal`, or `TerminalManager.create`. The same local server exposes `/ingest/edit` for Claude edit reports and writes `<root>/.sutra/endpoint` when the root is set. Rust-native read tools call `git.rs`, `agent_tracker.rs`, or `search.rs` directly. UI-only reads emit `sutra://ui/request` with a pending oneshot id → `main.ts` replies via `mcp_ui_reply` with open-tabs or selection JSON; Rust times out after 2s and removes stale pending entries.
 
@@ -147,6 +153,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 - Rust language engine outline/hover/completion/goto-definition behavior: `cargo test --manifest-path src-tauri/Cargo.toml lang::tests -- --nocapture`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
 - MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
+- Debugger adapter detection and launch config shaping: `npm test`; DAP proxy frame/resolver tests: `cargo test --manifest-path src-tauri/Cargo.toml debug`
 - Preview server path safety: `cargo test --manifest-path src-tauri/Cargo.toml preview_server`
 - Type-only frontend: `npm exec tsc -- --noEmit`
 - Rust command changes: `cargo check --manifest-path src-tauri/Cargo.toml`

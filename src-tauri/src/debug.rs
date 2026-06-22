@@ -5,17 +5,30 @@
 // no tokio); the protocol/UI layers never learn which transport a session uses.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Transport {
-    Stdio { command: String, args: Vec<String> },
-    Socket { host: String, port: u16 },
+    Stdio {
+        command: String,
+        args: Vec<String>,
+    },
+    Socket {
+        host: String,
+        port: u16,
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 pub struct DebugSession {
@@ -40,6 +53,94 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Pick an unused local TCP port for socket-mode adapters.
+fn free_tcp_port(host: &str) -> Result<u16, String> {
+    let listener = TcpListener::bind((host, 0)).map_err(|e| e.to_string())?;
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| e.to_string())
+}
+
+/// Connect to an adapter socket, retrying while the spawned process starts.
+fn connect_with_retry(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let start = Instant::now();
+    loop {
+        match TcpStream::connect((host, port)) {
+            Ok(stream) => return Ok(stream),
+            Err(e) if start.elapsed() < timeout => {
+                let last = e.to_string();
+                std::thread::sleep(Duration::from_millis(40));
+                if start.elapsed() >= timeout {
+                    return Err(last);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Return true when `path` points at a filesystem file.
+fn is_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Locate an executable by name in PATH.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|path| is_file(path))
+    })
+}
+
+/// Locate CodeLLDB inside common VS Code-compatible extension directories.
+fn find_codelldb_extension_in(home: &Path) -> Option<PathBuf> {
+    let dirs = [
+        ".vscode/extensions",
+        ".vscode-oss/extensions",
+        ".cursor/extensions",
+        ".vscode-server/extensions",
+    ];
+    let mut candidates = Vec::new();
+    for dir in dirs {
+        let base = home.join(dir);
+        let Ok(entries) = fs::read_dir(base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("vadimcn.vscode-lldb-") {
+                continue;
+            }
+            let path = entry.path().join("adapter").join("codelldb");
+            if is_file(&path) {
+                candidates.push(path);
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.into_iter().next()
+}
+
+/// Locate CodeLLDB inside the current user's extension directories.
+fn find_codelldb_extension() -> Option<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    find_codelldb_extension_in(&home)
+}
+
+/// Resolve a known debug adapter binary from settings, PATH, or extension dirs.
+#[tauri::command]
+pub fn resolve_debug_adapter(root: String, adapter: String) -> Result<Option<String>, String> {
+    let _ = root; // Reserved for workspace settings when a debugger setting exists.
+    if adapter != "codelldb" {
+        return Ok(None);
+    }
+    Ok(find_on_path("codelldb")
+        .or_else(find_codelldb_extension)
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
 /// Pull every complete DAP frame out of `buf`, leaving trailing partial bytes
 /// in place. A frame is `Content-Length: N\r\n\r\n` + N body bytes. Handles
 /// partial reads (header or body not yet arrived) and multiple frames coalesced
@@ -62,8 +163,12 @@ pub fn drain_frames(buf: &mut Vec<u8>) -> Vec<String> {
         if buf.len() < body_start + len {
             break; // body not fully arrived yet
         }
-        if let Ok(s) = String::from_utf8(buf[body_start..body_start + len].to_vec()) {
-            out.push(s);
+        // len == 0 means a missing/garbage Content-Length; drain the header but
+        // don't emit an empty frame (it would only fail JSON.parse on the TS side).
+        if len > 0 {
+            if let Ok(s) = String::from_utf8(buf[body_start..body_start + len].to_vec()) {
+                out.push(s);
+            }
         }
         buf.drain(..body_start + len);
     }
@@ -94,12 +199,56 @@ pub fn debug_start(
                 let mut child = cmd.spawn().map_err(|e| e.to_string())?;
                 let stdout = child.stdout.take().ok_or("adapter has no stdout")?;
                 let stdin = child.stdin.take().ok_or("adapter has no stdin")?;
+                // Drain stderr in its own thread. Piped-but-unread stderr deadlocks a
+                // chatty adapter (debugpy/dlv) once the ~64KB pipe buffer fills.
+                if let Some(mut stderr) = child.stderr.take() {
+                    std::thread::spawn(move || {
+                        let mut sink = [0u8; 4096];
+                        while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {}
+                    });
+                }
                 (Box::new(stdout), Box::new(stdin), Some(child))
             }
-            Transport::Socket { host, port } => {
-                let stream = TcpStream::connect((host.as_str(), port)).map_err(|e| e.to_string())?;
+            Transport::Socket {
+                host,
+                port,
+                command,
+                args,
+            } => {
+                let actual_port = if port == 0 {
+                    free_tcp_port(&host)?
+                } else {
+                    port
+                };
+                let mut child = if let Some(command) = command {
+                    let actual_args: Vec<String> = args
+                        .into_iter()
+                        .map(|arg| arg.replace("{port}", &actual_port.to_string()))
+                        .collect();
+                    let mut cmd = Command::new(&command);
+                    cmd.args(&actual_args)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    if let Some(dir) = cwd.as_ref().filter(|d| std::path::Path::new(d).is_dir()) {
+                        cmd.current_dir(dir);
+                    }
+                    Some(cmd.spawn().map_err(|e| e.to_string())?)
+                } else {
+                    None
+                };
+                let stream = match connect_with_retry(&host, actual_port, Duration::from_secs(5)) {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        if let Some(child) = child.as_mut() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        return Err(e);
+                    }
+                };
                 let rd = stream.try_clone().map_err(|e| e.to_string())?;
-                (Box::new(rd), Box::new(stream), None)
+                (Box::new(rd), Box::new(stream), child)
             }
         };
 
@@ -179,7 +328,7 @@ pub fn debug_stop(state: State<'_, DebugState>, session_id: String) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::drain_frames;
+    use super::{drain_frames, find_codelldb_extension_in};
 
     fn frame(body: &str) -> Vec<u8> {
         format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
@@ -199,7 +348,10 @@ mod tests {
         let full = frame(r#"{"a":1}"#);
         let split = full.len() - 2;
         let mut buf = full[..split].to_vec(); // body missing 2 bytes
-        assert!(drain_frames(&mut buf).is_empty(), "no frame until body complete");
+        assert!(
+            drain_frames(&mut buf).is_empty(),
+            "no frame until body complete"
+        );
         buf.extend_from_slice(&full[split..]);
         assert_eq!(drain_frames(&mut buf), vec![r#"{"a":1}"#]);
     }
@@ -208,5 +360,20 @@ mod tests {
     fn partial_header_waits() {
         let mut buf = b"Content-Length: 7\r\n".to_vec(); // header terminator not yet seen
         assert!(drain_frames(&mut buf).is_empty());
+    }
+
+    #[test]
+    fn finds_codelldb_in_vscode_extension_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = dir
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("vadimcn.vscode-lldb-1.11.4")
+            .join("adapter");
+        std::fs::create_dir_all(&adapter).unwrap();
+        let codelldb = adapter.join("codelldb");
+        std::fs::write(&codelldb, "").unwrap();
+        assert_eq!(find_codelldb_extension_in(dir.path()), Some(codelldb));
     }
 }

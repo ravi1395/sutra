@@ -237,6 +237,11 @@ instantly and persist in `localStorage` across launches.
 | `⌘\` | Toggle split pane |
 | `⇧⌘V` | Toggle Markdown / HTML preview |
 | `⌘,` | Open Settings |
+| `F5` | Debug: start (idle) / continue (paused) |
+| `⇧F5` | Debug: stop |
+| `F6` | Debug: pause |
+| `F10` | Debug: step over |
+| `F11` / `⇧F11` | Debug: step into / step out |
 
 ## Build from source
 

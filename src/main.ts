@@ -20,7 +20,7 @@ import { BrowserPane } from "./browser";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
-import { detectAdapter, isTrusted, markTrusted, breakpointStore } from "./debug";
+import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointStore } from "./debug";
 import {
   agentTrackingPoll,
   listDir,
@@ -45,6 +45,7 @@ import {
   watchStop,
   langIndexBuild,
   langIndexInvalidate,
+  resolveDebugAdapter,
   type AgentTrackingStatus,
 } from "./ipc";
 import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
@@ -132,10 +133,15 @@ async function startDebugging(): Promise<void> {
   const root = currentRoot;
   const entries = await listDir(root).catch(() => []);
   const signals = new Set(entries.map((e) => e.name));
-  // codelldb is resolved on PATH by the Rust spawn; a spawn failure surfaces in the console.
-  const spec = detectAdapter(signals, "codelldb");
+  const codelldbPath = signals.has("Cargo.toml")
+    ? await resolveDebugAdapter(root, "codelldb").catch(() => null)
+    : null;
+  const spec = detectAdapter(signals, codelldbPath);
   if (!spec) {
-    await message("No debug adapter detected for this project.", { title: "Sutra", kind: "warning" });
+    const msg = signals.has("Cargo.toml") && !codelldbPath
+      ? "codelldb not found — install the CodeLLDB VS Code extension"
+      : "No debug adapter detected for this project.";
+    await message(msg, { title: "Sutra", kind: "warning" });
     return;
   }
   if (!isTrusted(spec, root)) {
@@ -143,8 +149,22 @@ async function startDebugging(): Promise<void> {
     if (!window.confirm(`Run debug adapter from this workspace?\n${cmd}`)) return;
     markTrusted(root);
   }
-  const program = editor.active?.path ?? "";
-  await debugSession.start(spec, root, program);
+  const launch = await resolveLaunchConfig(spec, root, editor.active?.path ?? "", {
+    readText: readFile,
+    exists: async (path) => {
+      try {
+        await fileMtime(path);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  if (!launch.ok) {
+    await message(launch.error, { title: "Sutra", kind: "warning" });
+    return;
+  }
+  await debugSession.start(spec, root, launch.config);
 }
 const diffViewer = new DiffViewer();
 const search = new SearchPanel(
@@ -959,6 +979,22 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "Comma") {
     e.preventDefault();
     openSettings();
+  } else if (e.key === "F5") {
+    // F5: start when idle, continue when paused; ⇧F5 stops (VS Code parity).
+    e.preventDefault();
+    if (e.shiftKey) void debugSession.stop();
+    else if (debugSession.active) void debugSession.continue();
+    else void startDebugging();
+  } else if (e.key === "F6") {
+    e.preventDefault();
+    void debugSession.pause();
+  } else if (e.key === "F10") {
+    e.preventDefault();
+    void debugSession.stepOver();
+  } else if (e.key === "F11") {
+    e.preventDefault();
+    if (e.shiftKey) void debugSession.stepOut();
+    else void debugSession.stepIn();
   }
 }, GLOBAL_SHORTCUT_OPTIONS);
 
@@ -1271,8 +1307,13 @@ const paletteCommands: Command[] = [
     search.focus();
   }, shortcut: "⇧⌘F" },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
-  { id: "debug-start", title: "Debug: Start", run: () => void startDebugging() },
-  { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop() },
+  { id: "debug-start", title: "Debug: Start", run: () => void startDebugging(), shortcut: "F5" },
+  { id: "debug-continue", title: "Debug: Continue", run: () => void debugSession.continue(), shortcut: "F5" },
+  { id: "debug-pause", title: "Debug: Pause", run: () => void debugSession.pause(), shortcut: "F6" },
+  { id: "debug-step-over", title: "Debug: Step Over", run: () => void debugSession.stepOver(), shortcut: "F10" },
+  { id: "debug-step-into", title: "Debug: Step Into", run: () => void debugSession.stepIn(), shortcut: "F11" },
+  { id: "debug-step-out", title: "Debug: Step Out", run: () => void debugSession.stepOut(), shortcut: "⇧F11" },
+  { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop(), shortcut: "⇧F5" },
 ];
 
 function recentPaletteCommands(): Command[] {

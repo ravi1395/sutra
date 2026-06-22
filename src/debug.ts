@@ -21,6 +21,14 @@ export interface LaunchConfig {
   program?: string;
   [k: string]: unknown;
 }
+export type LaunchResolution =
+  | { ok: true; config: LaunchConfig }
+  | { ok: false; error: string };
+
+export interface LaunchResolverIO {
+  readText(path: string): Promise<string>;
+  exists(path: string): Promise<boolean>;
+}
 
 type Pending = { resolve: (body: unknown) => void; reject: (e: Error) => void };
 
@@ -71,18 +79,27 @@ export class DapClient {
     config: LaunchConfig,
     breakpoints: BreakpointStore,
     exceptionFilters: string[] = ["uncaught"],
+    onVerified?: (path: string, breakpoints: { verified?: boolean; line?: number }[]) => void,
   ): Promise<void> {
     // Register the `initialized` handler BEFORE sending initialize: a fast
     // adapter may emit `initialized` immediately after the init response, and
     // we must not miss it. Config sequence is gated on the EVENT, not the response.
     const configured = new Promise<void>((resolve, reject) => {
+      // Guard against an adapter that never emits `initialized` — without this the
+      // Promise.all below would hang forever even after launch/attach resolves.
+      const timer = setTimeout(
+        () => reject(new Error("DAP adapter never sent 'initialized'")),
+        15000,
+      );
       this.on("initialized", async () => {
+        clearTimeout(timer);
         try {
           for (const [path, bps] of breakpoints) {
-            await this.request("setBreakpoints", {
+            const resp = await this.request("setBreakpoints", {
               source: { path },
               breakpoints: bps.map((b) => ({ line: b.line })),
             });
+            onVerified?.(path, resp?.breakpoints ?? []);
           }
           await this.request("setExceptionBreakpoints", { filters: exceptionFilters });
           await this.request("configurationDone");
@@ -223,14 +240,23 @@ export const isTrusted = (spec: AdapterSpec, root: string) =>
   !requiresTrustPrompt(spec, trustedRoots, root);
 
 /**
- * Map present project-root files to a v1 stdio adapter. `codelldbPath` is the
+ * Map present project-root files to a v1 adapter. `codelldbPath` is the
  * resolved codelldb binary (PATH or ~/.vscode/extensions) or null if missing.
- * Returns null when no signal matches. Socket adapters (Java/Scala/Node) are
- * post-v1 and intentionally not returned here.
+ * Returns null when no signal matches.
  */
 export function detectAdapter(signals: Set<string>, codelldbPath: string | null): AdapterSpec | null {
   if (signals.has("Cargo.toml") && codelldbPath) {
-    return { type: "lldb", transport: { kind: "stdio", command: codelldbPath, args: [] }, fromWorkspace: false };
+    return {
+      type: "lldb",
+      transport: {
+        kind: "socket",
+        host: "127.0.0.1",
+        port: 0,
+        command: codelldbPath,
+        args: ["--port", "{port}"],
+      },
+      fromWorkspace: false,
+    };
   }
   if (signals.has("requirements.txt") || signals.has("pyproject.toml")) {
     return {
@@ -243,6 +269,54 @@ export function detectAdapter(signals: Set<string>, codelldbPath: string | null)
     return { type: "go", transport: { kind: "stdio", command: "dlv", args: ["dap"] }, fromWorkspace: false };
   }
   return null;
+}
+
+/** Parent directory for slash-separated absolute paths used by the Tauri backend. */
+function dirname(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  if (idx <= 0) return idx === 0 ? "/" : "";
+  return trimmed.slice(0, idx);
+}
+
+/** Extract the package name from the `[package]` section of Cargo.toml. */
+export function cargoPackageName(cargoToml: string): string | null {
+  let inPackage = false;
+  for (const raw of cargoToml.split(/\r?\n/)) {
+    const line = raw.replace(/#.*/, "").trim();
+    if (!line) continue;
+    const section = line.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      inPackage = section[1] === "package";
+      continue;
+    }
+    if (!inPackage) continue;
+    const name = line.match(/^name\s*=\s*"([^"]+)"\s*$/);
+    if (name) return name[1];
+  }
+  return null;
+}
+
+/** Build the DAP launch config expected by each adapter type. */
+export async function resolveLaunchConfig(
+  spec: AdapterSpec,
+  root: string,
+  activePath: string,
+  io: LaunchResolverIO,
+): Promise<LaunchResolution> {
+  if (spec.type === "lldb") {
+    const cargoToml = await io.readText(`${root}/Cargo.toml`);
+    const name = cargoPackageName(cargoToml);
+    if (!name) return { ok: false, error: "Cargo.toml package name not found" };
+    const program = `${root}/target/debug/${name}`;
+    if (!(await io.exists(program))) return { ok: false, error: "Run cargo build first" };
+    return { ok: true, config: { type: spec.type, request: "launch", program } };
+  }
+  if (spec.type === "go") {
+    const program = activePath.endsWith(".go") ? dirname(activePath) : root;
+    return { ok: true, config: { type: spec.type, request: "launch", program, mode: "debug" } };
+  }
+  return { ok: true, config: { type: spec.type, request: "launch", program: activePath } };
 }
 
 // Re-export backend hooks the launcher (main.ts) needs.

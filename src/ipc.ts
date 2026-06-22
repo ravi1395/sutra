@@ -193,13 +193,15 @@ export const relaunchApp = (): Promise<void> => relaunch();
 // (stdio) or connect to a listening port (socket).
 export type Transport =
   | { kind: "stdio"; command: string; args: string[] }
-  | { kind: "socket"; host: string; port: number };
+  | { kind: "socket"; host: string; port: number; command?: string; args?: string[] };
 
 export const debugStart = (sessionId: string, transport: Transport, cwd: string | null) =>
   invoke<void>("debug_start", { sessionId, transport, cwd });
 export const debugSend = (sessionId: string, message: string) =>
   invoke<void>("debug_send", { sessionId, message });
 export const debugStop = (sessionId: string) => invoke<void>("debug_stop", { sessionId });
+export const resolveDebugAdapter = (root: string, adapter: "codelldb") =>
+  invoke<string | null>("resolve_debug_adapter", { root, adapter });
 
 export interface DapEventPayload {
   session_id: string;

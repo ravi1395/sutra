@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   DapClient,
   detectAdapter,
+  resolveLaunchConfig,
   requiresTrustPrompt,
   breakpointStore,
   type DapTransport,
@@ -83,11 +84,36 @@ test("config sequence fires on initialized event, not the launch response", asyn
   assert.ok(order.indexOf("configurationDone") > order.indexOf("setExceptionBreakpoints"));
 });
 
-test("detects codelldb from Cargo.toml (stdio, not from workspace)", () => {
+test("launch forwards adapter breakpoint verification to onVerified", async () => {
+  const tr = new MockTransport();
+  const c = new DapClient(tr);
+  const drive = setInterval(() => {
+    const req = tr.sent.find((m) => m.type === "request" && !m.__acked);
+    if (!req) return;
+    req.__acked = true;
+    // setBreakpoints echoes back a verified breakpoint relocated to line 2.
+    const body = req.command === "setBreakpoints" ? { breakpoints: [{ verified: true, line: 2 }] } : {};
+    tr.emit({ type: "response", request_seq: req.seq, command: req.command, success: true, body });
+    if (req.command === "initialize") tr.emit({ type: "event", event: "initialized" });
+  }, 0);
+  const verified: { path: string; bps: { verified?: boolean; line?: number }[] }[] = [];
+  const bps = new Map([["/x.rs", [{ line: 1 }]]]);
+  await c.launch({ type: "lldb", request: "launch", program: "/bin/true" }, bps, ["uncaught"], (path, b) =>
+    verified.push({ path, bps: b }),
+  );
+  clearInterval(drive);
+  assert.deepEqual(verified, [{ path: "/x.rs", bps: [{ verified: true, line: 2 }] }]);
+});
+
+test("detects codelldb from Cargo.toml (socket, not from workspace)", () => {
   const spec = detectAdapter(new Set(["Cargo.toml"]), "/usr/local/bin/codelldb");
   assert.equal(spec?.type, "lldb");
-  assert.equal(spec?.transport.kind, "stdio");
+  assert.equal(spec?.transport.kind, "socket");
   assert.equal(spec?.fromWorkspace, false);
+});
+
+test("does not detect Rust adapter when codelldb path is missing", () => {
+  assert.equal(detectAdapter(new Set(["Cargo.toml"]), null), null);
 });
 
 test("detects debugpy from pyproject.toml", () => {
@@ -123,4 +149,46 @@ test("breakpointStore persists across sessions (module-level)", () => {
   breakpointStore.set("/a.rs", [{ line: 10 }]);
   assert.deepEqual(breakpointStore.get("/a.rs"), [{ line: 10 }]);
   breakpointStore.delete("/a.rs");
+});
+
+test("Rust launch config uses built Cargo binary", async () => {
+  const resolved = await resolveLaunchConfig(
+    { type: "lldb", transport: { kind: "socket", host: "127.0.0.1", port: 0 }, fromWorkspace: false },
+    "/repo",
+    "/repo/src/main.rs",
+    {
+      readText: async () => '[package]\nname = "my-crate"\n',
+      exists: async (path) => path === "/repo/target/debug/my-crate",
+    },
+  );
+  assert.deepEqual(resolved, {
+    ok: true,
+    config: { type: "lldb", request: "launch", program: "/repo/target/debug/my-crate" },
+  });
+});
+
+test("Rust launch config asks for cargo build when binary is missing", async () => {
+  const resolved = await resolveLaunchConfig(
+    { type: "lldb", transport: { kind: "socket", host: "127.0.0.1", port: 0 }, fromWorkspace: false },
+    "/repo",
+    "/repo/src/main.rs",
+    {
+      readText: async () => '[package]\nname = "my-crate"\n',
+      exists: async () => false,
+    },
+  );
+  assert.deepEqual(resolved, { ok: false, error: "Run cargo build first" });
+});
+
+test("Go launch config uses package directory and debug mode", async () => {
+  const resolved = await resolveLaunchConfig(
+    { type: "go", transport: { kind: "stdio", command: "dlv", args: ["dap"] }, fromWorkspace: false },
+    "/repo",
+    "/repo/cmd/app/main.go",
+    { readText: async () => "", exists: async () => true },
+  );
+  assert.deepEqual(resolved, {
+    ok: true,
+    config: { type: "go", request: "launch", program: "/repo/cmd/app", mode: "debug" },
+  });
 });

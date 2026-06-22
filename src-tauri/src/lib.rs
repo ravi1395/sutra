@@ -97,6 +97,7 @@ pub fn run() {
             debug::debug_start,
             debug::debug_send,
             debug::debug_stop,
+            debug::resolve_debug_adapter,
             lang::lang_did_open,
             lang::lang_did_change,
             lang::lang_did_close,
