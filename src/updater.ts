@@ -22,10 +22,19 @@ export function progressPercent(received: number, total: number): number | null 
 export interface UpdaterOptions {
   // Surface a fatal install/relaunch error to the user (e.g. a native alert).
   onError?: (message: string) => void;
+  // Surface a non-fatal status from a user-initiated check ("up to date" /
+  // "update available"). The background poll never calls this.
+  onInfo?: (message: string) => void;
+}
+
+export interface UpdaterHandle {
+  // User-initiated check that reports its outcome via onInfo/onError. Unlike the
+  // background poll it does NOT swallow "no update" or check failures.
+  checkNow(): Promise<void>;
 }
 
 // Wire the controller to its titlebar button and start the poll loop.
-export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {}): void {
+export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {}): UpdaterHandle {
   let pending: Update | null = null; // resolved-but-not-yet-installed update
   let busy = false; // guards against re-entrant clicks/checks during install
 
@@ -44,18 +53,33 @@ export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {
     button.disabled = true;
   }
 
-  // Ask the endpoint whether a newer signed release exists. Check failures
-  // (offline, rate-limited) are swallowed — the next cycle retries.
-  async function check(): Promise<void> {
-    if (busy) return;
+  // Ask the endpoint whether a newer signed release exists. The background poll
+  // (silent=true) swallows "no update" and failures — the next cycle retries. A
+  // manual check (silent=false) reports every outcome so the user gets feedback
+  // instead of a dead button.
+  async function runCheck(silent: boolean): Promise<void> {
+    if (busy) {
+      if (!silent) opts.onInfo?.("An update is already downloading.");
+      return;
+    }
     try {
       const update = await checkForUpdate();
       if (update) {
         pending = update;
         showAvailable(update.version);
+        if (!silent) {
+          opts.onInfo?.(`Update v${update.version} available — click the Update button to install.`);
+        }
+      } else if (!silent) {
+        opts.onInfo?.("Sutra is up to date.");
       }
     } catch (err) {
-      console.warn("[updater] check failed:", err);
+      if (silent) {
+        console.warn("[updater] check failed:", err);
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      opts.onError?.(`Update check failed: ${msg}`);
     }
   }
 
@@ -96,6 +120,8 @@ export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {
   button.onclick = () => void runInstall();
 
   // Defer the first check so it doesn't compete with boot, then poll on cadence.
-  window.setTimeout(() => void check(), INITIAL_DELAY_MS);
-  window.setInterval(() => void check(), CHECK_INTERVAL_MS);
+  window.setTimeout(() => void runCheck(true), INITIAL_DELAY_MS);
+  window.setInterval(() => void runCheck(true), CHECK_INTERVAL_MS);
+
+  return { checkNow: () => runCheck(false) };
 }

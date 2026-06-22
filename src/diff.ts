@@ -169,6 +169,13 @@ export class DiffViewer {
   private titleEl = document.getElementById("diff-title")!;
   private filesEl = document.getElementById("diff-files")!;
   private expandedPaths = new Set<string>();
+  private lastFileListKey = "";
+
+  private syncActive(active: string | null): void {
+    this.filesEl.querySelectorAll<HTMLDivElement>(".diff-file-row").forEach((row) => {
+      row.classList.toggle("active", row.title === active);
+    });
+  }
 
   // Show a one-line status (deleted/binary/unreadable) above the file list without clearing it.
   renderStatus(label: string, message: string): void {
@@ -193,6 +200,13 @@ export class DiffViewer {
       onHunkPick: (path: string, startLine: number) => void;
     },
   ): void {
+    const nextKey = files.map((file) => `${file.status}\0${file.path}`).join("\0");
+    if (!this.filesEl.querySelector("#diff-empty") && nextKey === this.lastFileListKey) {
+      this.syncActive(active);
+      return;
+    }
+
+    this.lastFileListKey = nextKey;
     this.filesEl.innerHTML = "";
     if (!files.length) return;
     const visiblePaths = new Set(files.map((file) => file.path));
@@ -206,6 +220,7 @@ export class DiffViewer {
     for (const file of files) {
       const row = document.createElement("div");
       row.className = "diff-file-row";
+      row.title = file.path;
       if (file.path === active) row.classList.add("active");
 
       const chevron = document.createElement("span");

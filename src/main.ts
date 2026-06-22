@@ -1009,7 +1009,10 @@ btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
 btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;
 // Self-update pill beside the palette: hidden until a newer release is found.
-mountUpdater($("btn-update") as HTMLButtonElement, { onError: (m) => void alertNative(m) });
+const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
+  onError: (m) => void alertNative(m),
+  onInfo: (m) => void alertNative(m),
+});
 btnMenu.innerHTML = icon("menu", 17);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
@@ -1102,6 +1105,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
   openSettings: () => openSettings(),
+  checkForUpdates: () => void updater.checkNow(),
 });
 workspaceBar.setCurrentWorkspace(null);
 

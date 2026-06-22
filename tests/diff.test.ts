@@ -138,22 +138,29 @@ test("DiffViewer keeps expanded hunk rows visible across file-list rerenders", a
   try {
     const viewer = new DiffViewer();
     let picks = 0;
+    let expansions = 0;
     const handlers = {
       onFilePick: () => {
         picks++;
       },
-      onExpand: async () => [{ kind: "modified" as const, startLine: 4, label: "line 5" }],
+      onExpand: async () => {
+        expansions++;
+        return [{ kind: "modified" as const, startLine: 4, label: "line 5" }];
+      },
       onHunkPick: () => {},
     };
 
     viewer.renderFileList([{ path: "/repo/src/app.ts", status: "M" }], null, handlers);
     await filesEl.querySelector(".diff-file-chevron")?.onclick?.({ stopPropagation() {} });
+    const hunkList = filesEl.querySelector(".diff-hunk-list");
     filesEl.querySelector(".diff-file-row")?.onclick?.({ stopPropagation() {} });
     viewer.renderFileList([{ path: "/repo/src/app.ts", status: "M" }], "/repo/src/app.ts", handlers);
     await Promise.resolve();
     await Promise.resolve();
 
     assert.equal(picks, 1);
+    assert.equal(expansions, 1);
+    assert.equal(filesEl.querySelector(".diff-hunk-list"), hunkList);
     assert.equal(filesEl.querySelector(".diff-hunk-list")?.classList.contains("hidden"), false);
     assert.equal(filesEl.querySelector(".diff-hunk-label")?.textContent, "line 5");
   } finally {

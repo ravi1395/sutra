@@ -11,6 +11,8 @@ export interface WorkspaceActions {
   openFolder(): void;
   /** Optional: open the settings modal (⌘,). */
   openSettings?: () => void;
+  /** Optional: run a user-initiated update check that reports its outcome. */
+  checkForUpdates?: () => void;
 }
 
 export interface WorkspaceBarHandle {
@@ -145,6 +147,9 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       mkRow("open folder…", "⌘O", () => actions.openFolder());
       if (actions.openSettings) {
         mkRow("settings…", "⌘,", () => actions.openSettings!());
+      }
+      if (actions.checkForUpdates) {
+        mkRow("check for updates…", "", () => actions.checkForUpdates!());
       }
     }, "menu-card");
   }
