@@ -33,7 +33,8 @@ export type IconName =
   | "pencil"
   | "download"
   | "trash"
-  | "list";
+  | "list"
+  | "openEditors";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -75,6 +76,8 @@ const paths: Record<IconName, string> = {
   trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
   // Indented-lines glyph representing a symbol outline / hierarchy tree.
   list: '<path d="M3 6h18M7 12h14M10 18h11"/>',
+  // Two overlapping documents — the open-editors switcher (jump between open files).
+  openEditors: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

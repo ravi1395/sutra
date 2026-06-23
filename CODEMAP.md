@@ -32,7 +32,7 @@ Main boot flow:
 | `src/menubar.ts` | Workspace wordmark menu and shared popover primitive reused by the app menu | `mountWorkspaceBar`, `WorkspaceBarHandle`, `openPopover`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
 | `src/palette.ts` | Command palette UI — fuzzy search over recent/workspace verbs, sectioned list, keyboard navigation | `mountPalette`, `groupCommands` |
-| `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, download+install+relaunch | `mountUpdater`, `progressPercent` |
+| `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, manual "check for updates" feedback path, download+install+relaunch | `mountUpdater`, `progressPercent` |
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, theme-aware syntax styling, diff gutter, inline hunk lens, marginalia, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk`, `openLens` |
 | `src/debug.ts` | DAP client, adapter detection, and per-adapter launch config shaping for Rust/Go/Python | `DapClient`, `detectAdapter`, `resolveLaunchConfig`, `cargoPackageName` |
 | `src/debug-session.ts` | Debug session controller that starts/stops resolved adapters, wires breakpoints, and renders paused state | `DebugSession`, `start`, `stop`, `toggleBreakpoint` |
@@ -98,6 +98,9 @@ Workspace wordmark menu / app menu / `⌘O` → `openFolderDialog` (native dialo
 **Preview:**
 `Shift+Cmd+V` → `main.togglePreview` → `EditorManager.togglePreview`. Markdown: renders current buffer through `preview.ts` (`marked` + `DOMPurify`) and external links open via the opener plugin. HTML: requires saved file in workspace → `ipc.previewServerUrl` → Rust `preview_server_url` → starts/reuses a token-gated `127.0.0.1` static server → preview iframe.
 
+**Self-update:**
+Boot schedules `mountUpdater` → silent `checkForUpdate` after 12s and every 6h. When a newer release exists, the titlebar `Update` pill downloads, installs, and relaunches. Workspace menu `check for updates…` calls the same controller in user-initiated mode, which reports both "up to date" and "update available" outcomes instead of staying silent.
+
 **Settings:**
 App menu / workspace wordmark menu / `Cmd+,` / Command Palette Settings → `main.openSettings` → `openSettingsModal`, which reuses live `settings`, persists via `saveSettings`, and applies changes through `applySettings`.
 
@@ -145,7 +148,7 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |
-| Release CI | `.github/workflows/release.yml` builds macOS universal + Windows installers on `v*` tags and attaches them to a draft GitHub release |
+| Release CI | `.github/workflows/release.yml` creates one draft release, serializes macOS universal + Windows uploads so updater `latest.json` merges cleanly, then publishes the release as latest |
 
 ## Test Strategy
 

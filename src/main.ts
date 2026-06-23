@@ -700,6 +700,107 @@ function setBrowser(on: boolean): void {
 }
 btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
 
+// ---- open-editors switcher ----
+// Toolbar button → .menu-card dropdown listing every open tab across panes;
+// clicking a row activates that tab in its owning pane (mirrors gitbar pattern).
+const btnOpenEditors = $("btn-open-editors");
+let openEditorsMenu: HTMLElement | null = null;
+
+function closeOpenEditorsMenu(): void {
+  if (openEditorsMenu) {
+    openEditorsMenu.remove();
+    openEditorsMenu = null;
+  }
+  btnOpenEditors.classList.remove("on");
+  document.removeEventListener("mousedown", onOpenEditorsOutside);
+  document.removeEventListener("keydown", onOpenEditorsKey);
+}
+
+function onOpenEditorsOutside(e: MouseEvent): void {
+  const t = e.target as Node;
+  if (openEditorsMenu && !openEditorsMenu.contains(t) && !btnOpenEditors.contains(t)) {
+    closeOpenEditorsMenu();
+  }
+}
+function onOpenEditorsKey(e: KeyboardEvent): void {
+  if (e.key === "Escape") closeOpenEditorsMenu();
+}
+
+function openOpenEditorsMenu(): void {
+  closeOpenEditorsMenu();
+  btnOpenEditors.classList.add("on");
+
+  const dd = document.createElement("div");
+  dd.className = "menu-card";
+
+  const head = document.createElement("div");
+  head.className = "menu-head";
+  head.textContent = "open editors";
+  dd.appendChild(head);
+
+  const tabs = editor.tabs;
+  if (tabs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "menu-row";
+    empty.style.cursor = "default";
+    empty.textContent = "No open editors";
+    dd.appendChild(empty);
+  } else {
+    for (const tab of tabs) {
+      const isActive = tab === editor.active;
+      const row = document.createElement("div");
+      row.className = "menu-row" + (isActive ? " current" : "");
+
+      const name = document.createElement("span");
+      name.textContent = tab.name + (tab.path ? "" : " *");
+      row.appendChild(name);
+
+      if (tab.dirty) {
+        const dot = document.createElement("span");
+        dot.textContent = "●";
+        dot.style.cssText = "font-size:9px;color:var(--em);";
+        row.appendChild(dot);
+      }
+
+      if (tab.path) {
+        const dir = tab.path.slice(0, tab.path.lastIndexOf("/"));
+        if (dir) {
+          const pathSpan = document.createElement("span");
+          pathSpan.className = "menu-path";
+          pathSpan.style.marginLeft = "auto";
+          pathSpan.textContent = dir.replace(/^\/Users\/[^/]+/, "~");
+          row.appendChild(pathSpan);
+        }
+      }
+
+      row.onclick = () => {
+        editor.activate(tab);
+        closeOpenEditorsMenu();
+      };
+      dd.appendChild(row);
+    }
+  }
+
+  document.body.appendChild(dd);
+  // Right-align the card under the button (toolbar sits at the window's right edge).
+  const rect = btnOpenEditors.getBoundingClientRect();
+  dd.style.position = "fixed";
+  dd.style.top = `${rect.bottom + 4}px`;
+  dd.style.right = `${window.innerWidth - rect.right}px`;
+
+  openEditorsMenu = dd;
+  setTimeout(() => {
+    document.addEventListener("mousedown", onOpenEditorsOutside);
+    document.addEventListener("keydown", onOpenEditorsKey);
+  }, 0);
+}
+
+btnOpenEditors.onclick = (e) => {
+  e.stopPropagation();
+  if (openEditorsMenu) closeOpenEditorsMenu();
+  else openOpenEditorsMenu();
+};
+
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
 const vres = $("vresizer");
@@ -1004,6 +1105,7 @@ window.addEventListener("blur", () => {
 });
 
 // ---- chrome: icon buttons + menu bar ----
+$("btn-open-editors").innerHTML = icon("openEditors", 17);
 btnTerm.innerHTML = icon("terminal", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
