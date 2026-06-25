@@ -26,6 +26,8 @@ Build a VSCode-chat-like composer: annotate context (`@file`, selections), use s
 | Q8 | Tag/template config | Hybrid: visual tag manager, persisted **as** JSON; seeded with default templates |
 | Q9 | Config storage | Per-workspace `.sutra/prompt-tags.json` (git-versionable); built-in defaults when file absent |
 | Q10 | Chip → section routing | Auto-route (file/selection → `<context>`, skill/subagent → `<task>`) with drag-override |
+| Q11 | Composer input widget | CM6 mini-editor for `<task>` (gets `@`/`/`/`#` completion); plain inputs for other sections |
+| Q12 | Autocomplete scope | v1: `@` files + `/` skills+subagents only; `#` symbol completion deferred |
 
 ## 3. Architecture & Data Flow
 
@@ -62,7 +64,8 @@ Context + asset sources (no MCP hop — panel reads live state directly):
 | `prompt-builder.ts` | pure TS, no IO | sections + chips → assembled XML prompt string; empty-section omission; section order from template. Testable core. | tag-config types |
 | `prompt-tags.ts` | pure TS, no IO | tag/template schema types, default templates, load/validate/normalize `.sutra/prompt-tags.json` | nothing |
 | `tag-manager.ts` | frontend module | visual tag/template editor: add/remove/rename/reorder, toggle required/default-on, edit placeholder + default; writes JSON via ipc | prompt-tags, ipc |
-| `composer.ts` | frontend module | panel UI: per-section inputs, chip rail w/ auto-route + drag-override, `@`/`/` pickers, template picker, live XML preview, target + stage/submit, Send | prompt-builder, prompt-tags, editor, tree, ipc |
+| `composer-complete.ts` | frontend module | CM6 completion sources for the `<task>` input: `@`→files, `/`→skills+subagents; each accept inserts the section-routed token | CM6 autocomplete, ipc, tree |
+| `composer.ts` | frontend module | panel UI: CM6 `<task>` input + plain section inputs, chip rail w/ auto-route + drag-override, `@`/`/` pickers, template picker, live XML preview, target + stage/submit, Send | prompt-builder, prompt-tags, composer-complete, editor, tree, ipc |
 | `composer-panel` markup/CSS | index.html + styles.css | docked pane shell (mirrors search-panel) | layout.ts |
 | `pty.rs` (edit) | Rust | tag session `agent_kind` at spawn; expose `pty_list_agents` | existing PtyState |
 | `scan_agent_assets` | Rust (new; `assets.rs` or in `mcp.rs`) | scan `.claude` dirs → skill/agent list w/ invocation token | std::fs |
@@ -143,6 +146,18 @@ Recommended order: `role → context → task → constraints → output → exa
 - **CLAUDE.md auto-inject** (optional toggle) — append project CLAUDE.md rules into `<constraints>`.
 - **Visual tag manager** (`tag-manager.ts`) — add/remove/rename/reorder tags, toggle required/default-on, edit placeholder + default text, manage templates; persists to the JSON above.
 
+### Autocomplete (`composer-complete.ts`)
+
+The `<task>` section is a small CM6 editor so it reuses `@codemirror/autocomplete`. Plain section inputs (role, constraints, …) have no completion in v1.
+
+| Trigger | Source | Inserts | Caching |
+|---|---|---|---|
+| `@` | workspace files via `search.rs` fuzzy / tree | `@relpath` (context chip) | debounced async query |
+| `/` | skills + subagents via `scan_agent_assets` | `/name` or subagent prefix (task token) | scanned once, cached |
+| `#` | — | — | **deferred** (fast-follow: document symbols from outline) |
+
+Accepting a completion inserts the same section-routed token the picker buttons produce — autocomplete and buttons share one code path. Sources are registered as a single `autocompletion({ override: [...] })` extension on the `<task>` editor; each source matches its trigger char and returns options (async for `@`, sync for `/`).
+
 ## 6. Delivery Mechanics
 
 TUIs (Claude Code / Codex) treat a raw `\n` mid-text as submit. Wrap the whole prompt in bracketed-paste so multi-line content arrives as one block:
@@ -177,6 +192,7 @@ Stage mode = write the bracketed block with no trailing `\r` → prompt sits in 
 - `prompt-builder.test.ts` — file chip → `@relpath`; selection chip → fenced block w/ lang+range; skill → `/name`; subagent → prefix; mixed order preserved; empty → empty string.
 - `scaffold.test.ts` — sections emitted in template order; **empty section omitted**; auto-route puts file/selection in `<context>`, skill/subagent in `<task>`; drag-override moves chip; `<thinking>` prepends instruction; CLAUDE.md inject appends to `<constraints>`.
 - `prompt-tags.test.ts` — valid JSON loads; missing file → defaults; corrupt JSON → defaults + no overwrite; unknown tag id in template skipped.
+- `composer-complete.test.ts` — `@` source fuzzy-matches paths, returns capped option list; `/` source returns skills+subagents w/ correct invocation token; accepting an option yields the section-routed token. (Source fns are pure given an asset/file list — test them without CM6.)
 - `delivery.test.ts` — bracketed-paste wrap correct; `\r` present iff submit; absent on stage.
 - `agent-detect.test.ts` — argv `claude`/`codex` tagged; `zsh`/`bash`/`node` not.
 
@@ -196,7 +212,7 @@ Stage mode = write the bracketed block with no trailing `\r` → prompt sits in 
 
 1. **P1** — `prompt-tags.ts` (schema + defaults + load/validate) and `prompt-builder.ts` (section assembly, chip routing, omission) + tests. Pure core, zero deps.
 2. **P2** — `pty.rs` agent tagging + `pty_list_agents` + `scan_agent_assets` + ipc wrappers + Rust tests.
-3. **P3** — `composer.ts` panel + dock + per-section inputs + chip auto-route/drag + pickers + live XML preview + `deliverToPty` + wiring + manual verify.
+3. **P3** — `composer.ts` panel + dock + per-section inputs + CM6 `<task>` input + `composer-complete.ts` (`@`/`/` sources) + chip auto-route/drag + pickers + live XML preview + `deliverToPty` + wiring + manual verify.
 4. **P4** — `tag-manager.ts` visual editor + `.sutra/prompt-tags.json` read/write via `fs_cmds` + template picker wiring + manual verify.
 
 ## 10. Out of Scope (v1)
@@ -207,3 +223,5 @@ Stage mode = write the bracketed block with no trailing `\r` → prompt sits in 
 - Pushing prompts via MCP (architecturally not possible).
 - Layered global + per-workspace tag config (per-workspace only in v1).
 - Provider-specific prompt linting / quality scoring.
+- `#` symbol autocomplete (deferred; document-symbol completion is the fast-follow).
+- Completion in non-`<task>` section inputs.
