@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-24
 **Status:** Approved (design); pending implementation plan
-**Scope:** A docked prompt-composer panel in Sutra that builds context-rich prompts (files, selections, skills, subagents) and delivers them to a Claude Code / Codex CLI running inside a Sutra terminal tab, via PTY stdin.
+**Scope:** A docked prompt-composer panel in Sutra that builds context-rich, XML-structured prompts (configurable `<role>`/`<context>`/`<task>`/… tags, files, selections, skills, subagents) and delivers them to a Claude Code / Codex CLI running inside a Sutra terminal tab, via PTY stdin. Tag set + templates are configured in a visual manager persisted to per-workspace `.sutra/prompt-tags.json`.
 
 ---
 
@@ -22,17 +22,25 @@ Build a VSCode-chat-like composer: annotate context (`@file`, selections), use s
 | Q4 | Chip materialization | Hybrid: `@path` for whole files, fenced inline for selection snippets |
 | Q5 | Skills/subagents source | Filesystem scan of `.claude` dirs; Claude-Code-only for v1 (Codex gets free-text + `@context`, no skill picker) |
 | Q6 | Send behavior | Toggle; default **Stage** (write to input buffer, user presses Enter), remembered |
+| Q7 | Prompt structure | XML-tag scaffolding (`<role>`/`<context>`/`<task>`/`<constraints>`/`<output>` + `<examples>`/`<success_criteria>`/`<references>`); empty sections omitted |
+| Q8 | Tag/template config | Hybrid: visual tag manager, persisted **as** JSON; seeded with default templates |
+| Q9 | Config storage | Per-workspace `.sutra/prompt-tags.json` (git-versionable); built-in defaults when file absent |
+| Q10 | Chip → section routing | Auto-route (file/selection → `<context>`, skill/subagent → `<task>`) with drag-override |
 
 ## 3. Architecture & Data Flow
 
 ```
 ┌─ Composer panel (composer.ts, docked) ─────────────┐
-│  textarea  +  chip rail  +  @ / # / / pickers      │
+│  template: [Bug fix ▾]      [⚙ tag manager]        │
+│  <role> ……  <context> [chips]…  <task> [textarea]  │
+│  <constraints> …  <output> …   (+ optional tags)   │
+│  @ / # / / pickers  ·  live XML preview (collapse)  │
 │  target: [agent-term ▾]   [Stage|Submit ▾]  [Send] │
 └───────────────┬────────────────────────────────────┘
-                │ build prompt string (prompt-builder.ts, pure)
-                │   @path for files · fenced block for selections
-                │   /skill-name · "use the X subagent" tokens
+                │ assemble XML sections (prompt-builder.ts, pure)
+                │   <role><context><task><constraints><output>…
+                │   chips → @path / fenced block / /skill / subagent token
+                │   empty sections omitted; section order from active template
                 ▼
         deliverToPty(targetId, text, submit)
                 │  bracketed-paste wrap: ESC[200~ … ESC[201~
@@ -51,8 +59,10 @@ Context + asset sources (no MCP hop — panel reads live state directly):
 
 | Unit | Type | Responsibility | Depends on |
 |---|---|---|---|
-| `prompt-builder.ts` | pure TS, no IO | chips + free text → final prompt string. Testable core. | nothing |
-| `composer.ts` | frontend module | panel UI: textarea, chip rail, `@`/`/` pickers, target + stage/submit controls, Send | prompt-builder, editor, tree, ipc |
+| `prompt-builder.ts` | pure TS, no IO | sections + chips → assembled XML prompt string; empty-section omission; section order from template. Testable core. | tag-config types |
+| `prompt-tags.ts` | pure TS, no IO | tag/template schema types, default templates, load/validate/normalize `.sutra/prompt-tags.json` | nothing |
+| `tag-manager.ts` | frontend module | visual tag/template editor: add/remove/rename/reorder, toggle required/default-on, edit placeholder + default; writes JSON via ipc | prompt-tags, ipc |
+| `composer.ts` | frontend module | panel UI: per-section inputs, chip rail w/ auto-route + drag-override, `@`/`/` pickers, template picker, live XML preview, target + stage/submit, Send | prompt-builder, prompt-tags, editor, tree, ipc |
 | `composer-panel` markup/CSS | index.html + styles.css | docked pane shell (mirrors search-panel) | layout.ts |
 | `pty.rs` (edit) | Rust | tag session `agent_kind` at spawn; expose `pty_list_agents` | existing PtyState |
 | `scan_agent_assets` | Rust (new; `assets.rs` or in `mcp.rs`) | scan `.claude` dirs → skill/agent list w/ invocation token | std::fs |
@@ -62,16 +72,78 @@ Context + asset sources (no MCP hop — panel reads live state directly):
 
 ### Chip types (prompt-builder output)
 
-- `file` → `@relpath`
-- `selection` → fenced block ` ```lang path:Lstart-Lend\n<lines>``` `, resolved live at Send
-- `skill` → `/name`
-- `subagent` → `use the <name> subagent to ` prefix token
+- `file` → `@relpath` — auto-routes to `<context>`
+- `selection` → fenced block ` ```lang path:Lstart-Lend\n<lines>``` ` — auto-routes to `<context>`; resolved live at Send
+- `skill` → `/name` — auto-routes to `<task>`
+- `subagent` → `use the <name> subagent to ` prefix — auto-routes to `<task>`
+
+Auto-routed section is overridable by dragging the chip to another tag.
 
 ### Boundaries
 
 `prompt-builder.ts` is pure (no Tauri, no DOM) → unit-testable in isolation. `composer.ts` owns DOM only. Rust cmds own filesystem only. The IPC boundary rule (CLAUDE.md) holds: every Rust cmd registered in `lib.rs` `invoke_handler![]`, typed wrapper in `ipc.ts`, no direct `invoke` from UI.
 
-## 5. Delivery Mechanics
+## 5. Structured Prompt Scaffolding (XML tags)
+
+Claude is trained to parse XML tags; sections cut ambiguity and let each chip land in a meaningful place. The composer assembles tagged sections instead of a flat blob.
+
+### Default tag set
+
+| Tag | Purpose | UI input | Default-on |
+|---|---|---|---|
+| `<role>` | persona / expertise frame | short text (template default) | yes |
+| `<context>` | background + file/selection chips | chip-list + text | yes |
+| `<task>` | the actual ask + skill/subagent tokens | textarea (primary) | yes |
+| `<constraints>` | rules, do/don't, scope limits | bullet list | yes |
+| `<output>` | format spec (diff/JSON/file/prose) | text or preset dropdown | yes |
+| `<examples>` | few-shot in/out pairs — biggest quality lever | repeatable pairs | no |
+| `<success_criteria>` | acceptance / observable outcome (TDD-aligned) | bullet list | no |
+| `<references>` | doc links, URLs, ticket ids | chip-list | no |
+| `<tone>` | voice / register | short text | no |
+| `<thinking>` | prepends an extended-thinking instruction ("think hard") | toggle | no |
+
+Recommended order: `role → context → task → constraints → output → examples → success_criteria → references`. Order is template-driven and drag-reorderable.
+
+### Config schema — `.sutra/prompt-tags.json`
+
+```jsonc
+{
+  "version": 1,
+  "tags": [
+    { "id": "role", "label": "Role", "input": "text",
+      "default": "You are a senior engineer working in this repo.",
+      "placeholder": "persona / expertise", "defaultOn": true },
+    { "id": "context", "input": "chips+text", "defaultOn": true },
+    { "id": "task", "input": "textarea", "defaultOn": true }
+    // …
+  ],
+  "templates": [
+    { "name": "Bug fix",  "tags": ["role","context","task","constraints","success_criteria","output"] },
+    { "name": "Feature",  "tags": ["role","context","task","constraints","examples","output"] },
+    { "name": "Review",   "tags": ["role","context","task","output"] },
+    { "name": "Explain",  "tags": ["role","context","task"] }
+  ],
+  "activeTemplate": "Feature"
+}
+```
+
+`prompt-tags.ts` loads, validates, and normalizes this; on missing/invalid file it falls back to built-in defaults (seeded, then written on first edit). Read/write the file through existing `fs_cmds` read/write — no new Rust command.
+
+### Assembly rules (prompt-builder.ts)
+
+1. Iterate tags in active template order.
+2. Merge each tag's default text + user input + auto-routed chips.
+3. **Omit any tag whose merged content is empty** (no empty `<tag></tag>`).
+4. `<thinking>` on → prepend a reasoning instruction outside the tagged body.
+5. Emit `<tag>\n<content>\n</tag>` blocks joined by blank lines.
+
+### Other behaviors
+
+- **Live XML preview** — collapsible pane renders the exact assembled string; pairs with Stage mode.
+- **CLAUDE.md auto-inject** (optional toggle) — append project CLAUDE.md rules into `<constraints>`.
+- **Visual tag manager** (`tag-manager.ts`) — add/remove/rename/reorder tags, toggle required/default-on, edit placeholder + default text, manage templates; persists to the JSON above.
+
+## 6. Delivery Mechanics
 
 TUIs (Claude Code / Codex) treat a raw `\n` mid-text as submit. Wrap the whole prompt in bracketed-paste so multi-line content arrives as one block:
 
@@ -82,7 +154,7 @@ ESC[200~  <prompt, newlines intact>  ESC[201~      ← pastes as one block
 
 Stage mode = write the bracketed block with no trailing `\r` → prompt sits in CLI input; user reviews and hits Enter. Submit mode = append `\r`.
 
-## 6. Error Handling & Edge Cases
+## 7. Error Handling & Edge Cases
 
 | Case | Handling |
 |---|---|
@@ -94,12 +166,17 @@ Stage mode = write the bracketed block with no trailing `\r` → prompt sits in 
 | `.claude` dirs absent | `scan_agent_assets` returns `[]`; picker empty; no error |
 | Empty prompt + no chips | Send disabled |
 | Non-agent CLI (plain shell) | Detection matches exact `claude`/`codex` argv[0] only; shells never tagged |
+| `.sutra/prompt-tags.json` missing/corrupt | Fall back to built-in default tag set + templates; toast on parse error, don't overwrite the bad file |
+| Template references unknown tag id | Skip unknown id at assembly; surface once in tag manager |
+| All sections empty | Send disabled (same as empty prompt) |
 
-## 7. Testing
+## 8. Testing
 
 ### TS (`node:test`, `npm test`)
 
 - `prompt-builder.test.ts` — file chip → `@relpath`; selection chip → fenced block w/ lang+range; skill → `/name`; subagent → prefix; mixed order preserved; empty → empty string.
+- `scaffold.test.ts` — sections emitted in template order; **empty section omitted**; auto-route puts file/selection in `<context>`, skill/subagent in `<task>`; drag-override moves chip; `<thinking>` prepends instruction; CLAUDE.md inject appends to `<constraints>`.
+- `prompt-tags.test.ts` — valid JSON loads; missing file → defaults; corrupt JSON → defaults + no overwrite; unknown tag id in template skipped.
 - `delivery.test.ts` — bracketed-paste wrap correct; `\r` present iff submit; absent on stage.
 - `agent-detect.test.ts` — argv `claude`/`codex` tagged; `zsh`/`bash`/`node` not.
 
@@ -115,15 +192,18 @@ Stage mode = write the bracketed block with no trailing `\r` → prompt sits in 
 - Toggle Submit → agent runs.
 - Two agent tabs → picker appears.
 
-## 8. Implementation Phasing (independently mergeable)
+## 9. Implementation Phasing (independently mergeable)
 
-1. **P1** — `prompt-builder.ts` + tests. Pure core, zero deps.
+1. **P1** — `prompt-tags.ts` (schema + defaults + load/validate) and `prompt-builder.ts` (section assembly, chip routing, omission) + tests. Pure core, zero deps.
 2. **P2** — `pty.rs` agent tagging + `pty_list_agents` + `scan_agent_assets` + ipc wrappers + Rust tests.
-3. **P3** — `composer.ts` panel + dock + pickers + `deliverToPty` + wiring + manual verify.
+3. **P3** — `composer.ts` panel + dock + per-section inputs + chip auto-route/drag + pickers + live XML preview + `deliverToPty` + wiring + manual verify.
+4. **P4** — `tag-manager.ts` visual editor + `.sutra/prompt-tags.json` read/write via `fs_cmds` + template picker wiring + manual verify.
 
-## 9. Out of Scope (v1)
+## 10. Out of Scope (v1)
 
 - External / non-Sutra-terminal sessions (iTerm, claude.ai).
 - Headless / SDK spawned runs per prompt.
 - Codex skill/subagent picker (Codex: free-text + `@context` only).
 - Pushing prompts via MCP (architecturally not possible).
+- Layered global + per-workspace tag config (per-workspace only in v1).
+- Provider-specific prompt linting / quality scoring.
