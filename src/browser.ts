@@ -1,20 +1,25 @@
 // Browser pane: embedded iframe for localhost dev preview + terminal localhost links.
-// Manages URL bar, back/reload buttons, iframe sandbox state.
+// Manages URL bar, back/reload, and maximize/restore buttons.
+import { icon } from "./icons";
+
 export class BrowserPane {
   private area: HTMLElement;
   private frame: HTMLIFrameElement;
   private urlInput: HTMLInputElement;
   private btnBack: HTMLButtonElement;
   private btnReload: HTMLButtonElement;
+  private btnMaximize: HTMLButtonElement;
+  private maximized = false;
   private history: string[] = [];
   private historyIdx = -1;
 
-  constructor(area: HTMLElement, frame: HTMLIFrameElement, urlInput: HTMLInputElement, btnBack: HTMLButtonElement, btnReload: HTMLButtonElement) {
+  constructor(area: HTMLElement, frame: HTMLIFrameElement, urlInput: HTMLInputElement, btnBack: HTMLButtonElement, btnReload: HTMLButtonElement, btnMaximize: HTMLButtonElement) {
     this.area = area;
     this.frame = frame;
     this.urlInput = urlInput;
     this.btnBack = btnBack;
     this.btnReload = btnReload;
+    this.btnMaximize = btnMaximize;
 
     // URL input submit → open(url).
     this.urlInput.onkeydown = (e) => {
@@ -29,6 +34,10 @@ export class BrowserPane {
 
     // Reload button.
     this.btnReload.onclick = () => this.reload();
+
+    // Maximize / restore button.
+    this.btnMaximize.innerHTML = icon("expand", 14, 1.6);
+    this.btnMaximize.onclick = () => this.toggleMaximize();
   }
 
   // Normalize URL and load it in the iframe. If no scheme, prefix http://.
@@ -79,13 +88,39 @@ export class BrowserPane {
     }
   }
 
+  // Toggle between maximized (fills editor-area) and normal state.
+  toggleMaximize(): void {
+    this.maximized ? this.restore() : this.maximize();
+  }
+
+  maximize(): void {
+    const editorArea = document.getElementById("editor-area");
+    if (!editorArea) return;
+    this.maximized = true;
+    editorArea.classList.add("browser-maximized");
+    this.btnMaximize.innerHTML = icon("compress", 14, 1.6);
+    this.btnMaximize.title = "Restore browser";
+    this.btnMaximize.setAttribute("aria-label", "Restore browser");
+  }
+
+  restore(): void {
+    const editorArea = document.getElementById("editor-area");
+    if (!editorArea) return;
+    this.maximized = false;
+    editorArea.classList.remove("browser-maximized");
+    this.btnMaximize.innerHTML = icon("expand", 14, 1.6);
+    this.btnMaximize.title = "Maximize browser";
+    this.btnMaximize.setAttribute("aria-label", "Maximize browser");
+  }
+
   // Show the pane (remove hidden class).
   show(): void {
     this.area.classList.remove("hidden");
   }
 
-  // Hide the pane (add hidden class).
+  // Hide the pane; restore from maximized state first if needed.
   hide(): void {
+    if (this.maximized) this.restore();
     this.area.classList.add("hidden");
   }
 

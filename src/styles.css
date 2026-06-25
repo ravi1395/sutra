@@ -2386,6 +2386,12 @@ button:hover {
 #browser-resizer.hidden {
   display: none;
 }
+/* Maximized browser: hide panes + resizers, let browser-area fill editor-area */
+#editor-area.browser-maximized #panes        { display: none; }
+#editor-area.browser-maximized #diff-resizer { display: none; }
+#editor-area.browser-maximized #diff-pane    { display: none; }
+#editor-area.browser-maximized #browser-resizer { display: none; }
+#editor-area.browser-maximized #browser-area { flex: 1; border-left: none; }
 
 /* ---- settings modal ---- */
 .settings-overlay {

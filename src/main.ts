@@ -179,6 +179,7 @@ const browser = new BrowserPane(
   $<HTMLInputElement>("browser-url"),
   $<HTMLButtonElement>("btn-back"),
   $<HTMLButtonElement>("btn-reload"),
+  $<HTMLButtonElement>("btn-browser-maximize"),
 );
 
 // Wire terminal link clicks → embedded browser.

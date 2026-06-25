@@ -3,75 +3,79 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Commands
-
 ```bash
-npm install                # install JS deps
-npm run tauri dev          # dev window with HMR (first run compiles git2 + portable-pty — ~2 min)
-npm run tauri build        # production bundle (.app / .dmg)
-npm run build              # TS check + Vite build only (no Tauri launch)
-npm test                   # run TS tests via Node built-in test runner (esbuild bundle)
+npm install && npm run tauri dev   # dev (first run ~2 min for git2/pty compile)
+npm run build                      # TS check + Vite only
+npm test                           # node:test via esbuild bundle
+cargo test                         # Rust unit tests (run inside src-tauri/)
+npm run tauri build                # production .app/.dmg
 ```
-
-Requires: Rust (stable) + Node. No test framework — tests use Node's built-in `node:test`.
-
----
 
 ## Architecture
 
-**Two-process model:** Rust backend (Tauri) handles filesystem, git, PTY, and search. TypeScript frontend handles all UI via Tauri IPC (`invoke`/`listen`).
+Two-process: Rust (Tauri) owns FS/git/PTY/search; TypeScript owns all UI via IPC.
 
-### IPC boundary
+**IPC rule:** implement in `src-tauri/src/*.rs` → register in `lib.rs` `invoke_handler![]` → typed wrapper in `src/ipc.ts`. Never call `invoke` directly from UI.
 
-Every Rust command is registered in `src-tauri/src/lib.rs`. Adding a new command requires:
-1. Implement in the relevant `src-tauri/src/*.rs` module
-2. Register in the `invoke_handler![]` macro in `lib.rs`
-3. Add a typed wrapper in `src/ipc.ts`
+**Codebase queries:** use `graphify query "<intent>"` before grep — returns scoped subgraph faster. `graphify update .` after edits (AST-only).
 
-Never call `invoke` directly from UI code — always go through `src/ipc.ts`.
+### Code map
+```
+src/
+  ipc.ts               ← all Tauri invoke/listen wrappers (touch first for new commands)
+  main.ts              bootstrap, shortcuts, AI mtime tracker
+  editor.ts            CM6 instances, tabs, diff gutter
+  diff.ts              line-diff, hunk extraction, revert
+  tree.ts              lazy file tree, compact chains, badges
+  terminal.ts          xterm sessions, PTY lifecycle, tab bar
+  layout.ts            drag-resize splitters
+  menubar.ts           in-window menu (native macOS menu suppressed in lib.rs)
+  palette.ts           Cmd+P command palette | Cmd+T symbol picker | goto-def chooser
+  workspace.ts         root folder state, recents, localStorage
+  settings.ts          UserSettings model + helpers  |  settings-modal.ts  UI modal
+  preview.ts           Markdown/HTML split preview   |  browser.ts  localhost iframe
+  search.ts / search-panel.ts  project-wide file search
+  gitbar.ts            branch whisper + dropdown  |  git-index.ts  worktree helpers
+  conflict.ts          merge conflict parse + resolution
+  marginalia.ts        AiRange, AI stitch decorations
+  agent-tracking.ts    ReviewFile model, AI change diffs, human-touch flags
+  automations.ts       per-project shell commands (.sutra/automations.json)
+  lang.ts              hover/completion/outline UI (bridges ipc.ts lang_* calls)
+  debug.ts             DapClient, BreakpointStore
+  debug-session.ts     active debug session (step/continue/reset)
+  debug-hints.ts       breakpoint + paused-line gutter decorations
+  debugger-sidebar.ts  debugger sidebar (variables, call stack)
+  updater.ts           auto-update: 6h poll, GitHub releases, relaunch
+  shortcuts.ts         shortcut predicates  |  contextmenu.ts  popover
+  split-drop.ts        drag types for editor splits  |  terminal-groups.ts  L/R groups
+  icons.ts             SVG icon registry
 
-### Frontend module responsibilities
+src-tauri/src/
+  lib.rs               ← invoke_handler![] (all command registrations)
+  fs_cmds.rs           list_dir, read/write, mtime  |  git.rs  HEAD diff baseline
+  pty.rs               PTY spawn/write/resize/kill + base64 output stream
+  search.rs            ripgrep search  |  watcher.rs  mtime debounce
+  agent_tracker.rs     agent change tracking  |  debug.rs  DAP backend
+  mcp.rs / mcp_config.rs  MCP integration  |  preview_server.rs  preview HTTP server
+  lang/mod.rs          lang_did_open/change/close, hover, completion, symbols, goto_definition
+  lang/engine.rs       LangEngine (tree-sitter dispatch)  |  lang/parser_cache.rs  doc cache
+  lang/symbol_index.rs workspace symbol index  |  lang/registry.rs  language registry
+  lang/features/       symbols.rs  hover.rs  completion.rs  navigation.rs
+  lang/queries/<lang>/ symbols.scm  scopes.scm  members.scm
 
-| Module | Owns |
-|---|---|
-| `main.ts` | App bootstrap, global shortcut wiring, AI mtime tracker |
-| `editor.ts` | CM6 editor instances, tab lifecycle, diff gutter |
-| `tree.ts` | Lazy file tree, compact folder chains, badge rendering |
-| `terminal.ts` | xterm sessions, PTY lifecycle, tab bar |
-| `diff.ts` | Line-diff classification, hunk extraction, revert logic |
-| `layout.ts` | Drag-resize splitters between panes |
-| `menubar.ts` | In-window menu bar (no native macOS menu) |
-| `workspace.ts` | Root folder state, recents, localStorage persistence |
-| `preview.ts` | Markdown/HTML live preview in split pane |
-| `search.ts` / `search-panel.ts` | Project-wide file search |
-| `ipc.ts` | Typed wrappers over `@tauri-apps/api` invoke/listen |
-| `icons.ts` | SVG icon registry |
+tests/  one .test.ts per frontend module (node:test)
+```
 
-### Key invariants
-
-- PTY output is base64-encoded raw bytes in the Tauri event; decoded to `Uint8Array` for xterm.
-- Diff baseline is always git HEAD — untracked files show no gutter until committed.
-- AI mtime tracker polls every 1.5s; no polling when Track AI is off.
-- In-window menu bar is the single source of truth — native macOS menu is suppressed in `lib.rs`.
-- HTML preview uses `<iframe srcdoc sandbox="">` (null origin, scripts disabled); Markdown is sanitized via DOMPurify before injection.
-
----
+### Invariants
+- PTY output: base64 raw bytes → `Uint8Array` for xterm
+- Diff baseline: git HEAD only (untracked = no gutter until committed)
+- AI tracker: 1.5s mtime poll, disabled when Track AI is off
+- Preview: `<iframe srcdoc sandbox="">` (null origin, scripts off); Markdown DOMPurified
+- Menu: in-window bar is source of truth; native macOS menu suppressed in `lib.rs`
 
 ## Best Practices
-
-### Verification
-
-- **UI changes:** run `npm run tauri dev` and confirm the behavior visually before marking done.
-- **Backend/IPC changes:** probe the Tauri command with expected inputs and confirm the response matches acceptance criteria.
-
-### Testing
-
-- TS logic: add tests under `tests/` using `node:test`; run with `npm test`.
-- Rust: add `#[cfg(test)]` unit tests in the same file; run with `cargo test` inside `src-tauri/`.
-
-### Code comments (project override)
-
-Every method must have a one-line comment at the top describing its purpose. Every class/module must have a comment stating its responsibility and the components it covers. Complex logic blocks get a high-level comment explaining the approach.
-
-### Reuse before adding
-
-Before adding a new module, check whether `ipc.ts`, `editor.ts`, `workspace.ts`, `tree.ts`, `diff.ts`, or `layout.ts` already covers the need. Prefer extending an existing module over creating a new one unless responsibilities are clearly distinct.
+- **UI changes:** verify visually with `npm run tauri dev`
+- **IPC changes:** probe command with expected inputs, confirm response matches criteria
+- **Comments:** one-line per method (purpose); one-line per module (responsibility + coverage)
+- **Reuse:** check `ipc.ts / editor.ts / workspace.ts / tree.ts / diff.ts / layout.ts` before adding a new module
+- **Tests:** TS under `tests/` with `node:test`; Rust `#[cfg(test)]` in same file
