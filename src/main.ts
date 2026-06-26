@@ -86,7 +86,7 @@ import {
   saveSettings,
   type UserSettings,
 } from "./settings";
-import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
+import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
@@ -1098,7 +1098,7 @@ window.addEventListener("dragend", clearPaneDropHint);
 
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
-  const mod = e.metaKey || e.ctrlKey;
+  const mod = isMod(e);
   // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
   if (mod && e.code === "KeyN") {
     e.preventDefault();
@@ -1457,21 +1457,21 @@ async function switchBranch(branch: string): Promise<void> {
 // ---- command palette ----
 // Named so the settings shortcuts reference can reuse it as the single source of truth.
 const paletteCommands: Command[] = [
-  { id: "new-file", title: "New File", run: actions.newFile, shortcut: "⌘N" },
-  { id: "save", title: "Save", run: actions.saveActive, shortcut: "⌘S" },
-  { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: "⇧⌘S" },
-  { id: "save-all", title: "Save All", run: actions.saveAllDirty, shortcut: "⌥⌘S" },
-  { id: "open-folder", title: "Open Folder…", run: actions.openFolder, shortcut: "⌘O" },
-  { id: "close-tab", title: "Close Tab", run: actions.closeTab, shortcut: "⌘W" },
-  { id: "toggle-terminal", title: "Toggle Terminal", run: actions.toggleTerminal, shortcut: "⌘J" },
+  { id: "new-file", title: "New File", run: actions.newFile, shortcut: fmtShortcut("N") },
+  { id: "save", title: "Save", run: actions.saveActive, shortcut: fmtShortcut("S") },
+  { id: "save-as", title: "Save As…", run: actions.saveActiveAs, shortcut: fmtShortcut("S", { shift: true }) },
+  { id: "save-all", title: "Save All", run: actions.saveAllDirty, shortcut: fmtShortcut("S", { alt: true }) },
+  { id: "open-folder", title: "Open Folder…", run: actions.openFolder, shortcut: fmtShortcut("O") },
+  { id: "close-tab", title: "Close Tab", run: actions.closeTab, shortcut: fmtShortcut("W") },
+  { id: "toggle-terminal", title: "Toggle Terminal", run: actions.toggleTerminal, shortcut: fmtShortcut("J") },
   { id: "toggle-diff", title: "Toggle Diff Viewer", run: actions.toggleDiff },
   { id: "toggle-browser", title: "Toggle Browser", run: actions.toggleBrowser },
   { id: "open-in-browser", title: "Open in Browser…", run: actions.openInBrowser },
-  { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: "⌘B" },
+  { id: "toggle-sidebar", title: "Toggle Sidebar", run: actions.toggleSidebar, shortcut: fmtShortcut("B") },
   { id: "toggle-split", title: "Toggle Split", run: () => {
     if (editor.isSplit) void editor.closeSplit();
     else editor.openSplit();
-  }, shortcut: "⌘\\" },
+  }, shortcut: fmtShortcut("\\") },
   { id: "new-terminal", title: "New Terminal", run: actions.newTerminal },
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
@@ -1480,8 +1480,8 @@ const paletteCommands: Command[] = [
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
     search.focus();
-  }, shortcut: "⇧⌘F" },
-  { id: "settings", title: "Settings", run: () => openSettings(), shortcut: "⌘," },
+  }, shortcut: fmtShortcut("F", { shift: true }) },
+  { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
   { id: "debug-start", title: "Debug: Start", run: () => void startDebugging(), shortcut: "F5" },
   { id: "debug-continue", title: "Debug: Continue", run: () => void debugSession.continue(), shortcut: "F5" },
   { id: "debug-pause", title: "Debug: Pause", run: () => void debugSession.pause(), shortcut: "F6" },
