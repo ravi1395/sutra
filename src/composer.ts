@@ -13,6 +13,7 @@ import {
 } from "./ipc";
 import { icon } from "./icons";
 import { mountTagManager } from "./tag-manager";
+import { IS_MAC } from "./shortcuts";
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
@@ -75,7 +76,6 @@ export function mountComposer(opts: ComposerOptions): {
   // ── DOM ──────────────────────────────────────────────────────────────────────
   container.innerHTML = "";
 
-  const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
   // Toolbar
   const toolbar = mk("div", "cmp-toolbar");
@@ -123,7 +123,7 @@ export function mountComposer(opts: ComposerOptions): {
   thinkInp.type = "checkbox";
   thinkLbl.append(thinkInp, " Think");
   modeGrp.append(stageLbl, submitLbl, thinkLbl);
-  const sendBtn = mkBtn("cmp-send", `Send ${isMac ? "⌘" : "Ctrl"}↵`);
+  const sendBtn = mkBtn("cmp-send", `Send ${IS_MAC ? "⌘" : "Ctrl+"}↵`);
   actionBar.append(modeGrp, sendBtn);
 
   // Preview (collapsible)
