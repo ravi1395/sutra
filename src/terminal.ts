@@ -19,6 +19,7 @@ import {
   type TerminalGroups,
 } from "./terminal-groups";
 import { icon } from "./icons";
+import { isMod } from "./shortcuts";
 
 interface Term {
   id: string;
@@ -283,11 +284,10 @@ export class TerminalManager {
 
     // Keyboard handlers for copy/paste/find/history.
     term.attachCustomKeyEventHandler((event: KeyboardEvent): boolean => {
-      const isMac = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-      const isMod = isMac ? event.metaKey : event.ctrlKey;
+      const mod = isMod(event);
 
-      // Cmd+C: copy selection if present, else let through (sends SIGINT).
-      if (isMod && event.key === "c") {
+      // Cmd+C / Ctrl+C: copy selection if present, else let through (sends SIGINT).
+      if (mod && event.key === "c") {
         const selection = term.getSelection();
         if (selection) {
           void clipboardWrite(selection).catch(() => {});
@@ -296,8 +296,8 @@ export class TerminalManager {
         return true; // Let SIGINT through
       }
 
-      // Cmd+F: open find overlay.
-      if (isMod && event.key === "f") {
+      // Cmd+F / Ctrl+F: open find overlay.
+      if (mod && event.key === "f") {
         this.openFindOverlay(search);
         return false;
       }
