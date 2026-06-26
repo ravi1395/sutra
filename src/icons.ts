@@ -34,7 +34,8 @@ export type IconName =
   | "download"
   | "trash"
   | "list"
-  | "openEditors";
+  | "openEditors"
+  | "prompt-builder";
 
 const paths: Record<IconName, string> = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -78,6 +79,8 @@ const paths: Record<IconName, string> = {
   list: '<path d="M3 6h18M7 12h14M10 18h11"/>',
   // Two overlapping documents — the open-editors switcher (jump between open files).
   openEditors: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/>',
+  // Document with pencil tip — compose/build a prompt for an AI agent.
+  "prompt-builder": '<path d="M11 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/><path d="M17.5 2.5a2 2 0 0 1 2.8 2.8L12 13.5l-4 1 1-4z"/>',
 };
 
 export function icon(name: IconName, size = 16, stroke = 1.6): string {

@@ -87,6 +87,7 @@ import {
   type UserSettings,
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut } from "./shortcuts";
+import { mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
@@ -672,6 +673,71 @@ function scheduleFileSystemRefresh(root: string): void {
   })();
 }
 
+// ---- composer (prompt builder) ----
+const composerPane = $("composer-pane");
+const composerRes = $("composer-resizer");
+const composerBody = $("composer-body");
+const btnComposer = $("btn-composer");
+
+// Recursive file walk for the composer's @file autocomplete (cached per root).
+const COMPOSER_SKIP = new Set(["node_modules", ".git", "dist", ".cache", "build", "target", ".next"]);
+let composerFileCache: string[] | null = null;
+async function walkComposerFiles(dir: string, depth: number): Promise<string[]> {
+  if (depth <= 0) return [];
+  const entries = await listDir(dir).catch(() => []);
+  const out: string[] = [];
+  for (const e of entries) {
+    if (e.isDir) {
+      if (!COMPOSER_SKIP.has(e.name)) out.push(...(await walkComposerFiles(e.path, depth - 1)));
+    } else out.push(e.path);
+  }
+  return out;
+}
+async function getComposerFiles(root: string): Promise<string[]> {
+  if (!composerFileCache) composerFileCache = await walkComposerFiles(root, 4);
+  return composerFileCache;
+}
+
+const LANG_BY_EXT: Record<string, string> = {
+  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", rs: "rust",
+  py: "python", go: "go", java: "java", json: "json", md: "markdown",
+  css: "css", html: "html", sh: "bash", toml: "toml", yml: "yaml", yaml: "yaml",
+};
+function composerSelection(): { path: string | null; text: string; line: number; endLine: number; lang: string } {
+  const sel = editor.getSelection();
+  const ext = sel.path?.split(".").pop()?.toLowerCase() ?? "";
+  return { ...sel, endLine: sel.line, lang: LANG_BY_EXT[ext] ?? "" };
+}
+
+let composerPanel: ReturnType<typeof mountComposer> | null = null;
+let composerMountedRoot: string | null = null;
+function ensureComposer(): boolean {
+  if (!currentRoot) return false;
+  if (composerPanel && composerMountedRoot === currentRoot) return true;
+  composerPanel?.dispose();
+  composerFileCache = null;
+  composerMountedRoot = currentRoot;
+  composerPanel = mountComposer({
+    root: currentRoot,
+    trusted: false, // composer.ts re-checks localStorage trust
+    container: composerBody,
+    getFiles: () => getComposerFiles(currentRoot as string),
+    getSelection: composerSelection,
+  });
+  return true;
+}
+
+function setComposer(on: boolean): void {
+  if (on && !ensureComposer()) return; // no workspace open → nothing to compose against
+  composerPane.classList.toggle("hidden", !on);
+  composerRes.classList.toggle("hidden", !on);
+  btnComposer.classList.toggle("on", on);
+  if (on) composerPanel?.show();
+  else composerPanel?.hide();
+}
+btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
+$("composer-close").onclick = () => setComposer(false);
+
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
 const diffRes = $("diff-resizer");
@@ -993,6 +1059,7 @@ hResizer(hres, termArea, {
     terminals.refit();
   },
 });
+vResizer(composerRes, composerPane, { min: 220, fromEnd: true });
 vResizer(diffRes, diffPane, { min: 220, fromEnd: true });
 vResizer(browserRes, browserArea, { min: 220, fromEnd: true });
 window.addEventListener("resize", () => terminals.refit());
@@ -1108,6 +1175,7 @@ window.addEventListener("blur", () => {
 // ---- chrome: icon buttons + menu bar ----
 $("btn-open-editors").innerHTML = icon("openEditors", 17);
 btnTerm.innerHTML = icon("terminal", 17);
+btnComposer.innerHTML = icon("prompt-builder", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
 btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;

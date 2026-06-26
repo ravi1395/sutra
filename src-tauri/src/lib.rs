@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod agent_tracker;
+mod assets;
 mod debug;
 mod fs_cmds;
 mod git;
@@ -64,6 +65,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            assets::scan_agent_assets,
             agent_tracker::agent_tracking_begin,
             agent_tracker::agent_tracking_poll,
             agent_tracker::agent_tracking_accept,
@@ -94,6 +96,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_is_busy,
+            pty::pty_list_agents,
             debug::debug_start,
             debug::debug_send,
             debug::debug_stop,

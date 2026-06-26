@@ -23,6 +23,7 @@
         <div id="view-tools">
           <button id="btn-open-editors" class="glyph" title="Open editors" aria-label="Open editors"></button>
           <button id="btn-term" class="glyph on" title="Toggle terminal (⌘J)" aria-label="Toggle terminal"></button>
+          <button id="btn-composer" class="glyph" title="Toggle prompt builder" aria-label="Toggle prompt builder"></button>
           <button id="btn-diff" class="glyph" title="Toggle diff viewer" aria-label="Toggle diff viewer"></button>
           <button id="btn-browser" class="glyph" title="Toggle browser" aria-label="Toggle browser"></button>
           <div id="automations"></div>
@@ -57,6 +58,14 @@
         <div id="main">
           <div id="editor-area">
             <div id="panes"></div>
+            <div id="composer-resizer" class="resizer-v hidden" data-target="composer-pane"></div>
+            <div id="composer-pane" class="hidden">
+              <div id="composer-header">
+                <span id="composer-title">Prompt Builder</span>
+                <button id="composer-close" title="Close">×</button>
+              </div>
+              <div id="composer-body"></div>
+            </div>
             <div id="diff-resizer" class="resizer-v hidden" data-target="diff-pane"></div>
             <div id="diff-pane" class="hidden">
               <div id="diff-header">

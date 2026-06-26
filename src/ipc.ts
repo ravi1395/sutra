@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { wrapForDelivery } from "./delivery";
 
 export interface Entry {
   name: string;
@@ -270,3 +271,49 @@ export const langGotoDefinition = (path: string, pos: Pos) =>
   invoke<Location[]>("lang_goto_definition", { path, pos });
 export const langHover = (path: string, pos: Pos) =>
   invoke<Hover | null>("lang_hover", { path, pos });
+
+// --- Prompt composer: agent assets, terminal targeting, delivery ---
+export interface AgentAsset {
+  name: string;
+  kind: "skill" | "command" | "subagent";
+  invocation: string;
+}
+export const scanAgentAssets = (root: string) =>
+  invoke<AgentAsset[]>("scan_agent_assets", { root });
+
+export interface AgentTerminal {
+  id: string;
+  kind: string;
+  cwd: string | null;
+  state: "idle" | "busy" | "awaiting-input";
+}
+export const ptyListAgents = () => invoke<AgentTerminal[]>("pty_list_agents");
+
+/**
+ * Write a composed prompt to a target terminal, gated on the agent being idle.
+ * Re-validates the target at send time, refuses non-idle targets, and (when
+ * submitting) sends the trailing CR only after a settle delay so it never lands
+ * on partially-pasted input.
+ */
+export async function deliverToPty(args: {
+  targetId: string;
+  text: string;
+  submit: boolean;
+  settleMs?: number;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const settleMs = args.settleMs ?? 60; // from phase0-findings.md
+  const agents = await ptyListAgents();
+  const target = agents.find((a) => a.id === args.targetId);
+  if (!target) return { ok: false, reason: "target terminal is gone" };
+  if (target.state !== "idle") return { ok: false, reason: `agent ${target.state}` };
+
+  if (args.submit) {
+    // paste block first, settle, then CR (split into two writes)
+    await ptyWrite(args.targetId, wrapForDelivery(args.text, false));
+    await new Promise((r) => setTimeout(r, settleMs));
+    await ptyWrite(args.targetId, "\r");
+  } else {
+    await ptyWrite(args.targetId, wrapForDelivery(args.text, false));
+  }
+  return { ok: true };
+}
