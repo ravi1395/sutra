@@ -1398,6 +1398,7 @@ button:hover {
 /* ---- inline diff lens ---- */
 .lens {
   margin: 6px 18px 8px 24px;
+  max-width: min(620px, calc(100% - 42px));
   background: var(--bg-3);
   border: 1px solid var(--line-menu);
   border-radius: var(--r-lg);
@@ -1414,20 +1415,22 @@ button:hover {
   border-bottom: 1px solid var(--line);
 }
 .lens-revert {
+  flex-shrink: 0;
   padding: 3px 9px;
   font-size: 11px;
 }
 .lens-body {
   display: flex;
   flex-direction: column;
+  overflow-x: auto;
 }
 .lens-row {
   padding: 3px 10px;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  min-width: max-content;
 }
 .lens-row.old {
   background: rgba(240, 113, 106, 0.08);
