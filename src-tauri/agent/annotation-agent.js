@@ -38,6 +38,7 @@
   // src/annotation-agent.ts
   var PARENT_ORIGIN = window.__SUTRA_PARENT_ORIGIN__;
   var TARGET_ORIGIN = window.__SUTRA_TARGET_ORIGIN__;
+  var PROXY_TOKEN = window.__SUTRA_PROXY_TOKEN__;
   var armed = false;
   var pins = /* @__PURE__ */ new Map();
   function post(msg) {
@@ -166,9 +167,11 @@
     switch (m.type) {
       case "arm":
         armed = true;
+        document.body.style.cursor = "crosshair";
         break;
       case "disarm":
         armed = false;
+        document.body.style.cursor = "";
         if (hovered) hovered.style.outline = "";
         break;
       case "openEditor": {
@@ -192,5 +195,35 @@
       }
     }
   });
+  if (PROXY_TOKEN) {
+    let injectToken = function(url) {
+      try {
+        const u = new URL(url, location.href);
+        if (u.origin !== location.origin) return url;
+        if (u.searchParams.has("token")) return url;
+        u.searchParams.set("token", PROXY_TOKEN);
+        return u.toString();
+      } catch {
+        return url;
+      }
+    };
+    injectToken2 = injectToken;
+    const origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      if (typeof input === "string") {
+        input = injectToken(input);
+      } else if (input instanceof Request) {
+        const patched = injectToken(input.url);
+        if (patched !== input.url) input = new Request(patched, input);
+      }
+      return origFetch.call(this, input, init);
+    };
+    const origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, async = true, username, password) {
+      const patched = injectToken(typeof url === "string" ? url : url.toString());
+      return origOpen.call(this, method, patched, async, username, password);
+    };
+  }
+  var injectToken2;
   post({ type: "ready", route: currentRoute() });
 })();

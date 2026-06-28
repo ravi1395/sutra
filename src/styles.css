@@ -2397,6 +2397,11 @@ button:hover {
   color: var(--em);
   border-color: var(--em-dim);
 }
+.browser-btn.active {
+  background: var(--em);
+  color: var(--bg);
+  border-color: var(--em);
+}
 .browser-url-input {
   flex: 1;
   height: 32px;

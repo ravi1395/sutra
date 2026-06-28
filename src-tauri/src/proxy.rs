@@ -155,14 +155,24 @@ const PARENT_ORIGIN: &str = "tauri://localhost";
 #[cfg(not(target_os = "macos"))]
 const PARENT_ORIGIN: &str = "http://tauri.localhost";
 
-fn agent_script(parent_origin: &str, target_origin: &str) -> String {
+fn agent_script(parent_origin: &str, target_origin: &str, token: &str) -> String {
     const BUNDLE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/agent/annotation-agent.js"));
     format!(
-        "<script>window.__SUTRA_PARENT_ORIGIN__={};window.__SUTRA_TARGET_ORIGIN__={};</script><script>{}</script>",
+        "<script>window.__SUTRA_PARENT_ORIGIN__={};window.__SUTRA_TARGET_ORIGIN__={};window.__SUTRA_PROXY_TOKEN__={};</script><script>{}</script>",
         serde_json::to_string(parent_origin).unwrap_or_else(|_| "\"\"".into()),
         serde_json::to_string(target_origin).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into()),
         BUNDLE,
     )
+}
+
+/// Build the annotation agent script for `target_origin`/`token` and inject it
+/// into `html`. Shared by the dev-server proxy and the static preview-server so
+/// both render paths host the same in-iframe picker. CSP meta is stripped by
+/// `inject_agent` so the injected script always runs.
+pub fn inject_annotation_agent(html: &[u8], target_origin: &str, token: &str) -> Vec<u8> {
+    let script = agent_script(PARENT_ORIGIN, target_origin, token);
+    inject_agent(html, &script)
 }
 
 #[derive(Default)]
@@ -402,8 +412,7 @@ fn handle_conn(
 
     if is_html {
         let body = read_full_body(&mut upstream, &resp)?;
-        let script = agent_script(PARENT_ORIGIN, &target.origin());
-        let injected = inject_agent(&body, &script);
+        let injected = inject_annotation_agent(&body, &target.origin(), token);
         let out = rewrite_html_response_head(&resp, injected.len(), token, is_navigation);
         client.write_all(&out)?;
         client.write_all(&injected)?;
@@ -715,6 +724,20 @@ mod tests {
         let bound = state.target.lock().unwrap().clone().unwrap();
         assert_eq!(bound.host, "127.0.0.1");
         assert_eq!(bound.port, 5173);
+    }
+
+    #[test]
+    fn inject_annotation_agent_sets_globals_and_runs_once() {
+        let html = b"<!doctype html><html><head></head><body>hi</body></html>";
+        let out = String::from_utf8(inject_annotation_agent(html, "http://127.0.0.1:1420", "tok123")).unwrap();
+        // Target origin + token globals are injected for the in-iframe agent.
+        assert!(out.contains("\"http://127.0.0.1:1420\""));
+        assert!(out.contains("\"tok123\""));
+        // Parent origin global present so postMessage targets the webview.
+        assert!(out.contains("__SUTRA_PARENT_ORIGIN__"));
+        // Globals prelude injected exactly once, after <head>.
+        assert_eq!(out.matches("__SUTRA_TARGET_ORIGIN__=").count(), 1);
+        assert!(out.find("__SUTRA_TARGET_ORIGIN__=").unwrap() < out.find("</body>").unwrap());
     }
 
     #[test]

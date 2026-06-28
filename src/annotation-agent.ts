@@ -8,11 +8,13 @@ declare global {
   interface Window {
     __SUTRA_PARENT_ORIGIN__: string;
     __SUTRA_TARGET_ORIGIN__: string;
+    __SUTRA_PROXY_TOKEN__: string;
   }
 }
 
 const PARENT_ORIGIN = window.__SUTRA_PARENT_ORIGIN__ as string;
 const TARGET_ORIGIN = window.__SUTRA_TARGET_ORIGIN__ as string;
+const PROXY_TOKEN = window.__SUTRA_PROXY_TOKEN__ as string | undefined;
 
 let armed = false;
 const pins = new Map<number, HTMLElement>();
@@ -132,9 +134,13 @@ window.addEventListener("message", (e) => {
   if (!isTrustedMessage(e, PARENT_ORIGIN, window.parent)) return;
   const m = e.data as any;
   switch (m.type) {
-    case "arm": armed = true; break;
+    case "arm":
+      armed = true;
+      document.body.style.cursor = "crosshair";
+      break;
     case "disarm":
       armed = false;
+      document.body.style.cursor = "";
       if (hovered) (hovered as HTMLElement).style.outline = "";
       break;
     case "openEditor": {
@@ -158,6 +164,45 @@ window.addEventListener("message", (e) => {
     }
   }
 });
+
+// --- Proxy token re-injection ---
+// SameSite=Strict on the auth cookie is dropped by WKWebView because the
+// top-level document is tauri://localhost (a different site from 127.0.0.1:PORT).
+// Patch fetch/XHR to re-attach the token as ?token=... on every same-origin
+// request so subresources and API calls are authorized without the cookie.
+if (PROXY_TOKEN) {
+  function injectToken(url: string): string {
+    try {
+      const u = new URL(url, location.href);
+      if (u.origin !== location.origin) return url;
+      if (u.searchParams.has("token")) return url;
+      u.searchParams.set("token", PROXY_TOKEN!);
+      return u.toString();
+    } catch {
+      return url;
+    }
+  }
+
+  const origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    if (typeof input === "string") {
+      input = injectToken(input);
+    } else if (input instanceof Request) {
+      const patched = injectToken(input.url);
+      if (patched !== input.url) input = new Request(patched, input);
+    }
+    return origFetch.call(this, input, init);
+  };
+
+  const origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(
+    method: string, url: string | URL,
+    async = true, username?: string | null, password?: string | null,
+  ) {
+    const patched = injectToken(typeof url === "string" ? url : url.toString());
+    return origOpen.call(this, method, patched, async as boolean, username, password);
+  };
+}
 
 // boot
 post({ type: "ready", route: currentRoute() });

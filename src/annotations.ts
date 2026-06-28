@@ -17,8 +17,14 @@ export class AnnotationsPanel {
     window.addEventListener("message", (e) => this.onMessage(e));
   }
 
-  setProxyOrigin(origin: string) {
+  /** Retarget annotation messaging and disarm the previous frame. */
+  setTarget(iframe: HTMLIFrameElement, origin: string): void {
+    if (this.armed) this.postToAgent({ type: "disarm" });
+    this.iframe = iframe;
     this.proxyOrigin = origin;
+    this.armed = false;
+    this.toggleBtn.classList.toggle("active", false);
+    this.render();
   }
 
   currentRouteAnnotations(): Annotation[] {
