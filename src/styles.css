@@ -2960,3 +2960,9 @@ button:hover {
 }
 .tm-save:hover { opacity: 0.85; }
 .tm-save:disabled { opacity: 0.4; cursor: default; }
+
+/* ---- annotation side list ---- */
+.annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg, #1e1e1e); }
+.annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; }
+.annotation-row.stale { opacity: 0.5; }
+.ann-num { background: #e11; color: #fff; border-radius: 50%; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }

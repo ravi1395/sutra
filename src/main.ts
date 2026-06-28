@@ -18,6 +18,7 @@ import { TerminalManager } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
+import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
@@ -183,12 +184,18 @@ const browser = new BrowserPane(
   $<HTMLButtonElement>("btn-reload"),
   $<HTMLButtonElement>("btn-browser-maximize"),
 );
+const annotations = new AnnotationsPanel(
+  $<HTMLIFrameElement>("browser-frame"),
+  $("annotation-list"),
+  $<HTMLButtonElement>("btn-annotate"),
+);
+browser.onProxied = (o) => annotations.setProxyOrigin(o);
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
   setBrowser(true);
   browser.show();
-  browser.open(url);
+  void browser.open(url);
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
@@ -227,7 +234,7 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => [],
+    annotations: () => annotations.currentRouteAnnotations(),
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
