@@ -9,6 +9,7 @@ mod lang;
 mod mcp;
 mod mcp_config;
 mod preview_server;
+mod proxy;
 mod pty;
 mod search;
 mod watcher;
