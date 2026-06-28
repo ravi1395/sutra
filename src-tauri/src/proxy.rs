@@ -7,6 +7,12 @@ pub struct Target {
     pub port: u16,
 }
 
+impl Target {
+    fn origin(&self) -> String {
+        format!("{}://{}:{}", self.scheme, self.host, self.port)
+    }
+}
+
 /// Parse and validate a proxy target. Accepts only http(s), rejects userinfo,
 /// and requires the host to resolve entirely to loopback addresses.
 pub fn parse_target(t: &str) -> Result<Target, String> {
@@ -142,13 +148,22 @@ use std::time::Duration;
 
 use crate::mcp::{with_auth_token, LocalAuthToken};
 
-/// The built annotation-agent IIFE, inlined at compile time. Produced by the
-/// `build:agent` npm script (Task 10) into this path before `cargo build`.
-const AGENT_SCRIPT: &str = concat!(
-    "<script>",
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/agent/annotation-agent.js")),
-    "</script>"
-);
+// Parent (Tauri webview) origin differs by platform. Compile-time constant —
+// no runtime threading needed.
+#[cfg(target_os = "macos")]
+const PARENT_ORIGIN: &str = "tauri://localhost";
+#[cfg(not(target_os = "macos"))]
+const PARENT_ORIGIN: &str = "http://tauri.localhost";
+
+fn agent_script(parent_origin: &str, target_origin: &str) -> String {
+    const BUNDLE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/agent/annotation-agent.js"));
+    format!(
+        "<script>window.__SUTRA_PARENT_ORIGIN__={};window.__SUTRA_TARGET_ORIGIN__={};</script><script>{}</script>",
+        serde_json::to_string(parent_origin).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(target_origin).unwrap_or_else(|_| "\"\"".into()),
+        BUNDLE,
+    )
+}
 
 #[derive(Default)]
 pub struct ProxyServerState {
@@ -389,7 +404,8 @@ fn handle_conn(mut client: TcpStream, token: &str) -> io::Result<()> {
 
     if is_html {
         let body = read_full_body(&mut upstream, &resp)?;
-        let injected = inject_agent(&body, AGENT_SCRIPT);
+        let script = agent_script(PARENT_ORIGIN, &target.origin());
+        let injected = inject_agent(&body, &script);
         let out = rewrite_html_response_head(&resp, injected.len(), token, target_str.is_some());
         client.write_all(&out)?;
         client.write_all(&injected)?;
