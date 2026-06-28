@@ -318,6 +318,70 @@ root** and reject paths outside it. Live reads (`get_open_tabs`,
 `get_selection`) round-trip to the frontend with a 2s timeout; other reads are
 served directly from Rust.
 
+## Dev Browser Annotations
+
+Sutra's browser pane can annotate live HTML elements in a running dev app and
+expose those annotations to the in-app agent via the `get_annotations` MCP
+tool.
+
+### What it does
+
+Click **Annotate** in the browser pane toolbar to enter picker mode. Hover over
+any element in the page — it highlights with a red outline — then click to
+attach a numbered annotation. A small inline textarea appears over the element
+so you can type design feedback. Each annotation records:
+
+- a sequential number and your feedback text
+- the element's stable CSS selector
+- its tag name and truncated `outerHTML` (up to 2048 chars)
+- a subset of computed styles (`display`, `position`, `color`,
+  `backgroundColor`, `fontSize`, etc.)
+- locator hints — `data-testid`, `role`, `aria-label`, and visible text (up to
+  80 chars)
+
+Annotations appear in the side list beside the browser pane, scoped to the
+current SPA route. Ask the in-app agent `review my annotations` (or any prompt
+that calls the `get_annotations` MCP tool) to pull the current list into
+context.
+
+### How it works
+
+Dev URLs load through a loopback reverse proxy (`src-tauri/src/proxy.rs`).
+When the proxy serves an HTML response it strips any `Content-Security-Policy`
+headers and `<meta http-equiv="Content-Security-Policy">` tags, then injects
+the annotation agent script (`src-tauri/agent/annotation-agent.js`) immediately
+after the opening `<head>` tag. The script receives the Tauri parent origin and
+the dev target origin as injected globals so it can post messages only to the
+real parent window.
+
+The parent-side `AnnotationsPanel` (`src/annotations.ts`) validates every
+incoming `postMessage` against the known proxy origin and iframe `contentWindow`
+before acting on it. The agent notifies the parent on SPA route changes
+(history API patches + `popstate` + `hashchange`) so the side list stays scoped
+to the current route.
+
+### How to use
+
+1. Open a localhost dev URL in the browser pane (e.g. `http://localhost:5173`).
+2. Click **Annotate** in the browser toolbar — the button turns active.
+3. Hover over any element; it highlights with a red outline.
+4. Click the element — a pin number appears and an inline textarea opens.
+5. Type your feedback; it saves as you type and appears in the side list.
+6. To remove an annotation, click **✕** beside it in the side list.
+7. Ask the in-app agent: `review my annotations` — it reads the list via
+   `get_annotations`.
+
+### First-iteration boundaries
+
+| Implemented | Deferred |
+|---|---|
+| Loopback `http`/`https` dev origins only (e.g. `localhost`, `127.0.0.1`, `[::1]`) | Non-proxied or public origins |
+| CSP stripped on the proxied page so the agent script can run | Sites with strict CORS that block postMessage |
+| Stable CSS selector + computed styles + locator hints per element | Element screenshots / vision-based annotation |
+| SPA route awareness (hash routing + History API) | Disk persistence of annotations across sessions |
+| One dev origin per browser tab | Multiple simultaneous proxied origins |
+| Cross-origin third-party subresources load un-proxied and are not annotatable | Annotating cross-origin iframes or subresources |
+
 ## Architecture
 
 | Layer | Path | Responsibility |
