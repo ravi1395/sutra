@@ -63,6 +63,32 @@ pub fn host_is_loopback(host: &str, port: u16) -> bool {
     any
 }
 
+const AUTH_COOKIE: &str = "sutra_proxy";
+
+/// Accept a request if it carries the token in the query OR the auth cookie.
+pub fn request_is_authorized(query: Option<&str>, cookie_header: Option<&str>, token: &str) -> bool {
+    if crate::mcp::query_has_auth_token(query, token) {
+        return true;
+    }
+    if let Some(cookies) = cookie_header {
+        for part in cookies.split(';') {
+            if let Some((k, v)) = part.trim().split_once('=') {
+                if k == AUTH_COOKIE && v == token {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Loopback-scoped auth cookie set on the first authorized HTML response so that
+/// subresource/fetch/WS requests (same-origin to the proxy) authenticate
+/// automatically. `Secure` is intentionally omitted (plain-http loopback origin).
+pub fn auth_set_cookie_header(token: &str) -> String {
+    format!("Set-Cookie: {AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict")
+}
+
 pub fn is_html_content_type(ct: &str) -> bool {
     ct.to_ascii_lowercase().contains("text/html")
 }
@@ -222,5 +248,32 @@ mod tests {
         let out = strip_csp_meta(html);
         assert!(!out.to_ascii_lowercase().contains("content-security-policy"));
         assert!(out.contains("<title>t</title>"));
+    }
+
+    #[test]
+    fn authorized_by_query_token() {
+        assert!(request_is_authorized(Some("token=abc"), None, "abc"));
+        assert!(!request_is_authorized(Some("token=wrong"), None, "abc"));
+    }
+
+    #[test]
+    fn authorized_by_cookie() {
+        assert!(request_is_authorized(None, Some("sutra_proxy=abc"), "abc"));
+        assert!(request_is_authorized(None, Some("foo=1; sutra_proxy=abc; bar=2"), "abc"));
+        assert!(!request_is_authorized(None, Some("sutra_proxy=nope"), "abc"));
+    }
+
+    #[test]
+    fn unauthorized_when_neither() {
+        assert!(!request_is_authorized(None, None, "abc"));
+    }
+
+    #[test]
+    fn set_cookie_is_loopback_scoped() {
+        let h = auth_set_cookie_header("abc");
+        assert!(h.contains("sutra_proxy=abc"));
+        assert!(h.contains("HttpOnly"));
+        assert!(h.contains("SameSite=Strict"));
+        assert!(h.contains("Path=/"));
     }
 }
