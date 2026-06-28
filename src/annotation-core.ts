@@ -82,3 +82,25 @@ export function isTrustedMessage(
 ): boolean {
   return e.origin === expectedOrigin && e.source === expectedSource;
 }
+
+export type UiQuery = "openTabs" | "selection" | "annotations";
+export interface UiProviders {
+  openTabs: () => unknown;
+  selection: () => unknown;
+  annotations: () => unknown;
+}
+export function resolveUiQuery(
+  query: string,
+  p: UiProviders,
+): { ok: true; payload: unknown } | { ok: false } {
+  switch (query) {
+    case "openTabs":
+      return { ok: true, payload: { tabs: p.openTabs() } };
+    case "selection":
+      return { ok: true, payload: p.selection() };
+    case "annotations":
+      return { ok: true, payload: p.annotations() };
+    default:
+      return { ok: false };
+  }
+}

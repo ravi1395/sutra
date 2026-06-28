@@ -17,6 +17,7 @@ import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
+import { resolveUiQuery } from "./annotation-core";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
@@ -223,11 +224,12 @@ void onDrive((d) => {
 
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
 void onUiRequest((r) => {
-  const payload =
-    r.query === "openTabs"
-      ? { tabs: editor.getOpenTabs() }
-      : editor.getSelection();
-  void mcpUiReply(r.id, payload);
+  const result = resolveUiQuery(r.query, {
+    openTabs: () => editor.getOpenTabs(),
+    selection: () => editor.getSelection(),
+    annotations: () => [],
+  });
+  void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
 
 // Native workspace watcher refreshes the visible tree and git badges after

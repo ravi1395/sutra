@@ -137,7 +137,7 @@ export const onDrive = (cb: (p: DrivePayload) => void): Promise<UnlistenFn> =>
 
 export interface UiRequest {
   id: number;
-  query: "openTabs" | "selection";
+  query: "openTabs" | "selection" | "annotations";
 }
 /** Listen for MCP UI-state read requests from Rust. */
 export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>

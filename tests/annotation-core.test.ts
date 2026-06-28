@@ -88,3 +88,22 @@ test("isTrustedMessage requires both origin and source", () => {
   assert.equal(isTrustedMessage({ origin: "x", source: win }, "o", win), false);
   assert.equal(isTrustedMessage({ origin: "o", source: {} }, "o", win), false);
 });
+
+import { resolveUiQuery } from "../src/annotation-core";
+
+const providers = {
+  openTabs: () => ["tab"],
+  selection: () => ({ sel: true }),
+  annotations: () => [{ n: 1 }],
+};
+
+test("resolveUiQuery routes known queries", () => {
+  assert.deepEqual(resolveUiQuery("openTabs", providers), { ok: true, payload: { tabs: ["tab"] } });
+  assert.deepEqual(resolveUiQuery("selection", providers), { ok: true, payload: { sel: true } });
+  assert.deepEqual(resolveUiQuery("annotations", providers), { ok: true, payload: [{ n: 1 }] });
+});
+
+test("unknown query does NOT fall through to selection", () => {
+  const r = resolveUiQuery("bogus", providers);
+  assert.equal(r.ok, false);
+});
