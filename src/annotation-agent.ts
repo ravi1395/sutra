@@ -17,7 +17,7 @@ const TARGET_ORIGIN = window.__SUTRA_TARGET_ORIGIN__ as string;
 const PROXY_TOKEN = window.__SUTRA_PROXY_TOKEN__ as string | undefined;
 
 let armed = false;
-const pins = new Map<number, HTMLElement>();
+const pins = new Map<number, { pin: HTMLElement; el: Element }>();
 
 function post(msg: unknown) {
   window.parent.postMessage(msg, PARENT_ORIGIN);
@@ -80,21 +80,54 @@ function drawPin(n: number, el: Element) {
     position: "fixed", left: `${r.left}px`, top: `${r.top}px`, zIndex: "2147483647",
     background: "#e11", color: "#fff", borderRadius: "50%", width: "20px", height: "20px",
     display: "flex", alignItems: "center", justifyContent: "center", font: "12px sans-serif",
-    cursor: "pointer",
+    cursor: "pointer", transition: "transform 120ms ease", transformOrigin: "center",
   } as CSSStyleDeclaration);
   document.body.appendChild(pin);
-  pins.set(n, pin);
+  pins.set(n, { pin, el });
 }
+
+// Re-glue pins to their elements after scroll/layout shifts. `position:fixed`
+// is viewport-relative, so coords must be recomputed from the live rect.
+function repositionPins() {
+  for (const { pin, el } of pins.values()) {
+    if (!el.isConnected) { pin.style.display = "none"; continue; }
+    const r = el.getBoundingClientRect();
+    pin.style.display = "flex";
+    pin.style.left = `${r.left}px`;
+    pin.style.top = `${r.top}px`;
+  }
+}
+window.addEventListener("scroll", repositionPins, true);
+window.addEventListener("resize", repositionPins);
 
 function openEditor(n: number, el: Element | null) {
   const r = (el ?? document.body).getBoundingClientRect();
   const ta = document.createElement("textarea");
+  // Themed inline: the agent runs in the proxied iframe with no access to the
+  // host's CSS vars, so colors are literal copies of the app's dark palette.
   Object.assign(ta.style, {
-    position: "fixed", left: `${r.left}px`, top: `${r.top + 22}px`, zIndex: "2147483647",
-    width: "220px", height: "60px",
+    position: "fixed", left: `${r.left}px`, top: `${r.top + 24}px`, zIndex: "2147483647",
+    width: "240px", height: "64px", padding: "8px 10px", boxSizing: "border-box",
+    background: "#16181a", color: "#e8eae4", caretColor: "#4ade93",
+    border: "1px solid #1f8a63", borderRadius: "6px", outline: "none", resize: "none",
+    font: "12px/1.4 ui-sans-serif, system-ui, sans-serif",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
   } as CSSStyleDeclaration);
-  ta.placeholder = "design feedback…";
+  ta.placeholder = "design feedback… (Enter to save · Esc to cancel)";
+  ta.addEventListener("focus", () => { ta.style.borderColor = "#4ade93"; ta.style.boxShadow = "0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(74,222,147,0.25)"; });
   ta.addEventListener("input", () => post({ type: "feedbackChanged", n, text: ta.value }));
+  // Enter concludes annotation #n in place; Shift+Enter inserts a newline; Esc cancels.
+  ta.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      post({ type: "feedbackChanged", n, text: ta.value });
+      ta.blur();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation(); // don't also disarm picking
+      ta.blur();
+    }
+  });
   ta.addEventListener("blur", () => ta.remove());
   document.body.appendChild(ta);
   ta.focus();
@@ -119,6 +152,10 @@ function onClick(e: MouseEvent) {
 
 window.addEventListener("mousemove", onMove, true);
 window.addEventListener("click", onClick, true);
+// Esc while picking asks the host to disarm (host owns armed state).
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && armed) { e.preventDefault(); post({ type: "disarmRequest" }); }
+}, true);
 
 // --- SPA route instrumentation ---
 function emitRoute() { post({ type: "routeChanged", route: currentRoute() }); }
@@ -150,8 +187,20 @@ window.addEventListener("message", (e) => {
       break;
     }
     case "removePin": {
-      pins.get(m.n)?.remove();
+      pins.get(m.n)?.pin.remove();
       pins.delete(m.n);
+      break;
+    }
+    case "flashPin": {
+      const entry = pins.get(m.n);
+      if (entry) {
+        entry.pin.style.transform = m.on ? "scale(1.4)" : "";
+        (entry.el as HTMLElement).style.outline = m.on ? "2px solid #4ade93" : "";
+      }
+      break;
+    }
+    case "scrollToPin": {
+      pins.get(m.n)?.el.scrollIntoView({ behavior: "smooth", block: "center" });
       break;
     }
     case "reanchor": {

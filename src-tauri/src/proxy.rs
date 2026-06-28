@@ -150,9 +150,15 @@ use crate::mcp::{with_auth_token, LocalAuthToken};
 
 // Parent (Tauri webview) origin differs by platform. Compile-time constant —
 // no runtime threading needed.
-#[cfg(target_os = "macos")]
+// Origin of the Sutra app window, used as the postMessage targetOrigin for the
+// in-iframe agent handshake. `tauri dev` serves the window from Vite (devUrl in
+// tauri.conf.json), so debug builds must target that origin or arm/ready/picked
+// messages are dropped on origin mismatch; release builds use the tauri scheme.
+#[cfg(debug_assertions)]
+const PARENT_ORIGIN: &str = "http://localhost:1420";
+#[cfg(all(not(debug_assertions), target_os = "macos"))]
 const PARENT_ORIGIN: &str = "tauri://localhost";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
 const PARENT_ORIGIN: &str = "http://tauri.localhost";
 
 fn agent_script(parent_origin: &str, target_origin: &str, token: &str) -> String {
@@ -738,6 +744,18 @@ mod tests {
         // Globals prelude injected exactly once, after <head>.
         assert_eq!(out.matches("__SUTRA_TARGET_ORIGIN__=").count(), 1);
         assert!(out.find("__SUTRA_TARGET_ORIGIN__=").unwrap() < out.find("</body>").unwrap());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn agent_parent_origin_matches_dev_webview_origin() {
+        // In `tauri dev` the app window is served from Vite (devUrl), so the
+        // injected parent origin must be the dev origin or the postMessage
+        // handshake (arm/ready/picked) is silently dropped on origin mismatch.
+        let out =
+            String::from_utf8(inject_annotation_agent(b"<html></html>", "http://127.0.0.1:5000", "t"))
+                .unwrap();
+        assert!(out.contains("__SUTRA_PARENT_ORIGIN__=\"http://localhost:1420\""));
     }
 
     #[test]

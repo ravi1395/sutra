@@ -15,6 +15,9 @@ export class AnnotationsPanel {
   ) {
     this.toggleBtn.addEventListener("click", () => this.toggle());
     window.addEventListener("message", (e) => this.onMessage(e));
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && this.armed) { e.preventDefault(); this.toggle(); }
+    }, true);
   }
 
   /** Retarget annotation messaging and disarm the previous frame. */
@@ -71,6 +74,9 @@ export class AnnotationsPanel {
       case "feedbackChanged":
         this.dispatch({ type: "setFeedback", n: m.n, text: m.text });
         break;
+      case "disarmRequest":
+        if (this.armed) this.toggle(); // Esc inside the frame exits picking
+        break;
       case "reanchorResult":
         this.dispatch({ type: "reanchorResult", route: m.route, resolved: m.resolved });
         break;
@@ -81,7 +87,26 @@ export class AnnotationsPanel {
     this.listEl.innerHTML = "";
     const anns = this.currentRouteAnnotations();
     // Show the list while armed or whenever there are annotations on this route.
-    this.listEl.classList.toggle("hidden", !(this.armed || anns.length > 0));
+    const visible = this.armed || anns.length > 0;
+    this.listEl.classList.toggle("hidden", !visible);
+    // Count badge on the toggle: shows pending annotations at a glance.
+    this.toggleBtn.textContent = anns.length > 0 ? `⊕ ${anns.length}` : "⊕";
+    if (!visible) return;
+
+    // Trust banner: tells the user where their feedback goes.
+    const hint = document.createElement("div");
+    hint.className = "ann-hint";
+    hint.textContent = "Annotations are sent directly to the MCP agent.";
+    this.listEl.appendChild(hint);
+
+    // Armed-state instruction so the picking mode is obvious.
+    if (this.armed) {
+      const armedHint = document.createElement("div");
+      armedHint.className = "ann-armed";
+      armedHint.textContent = "Click any element · Esc to stop";
+      this.listEl.appendChild(armedHint);
+    }
+
     for (const a of anns) {
       const row = document.createElement("div");
       row.className = "annotation-row" + (a.stale ? " stale" : "");
@@ -102,10 +127,16 @@ export class AnnotationsPanel {
       del.className = "ann-del";
       del.textContent = "✕";
       del.dataset.n = String(a.n);
-      del.addEventListener("click", () => {
+      del.addEventListener("click", (e) => {
+        e.stopPropagation(); // don't trigger the row's scroll-to-pin
         this.dispatch({ type: "remove", n: a.n });
         this.postToAgent({ type: "removePin", n: a.n });
       });
+
+      // Row ↔ pin linking: hover flashes the in-frame pin, click scrolls to it.
+      row.addEventListener("mouseenter", () => this.postToAgent({ type: "flashPin", n: a.n, on: true }));
+      row.addEventListener("mouseleave", () => this.postToAgent({ type: "flashPin", n: a.n, on: false }));
+      row.addEventListener("click", () => this.postToAgent({ type: "scrollToPin", n: a.n }));
 
       row.append(num, sel, fb, del);
       this.listEl.appendChild(row);

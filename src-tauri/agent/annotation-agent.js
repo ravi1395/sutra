@@ -105,24 +105,66 @@
       alignItems: "center",
       justifyContent: "center",
       font: "12px sans-serif",
-      cursor: "pointer"
+      cursor: "pointer",
+      transition: "transform 120ms ease",
+      transformOrigin: "center"
     });
     document.body.appendChild(pin);
-    pins.set(n, pin);
+    pins.set(n, { pin, el });
   }
+  function repositionPins() {
+    for (const { pin, el } of pins.values()) {
+      if (!el.isConnected) {
+        pin.style.display = "none";
+        continue;
+      }
+      const r = el.getBoundingClientRect();
+      pin.style.display = "flex";
+      pin.style.left = `${r.left}px`;
+      pin.style.top = `${r.top}px`;
+    }
+  }
+  window.addEventListener("scroll", repositionPins, true);
+  window.addEventListener("resize", repositionPins);
   function openEditor(n, el) {
     const r = (el ?? document.body).getBoundingClientRect();
     const ta = document.createElement("textarea");
     Object.assign(ta.style, {
       position: "fixed",
       left: `${r.left}px`,
-      top: `${r.top + 22}px`,
+      top: `${r.top + 24}px`,
       zIndex: "2147483647",
-      width: "220px",
-      height: "60px"
+      width: "240px",
+      height: "64px",
+      padding: "8px 10px",
+      boxSizing: "border-box",
+      background: "#16181a",
+      color: "#e8eae4",
+      caretColor: "#4ade93",
+      border: "1px solid #1f8a63",
+      borderRadius: "6px",
+      outline: "none",
+      resize: "none",
+      font: "12px/1.4 ui-sans-serif, system-ui, sans-serif",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.4)"
     });
-    ta.placeholder = "design feedback\u2026";
+    ta.placeholder = "design feedback\u2026 (Enter to save \xB7 Esc to cancel)";
+    ta.addEventListener("focus", () => {
+      ta.style.borderColor = "#4ade93";
+      ta.style.boxShadow = "0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(74,222,147,0.25)";
+    });
     ta.addEventListener("input", () => post({ type: "feedbackChanged", n, text: ta.value }));
+    ta.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        post({ type: "feedbackChanged", n, text: ta.value });
+        ta.blur();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        ta.blur();
+      }
+    });
     ta.addEventListener("blur", () => ta.remove());
     document.body.appendChild(ta);
     ta.focus();
@@ -144,6 +186,12 @@
   }
   window.addEventListener("mousemove", onMove, true);
   window.addEventListener("click", onClick, true);
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && armed) {
+      e.preventDefault();
+      post({ type: "disarmRequest" });
+    }
+  }, true);
   function emitRoute() {
     post({ type: "routeChanged", route: currentRoute() });
   }
@@ -181,8 +229,20 @@
         break;
       }
       case "removePin": {
-        pins.get(m.n)?.remove();
+        pins.get(m.n)?.pin.remove();
         pins.delete(m.n);
+        break;
+      }
+      case "flashPin": {
+        const entry = pins.get(m.n);
+        if (entry) {
+          entry.pin.style.transform = m.on ? "scale(1.4)" : "";
+          entry.el.style.outline = m.on ? "2px solid #4ade93" : "";
+        }
+        break;
+      }
+      case "scrollToPin": {
+        pins.get(m.n)?.el.scrollIntoView({ behavior: "smooth", block: "center" });
         break;
       }
       case "reanchor": {

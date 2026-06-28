@@ -135,8 +135,9 @@ test("setTarget rejects stale messages and renders picked messages from current 
     assert.equal(ctx.list.children.length, 0);
 
     ctx.message({ origin: "http://new.test", source: second.contentWindow as unknown as Window, data: picked });
-    assert.equal(ctx.list.children.length, 1);
-    assert.equal(ctx.list.children[0].children[1].textContent, "#hero");
+    // children[0] is the MCP trust banner; the annotation row follows.
+    assert.equal(ctx.list.children.length, 2);
+    assert.equal(ctx.list.children[1].children[1].textContent, "#hero");
   } finally {
     ctx.restore();
   }

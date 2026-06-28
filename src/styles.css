@@ -2968,6 +2968,14 @@ button:hover {
 
 /* ---- annotation side list ---- */
 .annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg, #1e1e1e); }
-.annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; }
+.annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; cursor: pointer; }
+.annotation-row:hover { background: var(--em-wash-row); }
 .annotation-row.stale { opacity: 0.5; }
-.ann-num { background: #e11; color: #fff; border-radius: 50%; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+.ann-armed { padding: 5px 8px; font-size: 11px; color: var(--em); background: var(--em-wash); }
+.ann-num { background: #e11; color: #fff; border-radius: 50%; width: 18px; height: 18px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+.ann-hint { padding: 6px 8px; font-size: 11px; color: var(--em); border-bottom: 1px solid var(--em-dim); display: flex; align-items: center; gap: 5px; }
+.ann-hint::before { content: "→"; opacity: 0.7; }
+.ann-sel { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--fg-dim); }
+.ann-fb { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg); }
+.ann-del { flex: 0 0 auto; background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 12px; padding: 0 2px; }
+.ann-del:hover { color: var(--fg); }
