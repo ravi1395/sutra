@@ -899,11 +899,7 @@ export class Pane {
     const { PreviewController } = await import("./preview");
     // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
     this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
-    this.previewCtl = new PreviewController(
-      this.previewEl,
-      kind,
-      kind === "html" ? (frame, origin) => this.mgr.onAnnotatableFrame?.(frame, origin) : undefined,
-    );
+    this.previewCtl = new PreviewController(this.previewEl, kind);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
@@ -1025,8 +1021,6 @@ export class EditorManager {
   onDocChanged?: () => void;
   /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
   onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
-  /** Fires when an agent HTML preview exposes its live annotation target. */
-  onAnnotatableFrame?: (frame: HTMLIFrameElement, origin: string) => void;
   /** Fires when an HTML preview should open in the browser pane (main.ts wires it). */
   onHtmlPreview?: (url: string) => void;
 

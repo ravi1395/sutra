@@ -192,7 +192,6 @@ const annotations = new AnnotationsPanel(
   $<HTMLButtonElement>("btn-annotate"),
 );
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
-editor.onAnnotatableFrame = (frame, origin) => annotations.setTarget(frame, origin);
 editor.onHtmlPreview = (url) => {
   setBrowser(true);
   browser.show();

@@ -49,8 +49,6 @@ const MD_STYLE = `
 `;
 
 export class PreviewController {
-  private frame: HTMLIFrameElement | null = null;
-
   constructor(
     private el: HTMLElement,
     private kind: PreviewKind,
@@ -71,14 +69,7 @@ export class PreviewController {
       this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
       return;
     }
-    // html: text is a preview-server URL
-    if (!this.frame) {
-      this.el.innerHTML = "";
-      this.frame = document.createElement("iframe");
-      this.frame.style.cssText = "width:100%;height:100%;border:none;";
-      this.el.appendChild(this.frame);
-    }
-    this.frame.src = text;
+    // html renders now open in the browser pane, not here (see main.ts onPreviewOpen).
   }
 
   /** Route external Markdown links through the system opener. */
