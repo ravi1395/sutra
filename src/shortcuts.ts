@@ -1,6 +1,6 @@
 export const GLOBAL_SHORTCUT_OPTIONS: AddEventListenerOptions = { capture: true };
 
-export const IS_MAC = /Mac|iPhone|iPad/.test(navigator.userAgent);
+export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 type ShortcutKey = Pick<KeyboardEvent, "code" | "ctrlKey" | "metaKey" | "shiftKey">;
 
