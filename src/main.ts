@@ -177,20 +177,22 @@ const search = new SearchPanel(
   $("search-results"),
 );
 search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+const browserFrame = $<HTMLIFrameElement>("browser-frame");
 const browser = new BrowserPane(
   $("browser-area"),
-  $<HTMLIFrameElement>("browser-frame"),
+  browserFrame,
   $<HTMLInputElement>("browser-url"),
   $<HTMLButtonElement>("btn-back"),
   $<HTMLButtonElement>("btn-reload"),
   $<HTMLButtonElement>("btn-browser-maximize"),
 );
 const annotations = new AnnotationsPanel(
-  $<HTMLIFrameElement>("browser-frame"),
+  browserFrame,
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
 );
-browser.onProxied = (o) => annotations.setProxyOrigin(o);
+browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
+editor.onAnnotatableFrame = (frame, origin) => annotations.setTarget(frame, origin);
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
@@ -200,7 +202,14 @@ terminals.onLinkActivate = (url: string) => {
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
+// HTML → browser pane (focused); md/diagram → editor preview split.
 void onPreviewOpen((p) => {
+  if (p.kind === "html" && p.url) {
+    setBrowser(true);
+    browser.show();
+    browser.loadDirect(p.url);
+    return;
+  }
   void editor.showAgentPreview(p).catch((e) =>
     console.error("agent preview failed", e),
   );
@@ -795,7 +804,7 @@ const btnBrowser = $("btn-browser");
 const btnPalette = $("btn-palette");
 const btnMenu = $("btn-menu");
 function setBrowser(on: boolean): void {
-  browserArea.classList.toggle("hidden", !on);
+  if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
 }
