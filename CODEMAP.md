@@ -26,13 +26,20 @@ Main boot flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App bootstrap, workspace open/session restore, loom/titlebar chrome, breadcrumb + whisper bar render, terminal drawer state, settings/theme apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/review flow | `$`, `saveTab`, `openWorkspace`, `renderBreadcrumb`, `renderWhisperBar`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `openSettings` |
+| `src/main.ts` | App bootstrap, workspace open/session restore, loom/titlebar chrome, open-editors switcher, breadcrumb + whisper bar render, terminal drawer state, settings/theme apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/review flow | `$`, `saveTab`, `openWorkspace`, `openOpenEditorsMenu`, `renderBreadcrumb`, `renderWhisperBar`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `openSettings` |
 | `src/agent-tracking.ts` | Pure integrated-agent presentation helpers, whisper-bar copy, and direct terminal command hint | `mergeChangedFiles`, `aiChanges`, `whisperText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
-| `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
+| `src/shortcuts.ts` | Shared global shortcut predicates, platform-modifier detection, and display formatting for shortcut labels | `GLOBAL_SHORTCUT_OPTIONS`, `IS_MAC`, `isPreviewShortcut`, `isMod`, `fmtShortcut` |
 | `src/menubar.ts` | Workspace wordmark menu and shared popover primitive reused by the app menu | `mountWorkspaceBar`, `WorkspaceBarHandle`, `openPopover`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
 | `src/palette.ts` | Command palette UI — fuzzy search over recent/workspace verbs, sectioned list, keyboard navigation | `mountPalette`, `groupCommands` |
 | `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, manual "check for updates" feedback path, download+install+relaunch | `mountUpdater`, `progressPercent` |
+| `src/composer.ts` | Docked prompt-composer panel — template/tag sections, trust gate, `@file` + `/asset` completion, chip rail, agent-target picker, draft/history restore, staged/submitted send flow | `mountComposer` |
+| `src/prompt-builder.ts` | Pure prompt assembly for tagged sections, routed chips, fenced selections, and optional thinking prelude | `buildPrompt`, `renderChip`, `defaultSection`, `fenceFor` |
+| `src/prompt-tags.ts` | Composer tag/template schema plus trust-gated config normalization from `.sutra/prompt-tags.json` | `DEFAULT_CONFIG`, `normalizeConfig`, `resolveConfig`, `templateTags` |
+| `src/composer-store.ts` | Local draft/history persistence for the composer, scoped per workspace | `saveDraft`, `loadDraft`, `clearDraft`, `loadHistory`, `saveHistory`, `pushHistory` |
+| `src/composer-complete.ts` | Pure `@file` and `/asset` completion matching plus asset-token formatting | `matchFiles`, `matchAssets`, `assetToken` |
+| `src/tag-manager.ts` | Composer tag/template editor modal for trusted workspace config | `mountTagManager` |
+| `src/delivery.ts` | PTY-delivery wrapper that stages vs submits prompts for agent terminals | `wrapForDelivery` |
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, theme-aware syntax styling, diff gutter, inline hunk lens, marginalia, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk`, `openLens` |
 | `src/debug.ts` | DAP client, adapter detection, and per-adapter launch config shaping for Rust/Go/Python | `DapClient`, `detectAdapter`, `resolveLaunchConfig`, `cargoPackageName` |
 | `src/debug-session.ts` | Debug session controller that starts/stops resolved adapters, wires breakpoints, and renders paused state | `DebugSession`, `start`, `stop`, `toggleBreakpoint` |
@@ -70,10 +77,11 @@ Main boot flow:
 | `src-tauri/src/fs_cmds.rs` | Directory listing, symlink/depth-safe compact folders, capped text file read/write, Trash-backed delete, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
 | `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
 | `src-tauri/src/debug.rs` | DAP proxy, codelldb binary resolution, stdio adapter spawning, and socket adapter spawning/connection | `resolve_debug_adapter`, `debug_start`, `debug_send`, `debug_stop`, `drain_frames` |
+| `src-tauri/src/assets.rs` | Scan user/project `.claude` commands, skills, and subagents into composer asset suggestions | `scan_agent_assets`, `scan_dir`, `invocation_for` |
 | `src-tauri/src/mcp.rs` | Token-gated in-process MCP server exposing display, drive, read tools, loopback edit ingest, agent config writers, and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `ingest_edit`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
 | `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON/TOML/Claude settings patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `merge_claude_settings`, `ensure_gitignore` |
 | `src-tauri/src/preview_server.rs` | Session-local token-gated static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
-| `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
+| `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, integrated shell PID registration, and agent-terminal discovery/write gating for prompt delivery | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`, `pty_list_agents`, `classify_state`; structs: `PtyState`, `Session`, `AgentTerminal` |
 | `src-tauri/src/search.rs` | Project-wide file search, literal by default with explicit regex opt-in | `search_dir`; structs: `SearchMatch`, `SearchResult` |
 | `src-tauri/src/watcher.rs` | Recursive native filesystem watching for the active workspace; debounces changed paths into `fs-changed` events | `WatcherState`, `watch_start`, `watch_stop` |
 | `src-tauri/src/lang/` | In-process Tree-sitter language engine for open-document parsing, query-backed symbols/outline, hover, completion, goto-definition, and workspace symbol indexing | `LangEngine`, `lang_did_open`, `lang_document_symbols`, `lang_hover`, `symbols_for_source`, `collect_query_symbols` |
@@ -103,6 +111,12 @@ Boot schedules `mountUpdater` → silent `checkForUpdate` after 12s and every 6h
 
 **Settings:**
 App menu / workspace wordmark menu / `Cmd+,` / Command Palette Settings → `main.openSettings` → `openSettingsModal`, which reuses live `settings`, persists via `saveSettings`, and applies changes through `applySettings`.
+
+**Open editors switcher:**
+Titlebar `btn-open-editors` → `main.openOpenEditorsMenu` → reads `editor.tabs` across panes → renders `.menu-card` rows with active/dirty/path state → row click calls `editor.activate(tab)` in the owning pane.
+
+**Prompt composer:**
+Titlebar `btn-composer` → `main.setComposer` / `ensureComposer` → `mountComposer({ root, getFiles, getSelection })`. The composer loads trusted tag config from `.sutra/prompt-tags.json`, scans user/project `.claude` assets through `scan_agent_assets`, polls `pty_list_agents` for live Claude/Codex terminals + idle/busy gating, builds XML-tagged prompt text via `buildPrompt`, then stages or submits through `deliverToPty` → `wrapForDelivery` → `pty_write`.
 
 **Git bar:**
 `createGitBar(#branch-whisper)` refreshes from native `fs-changed` events plus a 10s fallback poll → `ipc.gitBranch` + `ipc.gitAheadBehind` + `ipc.gitWorktrees` + `ipc.gitBranches` → Rust `git_branch`, `git_ahead_behind`, `git_worktrees`, `git_branches` → renders branch whisper button + branch/worktree dropdown. `main.pollGitIndex` resolves `.git/index` once per workspace, including linked worktree `.git` pointer files.
@@ -148,11 +162,12 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |
-| Release CI | `.github/workflows/release.yml` creates one draft release, serializes macOS universal + Windows uploads so updater `latest.json` merges cleanly, then publishes the release as latest |
+| Release CI | `.github/workflows/release.yml` creates one draft release, serializes macOS universal + Windows + Linux uploads so updater `latest.json` merges cleanly, then publishes the release as latest |
 
 ## Test Strategy
 
 - Workspace tab filtering/session restore, breadcrumb/menu models, settings, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups/drawer state, native Edit menu structure: `npm test`
+- Composer prompt assembly, tag-config normalization, asset/file completion, draft/history persistence, shortcut helpers, and tag-manager pure helpers: `npm test`
 - Rust language engine outline/hover/completion/goto-definition behavior: `cargo test --manifest-path src-tauri/Cargo.toml lang::tests -- --nocapture`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
 - MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
@@ -177,6 +192,8 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 - Safe revert compares current bytes with the last observed candidate state; later external edits become manual-review-only.
 - MCP UI-only reads depend on the frontend event loop replying within 2s; blocked UI returns a timeout instead of hanging, and stale pending entries must be removed.
 - Direct command hint closes the first-poll race for plain `claude`/`codex`; aliases/wrappers rely on process command-line ancestry detection.
+- Composer terminal targeting relies on Unix `ps`/`lsof` or Linux `/proc` cwd inspection plus PTY output quiesce timing; unsupported platforms or prompt-text drift can hide valid agent terminals or misclassify busy vs awaiting-input state.
+- Composer custom tags are trust-gated, but trusted `.sutra/prompt-tags.json` still shapes prompt structure/defaults; malformed trusted config falls back to defaults rather than partially applying.
 - Terminal paste should stay on xterm/native Edit responders; adding a parallel `Mod+V` writer path duplicates input.
 - Terminal split moves existing `Term` + xterm DOM between group hosts; no PTY re-spawn on group move.
 - Folder switch kills all PTYs; next visible terminal starts in opened cwd.

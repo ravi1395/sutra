@@ -19,15 +19,18 @@ pub fn parse_target(t: &str) -> Result<Target, String> {
     if authority.contains('@') {
         return Err("credentials not allowed in target".into());
     }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>().map_err(|_| "invalid port".to_string())?,
-        ),
-        None => (
-            authority.to_string(),
-            if scheme == "https" { 443 } else { 80 },
-        ),
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']').ok_or("invalid IPv6 address")?;
+        let host = authority[1..close].to_string();
+        let port = if authority.len() > close + 1 && authority.as_bytes()[close + 1] == b':' {
+            authority[close + 2..].parse::<u16>().map_err(|_| "invalid port".to_string())?
+        } else if scheme == "https" { 443 } else { 80 };
+        (host, port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| "invalid port".to_string())?),
+            None => (authority.to_string(), if scheme == "https" { 443 } else { 80 }),
+        }
     };
     if host.is_empty() {
         return Err("missing host".into());
@@ -97,5 +100,17 @@ mod tests {
     #[test]
     fn parse_rejects_missing_host() {
         assert!(parse_target("http://").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_ipv6_loopback_with_port() {
+        let t = parse_target("http://[::1]:5173").unwrap();
+        assert_eq!(t.host, "::1");
+        assert_eq!(t.port, 5173);
+    }
+
+    #[test]
+    fn parse_ipv6_loopback_defaults_port_80() {
+        assert_eq!(parse_target("http://[::1]").unwrap().port, 80);
     }
 }

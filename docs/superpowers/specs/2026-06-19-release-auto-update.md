@@ -42,9 +42,16 @@ https://github.com/ravi1395/sutra/releases/latest/download/latest.json
 A signing keypair was generated for this feature. The **public** half is committed in
 `tauri.conf.json`. The **private** half must be stored as repo secrets so CI can sign:
 
-1. `Settings → Secrets and variables → Actions → New repository secret`
-2. Add `TAURI_SIGNING_PRIVATE_KEY` = the base64 private key (kept out of git).
-3. Add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = empty (the key was generated with no password).
+1. Add `TAURI_SIGNING_PRIVATE_KEY` = the **entire contents** of the generated
+   `.key` file — the `untrusted comment:` header line AND the base64 body, with
+   the newline preserved. Easiest:
+   ```bash
+   gh secret set TAURI_SIGNING_PRIVATE_KEY < sutra.key
+   ```
+   ⚠️ Storing only the base64 body (no comment line) fails CI with
+   `failed to decode secret key: ... Missing comment in secret key`. This is
+   exactly what broke the `v1.1.0` release run.
+2. Add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = empty (the key was generated with no password).
 
 > The private key is **not** in the repo. If it is lost, regenerate with
 > `npx tauri signer generate -w sutra.key`, replace `plugins.updater.pubkey`
@@ -55,8 +62,17 @@ A signing keypair was generated for this feature. The **public** half is committ
 
 1. Bump `version` in both `package.json` and `src-tauri/tauri.conf.json`.
 2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. CI builds, signs, and attaches bundles + `latest.json` to a **draft** release.
-4. Publish the draft release → installed clients pick it up within 6h (or on next launch).
+3. `release.yml` runs three jobs: **create-release** (one draft) → **build**
+   (macOS + Windows, `max-parallel: 1` so both platforms merge into a single
+   `latest.json`) → **publish-release** (flips the draft to published + marks it
+   "latest"). No manual publish step.
+4. Installed clients pick it up within 6h, on next launch, or immediately via
+   the **menu → check for updates…** item.
+
+> The build is serialized on purpose: parallel matrix jobs each rewrite the
+> release's `latest.json`, racing to clobber the other platform's entry. With
+> `max-parallel: 1`, macOS uploads `latest.json` first and Windows merges its
+> entry into the existing asset.
 
 ## Notes / follow-ups
 
