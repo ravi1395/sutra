@@ -126,14 +126,23 @@ export const onPreviewOpen = (
   listen<PreviewOpenPayload>("sutra://preview/open", (e) => cb(e.payload));
 
 export interface DrivePayload {
-  action: "openFile" | "revealTree" | "showDiff" | "openTerminal";
+  action: "openFile" | "revealTree" | "showDiff" | "openTerminal" | "navigateBrowser";
   path?: string;
   line?: number;
   cwd?: string;
+  url?: string;
 }
 /** Listen for MCP drive commands emitted by the Rust server. */
 export const onDrive = (cb: (p: DrivePayload) => void): Promise<UnlistenFn> =>
   listen<DrivePayload>("sutra://drive", (e) => cb(e.payload));
+
+export interface PromptRequest {
+  id: number;
+  url: string; // preview-server URL of the injected interactive HTML
+}
+/** Listen for MCP interactive-prompt requests (prompt_user tool). */
+export const onPromptRequest = (cb: (r: PromptRequest) => void): Promise<UnlistenFn> =>
+  listen<PromptRequest>("sutra://preview/prompt", (e) => cb(e.payload));
 
 export interface UiRequest {
   id: number;

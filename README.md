@@ -293,6 +293,27 @@ preview loopback servers.
 | `render_diagram` | `mermaid` | Renders a Mermaid diagram (`securityLevel: strict`). |
 | `open_preview` | `path` | Opens an existing workspace `.html`/`.md` file in the preview pane. |
 
+### Interactive tools
+
+| Tool | Argument | Effect |
+|---|---|---|
+| `prompt_user` | `html` | Renders an interactive HTML form/UI in the preview pane and **blocks until the user submits** (up to 300s), returning the submitted JSON. |
+
+The supplied HTML runs in an isolated localhost iframe. A submit bridge is
+injected automatically: any `<form>` submit is captured as a `field→value`
+object, or call `window.sutraSubmit(obj)` with any JSON-serializable value. The
+result is delivered back to the model via the same UI round-trip channel as the
+read tools (keyed by request id), so concurrent prompts resolve independently.
+
+```html
+<!-- example prompt_user html -->
+<form>
+  <label>Pick env: <select name="env"><option>dev<option>prod</select></label>
+  <button>Submit</button>
+</form>
+<!-- returns: {"env":"prod"} -->
+```
+
 ### Drive tools (P2)
 
 | Tool | Argument | Effect |
@@ -301,6 +322,7 @@ preview loopback servers.
 | `reveal_in_tree` | `path` | Expands the file tree to the path and highlights it. |
 | `show_diff` | `path` | Opens the file and jumps to its first changed git hunk. |
 | `open_terminal` | `cwd?` | Opens a new integrated terminal, optionally at a directory. |
+| `navigate_browser` | `url` | Opens a URL in the browser pane (routed through the dev proxy for localhost apps). Scheme optional, defaults to `http://`. |
 
 ### Read tools (P3)
 
@@ -388,7 +410,7 @@ to the current route.
 |---|---|---|
 | Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
 | Rust: watcher | `src-tauri/src/watcher.rs` | recursive native workspace watcher, debounced `fs-changed` event |
-| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 13 MCP tools, agent-config commands, UI-read reply registry |
+| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 15 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |

@@ -39,6 +39,7 @@ import {
   onPreviewOpen,
   onDrive,
   onUiRequest,
+  onPromptRequest,
   mcpUiReply,
   mcpSetRoot,
   mcpWriteAgentConfig,
@@ -226,6 +227,30 @@ void onDrive((d) => {
     case "openTerminal":
       void terminals.create(undefined, d.cwd);
       break;
+    case "navigateBrowser":
+      if (d.url) {
+        setBrowser(true);
+        browser.show();
+        void browser.open(d.url).catch((e) => console.error("agent navigate failed", e));
+      }
+      break;
+  }
+});
+
+// Show an MCP interactive prompt in the preview pane; the iframe posts the
+// user's submission back via window.postMessage (see the bridge listener below).
+void onPromptRequest((r) => {
+  void editor
+    .showAgentPreview({ kind: "html", url: r.url })
+    .catch((e) => console.error("agent prompt failed", e));
+});
+
+// Bridge: rendered prompt iframes postMessage their result tagged with the
+// pending request id; forward to the MCP reply command to resolve prompt_user.
+window.addEventListener("message", (e) => {
+  const d = e.data as { __sutraPrompt?: boolean; id?: number; data?: unknown };
+  if (d && d.__sutraPrompt === true && typeof d.id === "number") {
+    void mcpUiReply(d.id, d.data ?? {});
   }
 });
 

@@ -244,6 +244,20 @@ fn write_hook_script(root: &Path) -> Result<PathBuf, String> {
     Ok(script)
 }
 
+/// Append a submit bridge to model-authored HTML so the rendered iframe can
+/// post its result back to the Tauri parent, tagged with the pending request id.
+/// Captures `<form>` submits (field→value) and exposes `window.sutraSubmit(obj)`.
+fn inject_prompt_bridge(html: &str, id: u64) -> String {
+    format!(
+        "{html}\n<script>(function(){{var ID={id};\
+function send(d){{try{{parent.postMessage({{__sutraPrompt:true,id:ID,data:d}},'*');}}catch(e){{}}}}\
+window.sutraSubmit=send;\
+document.addEventListener('submit',function(e){{e.preventDefault();var o={{}};\
+try{{new FormData(e.target).forEach(function(v,k){{o[k]=v;}});}}catch(_){{}}\
+send(o);}},true);}})();</script>"
+    )
+}
+
 /// Discriminated payload emitted to the frontend preview listener.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,13 +268,14 @@ struct PreviewOpen {
 }
 
 /// Discriminated drive command emitted to the frontend.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct DriveCmd {
-    action: &'static str, // "openFile" | "revealTree" | "showDiff" | "openTerminal"
+    action: &'static str, // "openFile" | "revealTree" | "showDiff" | "openTerminal" | "navigateBrowser"
     path: Option<String>,
     line: Option<u32>,
     cwd: Option<String>,
+    url: Option<String>, // navigateBrowser target
 }
 
 // ---- tool argument structs ----
@@ -293,6 +308,15 @@ struct OpenPreviewArgs {
     path: String,
 }
 
+/// Args for prompt_user tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PromptUserArgs {
+    /// Self-contained HTML form/UI rendered in an isolated localhost iframe.
+    /// Submit via a `<form>` (auto-captured as field→value), or call
+    /// `window.sutraSubmit(obj)` with any JSON-serializable object.
+    html: String,
+}
+
 /// Args for open_file tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct OpenFileArgs {
@@ -307,6 +331,13 @@ struct OpenFileArgs {
 struct PathArg {
     /// Workspace file path (absolute or relative to root).
     path: String,
+}
+
+/// Args for navigate_browser tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NavigateBrowserArgs {
+    /// URL to open in the browser pane. Scheme optional (defaults to http://).
+    url: String,
 }
 
 /// Args for open_terminal tool.
@@ -416,6 +447,52 @@ impl SutraMcp {
                 Err(McpError::internal_error("ui state request timed out", None))
             }
         }
+    }
+
+    /// Render an interactive HTML prompt and await the user's submitted result.
+    /// Reuses the pending-reply channel keyed by id; times out after 300s.
+    async fn request_prompt(&self, url: String, id: u64) -> Result<serde_json::Value, McpError> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .insert(id, tx);
+        let _ = self.app.emit(
+            "sutra://preview/prompt",
+            serde_json::json!({ "id": id, "url": url }),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+            Ok(Ok(value)) => Ok(value),
+            _ => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err(McpError::internal_error("user prompt timed out", None))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Render an interactive HTML form/UI in Sutra's preview pane and wait for the user to submit. \
+                       The HTML runs in an isolated localhost iframe; capture input via a <form> (collected as \
+                       field→value) or by calling window.sutraSubmit(obj). Returns the submitted JSON. Blocks up to 300s."
+    )]
+    async fn prompt_user(
+        &self,
+        Parameters(args): Parameters<PromptUserArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = self.active_root()?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let html = inject_prompt_bridge(&args.html, id);
+        let file =
+            write_preview_html(&root, &html, 10).map_err(|e| McpError::internal_error(e, None))?;
+        let url = self
+            .app
+            .state::<PreviewServerState>()
+            .url_for(&root, &file, self.app.state::<LocalAuthToken>().value())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let value = self.request_prompt(url, id).await?;
+        Ok(Self::ok_json(value))
     }
 
     #[tool(
@@ -528,6 +605,7 @@ impl SutraMcp {
             path: Some(file.to_string_lossy().into_owned()),
             line: args.line,
             cwd: None,
+            url: None,
         });
         Ok(Self::ok_drive())
     }
@@ -545,6 +623,7 @@ impl SutraMcp {
             path: Some(file.to_string_lossy().into_owned()),
             line: None,
             cwd: None,
+            url: None,
         });
         Ok(Self::ok_drive())
     }
@@ -559,6 +638,7 @@ impl SutraMcp {
             path: Some(file.to_string_lossy().into_owned()),
             line: None,
             cwd: None,
+            url: None,
         });
         Ok(Self::ok_drive())
     }
@@ -574,6 +654,24 @@ impl SutraMcp {
             path: None,
             line: None,
             cwd: args.cwd,
+            url: None,
+        });
+        Ok(Self::ok_drive())
+    }
+
+    #[tool(
+        description = "Open a URL in Sutra's browser pane (routed through the dev proxy for localhost \
+                       apps). Use to preview a running dev server or any http(s) page in-app."
+    )]
+    fn navigate_browser(
+        &self,
+        Parameters(args): Parameters<NavigateBrowserArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        self.emit_drive(DriveCmd {
+            action: "navigateBrowser",
+            url: Some(args.url),
+            ..Default::default()
         });
         Ok(Self::ok_drive())
     }
@@ -884,6 +982,16 @@ mod tests {
         std::fs::write(outside.path().join("secret"), "x").unwrap();
         let p = outside.path().join("secret");
         assert!(resolve_in_root(dir.path(), p.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn prompt_bridge_carries_id_and_preserves_html() {
+        let out = inject_prompt_bridge("<form><input name=q></form>", 42);
+        assert!(out.contains("<form><input name=q></form>"));
+        assert!(out.contains("var ID=42;"));
+        assert!(out.contains("window.sutraSubmit=send;"));
+        assert!(out.contains("__sutraPrompt:true"));
+        assert!(out.contains("addEventListener('submit'"));
     }
 
     #[test]
