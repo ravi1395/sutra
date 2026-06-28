@@ -489,15 +489,18 @@ fn read_chunked(s: &mut TcpStream) -> io::Result<Vec<u8>> {
                 return Ok(out);
             }
             line.push(one[0]);
+            if line.len() > 1024 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk-size line too long"));
+            }
             if line.ends_with(b"\r\n") {
                 break;
             }
         }
         let size = usize::from_str_radix(
-            String::from_utf8_lossy(&line).trim().split(';').next().unwrap_or("0").trim(),
+            String::from_utf8_lossy(&line).trim().split(';').next().unwrap_or("").trim(),
             16,
         )
-        .unwrap_or(0);
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if size == 0 {
             let mut t = [0u8; 2];
             let _ = s.read_exact(&mut t);
