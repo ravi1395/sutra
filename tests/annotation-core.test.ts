@@ -43,3 +43,48 @@ test("routeKey includes hash for hash-routing", () => {
     "http://localhost:5173/#/dashboard",
   );
 });
+
+import { reduce, isTrustedMessage, type Annotation, type PickedPayload } from "../src/annotation-core";
+
+const pick = (selector: string): PickedPayload => ({
+  selector, tag: "div", html: "<div></div>", styles: {}, hints: {},
+});
+
+test("picked appends with next number and empty feedback", () => {
+  let s: Annotation[] = [];
+  s = reduce(s, { type: "picked", payload: pick("#a"), route: "r1" });
+  s = reduce(s, { type: "picked", payload: pick("#b"), route: "r1" });
+  assert.deepEqual(s.map((a) => a.n), [1, 2]);
+  assert.equal(s[0].feedback, "");
+  assert.equal(s[1].selector, "#b");
+});
+
+test("setFeedback updates matching n only", () => {
+  let s = reduce([], { type: "picked", payload: pick("#a"), route: "r1" });
+  s = reduce(s, { type: "setFeedback", n: 1, text: "too wide" });
+  assert.equal(s[0].feedback, "too wide");
+});
+
+test("remove drops the annotation", () => {
+  let s = reduce([], { type: "picked", payload: pick("#a"), route: "r1" });
+  s = reduce(s, { type: "remove", n: 1 });
+  assert.equal(s.length, 0);
+});
+
+test("reanchorResult marks unresolved selectors on that route stale", () => {
+  let s = reduce([], { type: "picked", payload: pick("#a"), route: "r1" });
+  s = reduce(s, { type: "picked", payload: pick("#gone"), route: "r1" });
+  s = reduce(s, { type: "picked", payload: pick("#other"), route: "r2" });
+  s = reduce(s, { type: "reanchorResult", route: "r1", resolved: ["#a"] });
+  assert.equal(s.find((a) => a.selector === "#a")!.stale, false);
+  assert.equal(s.find((a) => a.selector === "#gone")!.stale, true);
+  // r2 annotation untouched
+  assert.equal(s.find((a) => a.selector === "#other")!.stale, undefined);
+});
+
+test("isTrustedMessage requires both origin and source", () => {
+  const win = {};
+  assert.equal(isTrustedMessage({ origin: "o", source: win }, "o", win), true);
+  assert.equal(isTrustedMessage({ origin: "x", source: win }, "o", win), false);
+  assert.equal(isTrustedMessage({ origin: "o", source: {} }, "o", win), false);
+});

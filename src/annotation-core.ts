@@ -39,3 +39,46 @@ export function routeKey(targetOrigin: string, loc: LocationShape, opts: RouteOp
   const base = `${targetOrigin}${loc.pathname}${loc.search}`;
   return opts.hashRouting ? `${base}${loc.hash}` : base;
 }
+
+export interface Hints { testid?: string; role?: string; aria?: string; text?: string }
+export interface Annotation {
+  n: number; selector: string; tag: string; html: string;
+  styles: Record<string, string>; hints: Hints; feedback: string;
+  route: string; stale?: boolean; ambiguous?: boolean;
+}
+export interface PickedPayload {
+  selector: string; tag: string; html: string;
+  styles: Record<string, string>; hints: Hints; ambiguous?: boolean;
+}
+export type AnnAction =
+  | { type: "picked"; payload: PickedPayload; route: string }
+  | { type: "setFeedback"; n: number; text: string }
+  | { type: "remove"; n: number }
+  | { type: "reanchorResult"; route: string; resolved: string[] };
+
+export function reduce(state: Annotation[], action: AnnAction): Annotation[] {
+  switch (action.type) {
+    case "picked": {
+      const n = state.reduce((m, a) => Math.max(m, a.n), 0) + 1;
+      return [...state, { ...action.payload, n, feedback: "", route: action.route }];
+    }
+    case "setFeedback":
+      return state.map((a) => (a.n === action.n ? { ...a, feedback: action.text } : a));
+    case "remove":
+      return state.filter((a) => a.n !== action.n);
+    case "reanchorResult":
+      return state.map((a) =>
+        a.route === action.route
+          ? { ...a, stale: !action.resolved.includes(a.selector) }
+          : a,
+      );
+  }
+}
+
+export function isTrustedMessage(
+  e: { origin: string; source: unknown },
+  expectedOrigin: string,
+  expectedSource: unknown,
+): boolean {
+  return e.origin === expectedOrigin && e.source === expectedSource;
+}
