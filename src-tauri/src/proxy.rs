@@ -75,8 +75,9 @@ pub fn strip_csp_meta(html: &str) -> String {
         let lower = result.to_ascii_lowercase();
         let Some(cpos) = lower.find(needle) else { break };
         let Some(start) = lower[..cpos].rfind("<meta") else { break };
-        let Some(end_rel) = lower[cpos..].find('>') else { break };
-        let end = cpos + end_rel + 1;
+        // Scan from the `<meta` start so we always land on the tag's own `>`.
+        let Some(end_rel) = lower[start..].find('>') else { break };
+        let end = start + end_rel + 1;
         result.replace_range(start..end, "");
     }
     result
@@ -86,9 +87,12 @@ pub fn strip_csp_meta(html: &str) -> String {
 /// open tag, else before `</body>`, else prepended.
 pub fn inject_agent(html: &[u8], agent: &str) -> Vec<u8> {
     let mut s = strip_csp_meta(&String::from_utf8_lossy(html));
-    if let Some(idx) = head_insert_index(&s) {
+    // ASCII-lowercase a single copy for case-insensitive tag search; byte
+    // offsets line up with `s` because to_ascii_lowercase only alters bytes <= 0x7F.
+    let lower = s.to_ascii_lowercase();
+    if let Some(idx) = head_insert_index(&lower) {
         s.insert_str(idx, agent);
-    } else if let Some(idx) = s.find("</body>") {
+    } else if let Some(idx) = lower.find("</body>") {
         s.insert_str(idx, agent);
     } else {
         s.insert_str(0, agent);
@@ -96,8 +100,8 @@ pub fn inject_agent(html: &[u8], agent: &str) -> Vec<u8> {
     s.into_bytes()
 }
 
-fn head_insert_index(html: &str) -> Option<usize> {
-    let lower = html.to_ascii_lowercase();
+// `lower` must already be ASCII-lowercased.
+fn head_insert_index(lower: &str) -> Option<usize> {
     let h = lower.find("<head")?;
     let gt = lower[h..].find('>')? + h;
     Some(gt + 1)
@@ -185,5 +189,38 @@ mod tests {
         assert!(is_html_content_type("text/html; charset=utf-8"));
         assert!(!is_html_content_type("application/json"));
         assert!(!is_html_content_type("text/event-stream"));
+    }
+
+    #[test]
+    fn injects_after_head_with_attributes() {
+        let html = b"<html><head lang=\"en\"><title>t</title></head><body></body></html>";
+        let out = String::from_utf8(inject_agent(html, "<i>A</i>")).unwrap();
+        assert_eq!(out.matches("<i>A</i>").count(), 1);
+        assert!(out.find("<i>A</i>").unwrap() < out.find("<title>").unwrap());
+        assert!(out.find("<head").unwrap() < out.find("<i>A</i>").unwrap());
+    }
+
+    #[test]
+    fn injects_before_uppercase_body_when_no_head() {
+        let html = b"<html><BODY>hi</BODY></html>";
+        let out = String::from_utf8(inject_agent(html, "<i>A</i>")).unwrap();
+        // matched case-insensitively, so injected (not prepended at index 0)
+        assert!(out.starts_with("<html>"));
+        assert!(out.find("<i>A</i>").unwrap() < out.to_ascii_lowercase().find("</body>").unwrap());
+    }
+
+    #[test]
+    fn injects_prepended_when_no_head_or_body() {
+        let html = b"<div>fragment</div>";
+        let out = String::from_utf8(inject_agent(html, "<i>A</i>")).unwrap();
+        assert!(out.starts_with("<i>A</i>"));
+    }
+
+    #[test]
+    fn strips_multiple_csp_meta_tags() {
+        let html = r#"<head><meta http-equiv="Content-Security-Policy" content="a"><meta http-equiv="Content-Security-Policy" content="b"><title>t</title></head>"#;
+        let out = strip_csp_meta(html);
+        assert!(!out.to_ascii_lowercase().contains("content-security-policy"));
+        assert!(out.contains("<title>t</title>"));
     }
 }
