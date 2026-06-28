@@ -9,7 +9,7 @@ export interface NodeShape {
 const UNSTABLE_ID = [
   /^:/,              // React useId (":r3:")
   /^(css|sc|emotion)-/i, // CSS-in-JS
-  /[0-9a-f]{6,}/i,  // long hex-ish hash
+  /^[0-9a-f]{6,}$/i,  // long hex-ish hash (whole-id match)
 ];
 
 export function isStableId(id: string): boolean {

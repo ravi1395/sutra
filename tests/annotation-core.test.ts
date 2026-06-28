@@ -8,6 +8,10 @@ test("isStableId accepts plain ids, rejects framework-hashed", () => {
   assert.equal(isStableId(":r3:"), false);        // React useId
   assert.equal(isStableId("css-1a2b3c"), false);  // emotion/styled
   assert.equal(isStableId("a1b2c3d4e5"), false);  // long hash
+  // hex substring in otherwise-stable id must not be rejected
+  assert.equal(isStableId("section-abcdef"), true);  // hex substring but stable
+  assert.equal(isStableId("content-1a2b3c"), true);  // hex substring but stable
+  assert.equal(isStableId("a1b2c3d4e5"), false);     // all-hex hash, unstable
 });
 
 test("selectorFor prefers a stable id", () => {
