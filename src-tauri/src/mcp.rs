@@ -636,6 +636,17 @@ impl SutraMcp {
         let value = self.request_ui("selection").await?;
         Ok(Self::ok_json(value))
     }
+
+    #[tool(
+        description = "Get current dev-browser annotations for the active route: \
+                       number, design feedback, selector, tag, element HTML, computed \
+                       styles, and locator hints."
+    )]
+    async fn get_annotations(&self) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self.request_ui("annotations").await?;
+        Ok(Self::ok_json(value))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
