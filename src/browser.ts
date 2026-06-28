@@ -27,7 +27,9 @@ export class BrowserPane {
     this.urlInput.onkeydown = (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        this.open(this.urlInput.value);
+        void this.open(this.urlInput.value).catch((err) => {
+          console.error("browser open failed:", err);
+        });
       }
     };
 

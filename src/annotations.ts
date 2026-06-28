@@ -29,6 +29,7 @@ export class AnnotationsPanel {
     this.armed = !this.armed;
     this.toggleBtn.classList.toggle("active", this.armed);
     this.postToAgent({ type: this.armed ? "arm" : "disarm" });
+    this.render();
   }
 
   private postToAgent(msg: unknown) {
@@ -72,18 +73,35 @@ export class AnnotationsPanel {
 
   private render() {
     this.listEl.innerHTML = "";
-    for (const a of this.currentRouteAnnotations()) {
+    const anns = this.currentRouteAnnotations();
+    // Show the list while armed or whenever there are annotations on this route.
+    this.listEl.classList.toggle("hidden", !(this.armed || anns.length > 0));
+    for (const a of anns) {
       const row = document.createElement("div");
       row.className = "annotation-row" + (a.stale ? " stale" : "");
-      row.innerHTML =
-        `<span class="ann-num">${a.n}</span>` +
-        `<code class="ann-sel">${a.selector}</code>` +
-        `<span class="ann-fb">${a.feedback || "…"}</span>` +
-        `<button class="ann-del" data-n="${a.n}">✕</button>`;
-      row.querySelector(".ann-del")!.addEventListener("click", () => {
+
+      const num = document.createElement("span");
+      num.className = "ann-num";
+      num.textContent = String(a.n);
+
+      const sel = document.createElement("code");
+      sel.className = "ann-sel";
+      sel.textContent = a.selector;
+
+      const fb = document.createElement("span");
+      fb.className = "ann-fb";
+      fb.textContent = a.feedback || "…";
+
+      const del = document.createElement("button");
+      del.className = "ann-del";
+      del.textContent = "✕";
+      del.dataset.n = String(a.n);
+      del.addEventListener("click", () => {
         this.dispatch({ type: "remove", n: a.n });
         this.postToAgent({ type: "removePin", n: a.n });
       });
+
+      row.append(num, sel, fb, del);
       this.listEl.appendChild(row);
     }
   }
