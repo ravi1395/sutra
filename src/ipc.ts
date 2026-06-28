@@ -98,6 +98,9 @@ export const agentTrackingRevert = (root: string) =>
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
 
+export const proxyUrl = (target: string) =>
+  invoke<string>("proxy_url", { target });
+
 export const mcpServerUrl = () => invoke<string>("mcp_server_url");
 export const mcpSetRoot = (root: string) => invoke<void>("mcp_set_root", { root });
 export const mcpWriteAgentConfig = (root: string) =>

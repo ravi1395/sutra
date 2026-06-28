@@ -45,6 +45,7 @@ pub fn run() {
         .manage(debug::DebugState::default())
         .manage(lang::LangState::default())
         .manage(mcp::McpState::default())
+        .manage(proxy::ProxyServerState::default())
         .manage(watcher::WatcherState::default())
         .setup(|app| {
             // Desktop-only self-updater: registered here so the chain stays
@@ -88,6 +89,7 @@ pub fn run() {
             git::git_branches,
             git::git_checkout,
             preview_server::preview_server_url,
+            proxy::proxy_url,
             mcp::mcp_server_url,
             mcp::mcp_set_root,
             mcp::mcp_write_agent_config,

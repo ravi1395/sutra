@@ -133,6 +133,412 @@ fn head_insert_index(lower: &str) -> Option<usize> {
     Some(gt + 1)
 }
 
+// src-tauri/src/proxy.rs  (append; std-only, blocking, thread-per-connection)
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
+
+use crate::mcp::{with_auth_token, LocalAuthToken};
+
+/// The built annotation-agent IIFE, inlined at compile time. Produced by the
+/// `build:agent` npm script (Task 10) into this path before `cargo build`.
+const AGENT_SCRIPT: &str = concat!(
+    "<script>",
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/agent/annotation-agent.js")),
+    "</script>"
+);
+
+#[derive(Default)]
+pub struct ProxyServerState {
+    port: Mutex<Option<u16>>,
+}
+
+impl ProxyServerState {
+    /// Lazily start the single proxy listener; return its port.
+    fn ensure(&self, token: String) -> Result<u16, String> {
+        let mut guard = self.port.lock().map_err(|e| e.to_string())?;
+        if let Some(p) = *guard {
+            return Ok(p);
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        thread::Builder::new()
+            .name("sutra-annotation-proxy".into())
+            .spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let tok = token.clone();
+                    thread::spawn(move || {
+                        let _ = handle_conn(stream, &tok);
+                    });
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        *guard = Some(port);
+        Ok(port)
+    }
+}
+
+#[tauri::command]
+pub fn proxy_url(
+    state: tauri::State<ProxyServerState>,
+    token: tauri::State<LocalAuthToken>,
+    target: String,
+) -> Result<String, String> {
+    // Validate up-front so the UI gets an immediate error for bad targets.
+    parse_target(&target)?;
+    let port = state.ensure(token.value().to_string())?;
+    let encoded = percent_encode_query(&target);
+    Ok(with_auth_token(
+        format!("http://127.0.0.1:{port}/?u={encoded}"),
+        token.value(),
+    ))
+}
+
+fn percent_encode_query(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'.' | b'_' | b'~') {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_query(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+struct Head {
+    start_line: String,
+    headers: Vec<(String, String)>,
+    raw: Vec<u8>,
+}
+impl Head {
+    fn get(&self, name: &str) -> Option<&str> {
+        let n = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase() == n)
+            .map(|(_, v)| v.as_str())
+    }
+    fn target_path_query(&self) -> (String, Option<String>) {
+        let target = self.start_line.split_whitespace().nth(1).unwrap_or("/");
+        match target.split_once('?') {
+            Some((p, q)) => (p.to_string(), Some(q.to_string())),
+            None => (target.to_string(), None),
+        }
+    }
+}
+
+fn read_head(s: &mut TcpStream) -> io::Result<Option<Head>> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut one = [0u8; 1];
+    loop {
+        if s.read(&mut one)? == 0 {
+            return Ok(None);
+        }
+        buf.push(one[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(io::Error::new(io::ErrorKind::Other, "head too large"));
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.split("\r\n");
+    let start_line = lines.next().unwrap_or("").to_string();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    Ok(Some(Head { start_line, headers, raw: buf }))
+}
+
+fn write_status(s: &mut TcpStream, status: &str, msg: &str) {
+    let body = format!("{{\"error\":\"{msg}\"}}");
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = s.write_all(head.as_bytes());
+    let _ = s.write_all(body.as_bytes());
+}
+
+fn handle_conn(mut client: TcpStream, token: &str) -> io::Result<()> {
+    let _ = client.set_read_timeout(Some(Duration::from_secs(30)));
+    let Some(req) = read_head(&mut client)? else {
+        return Ok(());
+    };
+    let (path, query) = req.target_path_query();
+
+    // The very first navigation carries ?u=<target>&token=. Subsequent
+    // subresource requests are same-origin and carry the cookie + their own
+    // path; we resolve the target from the `u` param if present, else default
+    // to "the dev origin of this proxy" — for the spike-simple model we require
+    // `u` on the top navigation and reconstruct the origin for subresources by
+    // reusing the most recent target. To keep this stateless and robust, the
+    // injected <base> approach is avoided; instead the agent rewrites nothing and
+    // root-relative subresources include `u` via the cookie-carried origin.
+    //
+    // Concretely: target origin is taken from `u` when present; otherwise the
+    // request path is forwarded to the same dev origin recorded at navigation.
+    let target_str = query
+        .as_deref()
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("u=").map(percent_decode_query))
+        });
+
+    // Auth: query token OR cookie.
+    let cookie = req.get("cookie");
+    if !request_is_authorized(query.as_deref(), cookie, token) {
+        write_status(&mut client, "401 Unauthorized", "unauthorized");
+        return Ok(());
+    }
+
+    let target = match &target_str {
+        Some(t) => match parse_target(t) {
+            Ok(t) => t,
+            Err(e) => {
+                write_status(&mut client, "400 Bad Request", &e);
+                return Ok(());
+            }
+        },
+        None => {
+            // Subresource with no `u`: forward path to the dev origin encoded in
+            // the Referer's `u`, else reject. (First iteration: require navigation
+            // first so the cookie+referer are present.)
+            match req
+                .get("referer")
+                .and_then(|r| r.split("u=").nth(1))
+                .map(|r| percent_decode_query(r.split('&').next().unwrap_or("")))
+                .and_then(|t| parse_target(&t).ok())
+            {
+                Some(t) => t,
+                None => {
+                    write_status(&mut client, "400 Bad Request", "missing target");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    // Re-validate loopback on THIS connection (defeats DNS rebinding).
+    if !host_is_loopback(&target.host, target.port) {
+        write_status(&mut client, "403 Forbidden", "target not loopback");
+        return Ok(());
+    }
+
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))?;
+
+    let is_ws = req
+        .get("upgrade")
+        .map(|u| u.to_ascii_lowercase().contains("websocket"))
+        .unwrap_or(false);
+
+    // Forward path: strip our `u`/`token` params from the upstream path/query.
+    let upstream_query = query.as_deref().map(strip_proxy_params).unwrap_or_default();
+    let upstream_target = if upstream_query.is_empty() {
+        path.clone()
+    } else {
+        format!("{path}?{upstream_query}")
+    };
+
+    if is_ws {
+        let head = rewrite_request_head(&req, &target, &upstream_target, true);
+        upstream.write_all(&head)?;
+        return pump_bidirectional(client, upstream);
+    }
+
+    let head = rewrite_request_head(&req, &target, &upstream_target, false);
+    upstream.write_all(&head)?;
+    if let Some(len) = req.get("content-length").and_then(|v| v.parse::<usize>().ok()) {
+        let mut body = vec![0u8; len];
+        client.read_exact(&mut body)?;
+        upstream.write_all(&body)?;
+    }
+
+    let Some(resp) = read_head(&mut upstream)? else {
+        return Ok(());
+    };
+    let is_html = is_html_content_type(resp.get("content-type").unwrap_or(""));
+
+    if is_html {
+        let body = read_full_body(&mut upstream, &resp)?;
+        let injected = inject_agent(&body, AGENT_SCRIPT);
+        let out = rewrite_html_response_head(&resp, injected.len(), token, target_str.is_some());
+        client.write_all(&out)?;
+        client.write_all(&injected)?;
+    } else {
+        client.write_all(&rewrite_passthrough_head(&resp))?;
+        io::copy(&mut upstream, &mut client)?;
+    }
+    Ok(())
+}
+
+fn strip_proxy_params(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|kv| !kv.starts_with("u=") && !kv.starts_with("token="))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn rewrite_request_head(req: &Head, target: &Target, upstream_target: &str, ws: bool) -> Vec<u8> {
+    let method = req.start_line.split_whitespace().next().unwrap_or("GET");
+    let version = req.start_line.split_whitespace().nth(2).unwrap_or("HTTP/1.1");
+    let mut out = format!("{method} {upstream_target} {version}\r\n");
+    for (k, v) in &req.headers {
+        let kl = k.to_ascii_lowercase();
+        if kl == "host" || kl == "accept-encoding" || (!ws && kl == "connection") {
+            continue;
+        }
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    out.push_str(&format!("Host: {}:{}\r\n", target.host, target.port));
+    if !ws {
+        out.push_str("Accept-Encoding: identity\r\n");
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+fn rewrite_html_response_head(resp: &Head, body_len: usize, token: &str, set_cookie: bool) -> Vec<u8> {
+    let status = resp.start_line.clone();
+    let mut out = format!("{status}\r\n");
+    for (k, v) in &resp.headers {
+        let kl = k.to_ascii_lowercase();
+        if kl.starts_with("content-security-policy")
+            || kl == "content-length"
+            || kl == "content-encoding"
+            || kl == "transfer-encoding"
+            || kl == "connection"
+        {
+            continue;
+        }
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if set_cookie {
+        out.push_str(&auth_set_cookie_header(token));
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("Content-Length: {body_len}\r\n"));
+    out.push_str("Connection: close\r\n\r\n");
+    out.into_bytes()
+}
+
+fn rewrite_passthrough_head(resp: &Head) -> Vec<u8> {
+    // Strip CSP on all responses (defensive) but otherwise pass through.
+    let mut out = format!("{}\r\n", resp.start_line);
+    for (k, v) in &resp.headers {
+        if k.to_ascii_lowercase().starts_with("content-security-policy") {
+            continue;
+        }
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+fn read_full_body(s: &mut TcpStream, resp: &Head) -> io::Result<Vec<u8>> {
+    if resp.get("transfer-encoding").unwrap_or("").to_ascii_lowercase().contains("chunked") {
+        return read_chunked(s);
+    }
+    if let Some(len) = resp.get("content-length").and_then(|v| v.parse::<usize>().ok()) {
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body)?;
+        return Ok(body);
+    }
+    let mut body = Vec::new();
+    s.read_to_end(&mut body)?;
+    Ok(body)
+}
+
+fn read_chunked(s: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut one = [0u8; 1];
+    loop {
+        let mut line = Vec::new();
+        loop {
+            if s.read(&mut one)? == 0 {
+                return Ok(out);
+            }
+            line.push(one[0]);
+            if line.ends_with(b"\r\n") {
+                break;
+            }
+        }
+        let size = usize::from_str_radix(
+            String::from_utf8_lossy(&line).trim().split(';').next().unwrap_or("0").trim(),
+            16,
+        )
+        .unwrap_or(0);
+        if size == 0 {
+            let mut t = [0u8; 2];
+            let _ = s.read_exact(&mut t);
+            break;
+        }
+        let mut chunk = vec![0u8; size];
+        s.read_exact(&mut chunk)?;
+        out.extend_from_slice(&chunk);
+        let mut crlf = [0u8; 2];
+        s.read_exact(&mut crlf)?;
+    }
+    Ok(out)
+}
+
+fn pump_bidirectional(client: TcpStream, upstream: TcpStream) -> io::Result<()> {
+    let c2 = client.try_clone()?;
+    let u2 = upstream.try_clone()?;
+    let t1 = thread::spawn(move || copy_until_eof(client, upstream));
+    let t2 = thread::spawn(move || copy_until_eof(u2, c2));
+    let _ = t1.join();
+    let _ = t2.join();
+    Ok(())
+}
+
+fn copy_until_eof(mut from: TcpStream, mut to: TcpStream) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) | Err(_) => {
+                let _ = to.shutdown(Shutdown::Write);
+                return;
+            }
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +681,17 @@ mod tests {
         assert!(h.contains("HttpOnly"));
         assert!(h.contains("SameSite=Strict"));
         assert!(h.contains("Path=/"));
+    }
+
+    #[test]
+    fn strips_only_proxy_params() {
+        assert_eq!(strip_proxy_params("u=http%3A%2F%2Fx&token=abc&a=1"), "a=1");
+        assert_eq!(strip_proxy_params("a=1&b=2"), "a=1&b=2");
+    }
+
+    #[test]
+    fn query_roundtrips_percent() {
+        let t = "http://127.0.0.1:5173/p?x=1";
+        assert_eq!(percent_decode_query(&percent_encode_query(t)), t);
     }
 }
