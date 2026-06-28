@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::mcp::{query_has_auth_token, with_auth_token, LocalAuthToken};
+use crate::proxy::{inject_annotation_agent, is_html_content_type};
 
 #[derive(Default)]
 pub struct PreviewServerState {
@@ -49,7 +50,7 @@ impl PreviewServerState {
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         thread::Builder::new()
             .name("sutra-preview-server".to_string())
-            .spawn(move || serve(listener, root, token))
+            .spawn(move || serve(listener, root, token, port))
             .map_err(|e| e.to_string())?;
         servers.insert(key, port);
         Ok(port)
@@ -66,13 +67,13 @@ pub fn preview_server_url(
     state.url_for(Path::new(&root), Path::new(&path), token.value())
 }
 
-fn serve(listener: TcpListener, root: PathBuf, token: String) {
+fn serve(listener: TcpListener, root: PathBuf, token: String, port: u16) {
     for stream in listener.incoming().flatten() {
-        handle_client(stream, &root, &token);
+        handle_client(stream, &root, &token, port);
     }
 }
 
-fn handle_client(mut stream: TcpStream, root: &Path, token: &str) {
+fn handle_client(mut stream: TcpStream, root: &Path, token: &str, port: u16) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buf = [0_u8; 8192];
     let n = match stream.read(&mut buf) {
@@ -143,13 +144,21 @@ fn handle_client(mut stream: TcpStream, root: &Path, token: &str) {
             return;
         }
     };
-    write_response(
-        &mut stream,
-        "200 OK",
-        mime_for(&file),
-        &body,
-        method == "HEAD",
-    );
+    let mime = mime_for(&file);
+    let body = render_body(mime, body, port, token);
+    write_response(&mut stream, "200 OK", mime, &body, method == "HEAD");
+}
+
+/// Inject the annotation agent into HTML responses so static previews host the
+/// same in-iframe picker as the dev-server proxy; non-HTML bodies pass through.
+/// Content-Length is taken from the returned body, so HEAD lengths stay correct.
+fn render_body(mime: &str, body: Vec<u8>, port: u16, token: &str) -> Vec<u8> {
+    if is_html_content_type(mime) {
+        let origin = format!("http://127.0.0.1:{port}");
+        inject_annotation_agent(&body, &origin, token)
+    } else {
+        body
+    }
 }
 
 fn write_error(stream: &mut TcpStream, status: &str, message: &str, head_only: bool) {
@@ -307,6 +316,29 @@ mod tests {
         let url = state.url_for(dir.path(), &file, "abc").unwrap();
         assert!(url.starts_with("http://127.0.0.1:1420"));
         assert!(url.ends_with("/page.html?token=abc"));
+    }
+
+    #[test]
+    fn render_body_injects_agent_into_html() {
+        let out = render_body(
+            "text/html; charset=utf-8",
+            b"<head></head><body>hi</body>".to_vec(),
+            1420,
+            "tok",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("__SUTRA_TARGET_ORIGIN__"));
+        assert!(s.contains("\"http://127.0.0.1:1420\""));
+        assert!(s.contains("\"tok\""));
+    }
+
+    #[test]
+    fn render_body_passes_through_non_html() {
+        let css = b"body{color:red}".to_vec();
+        assert_eq!(
+            render_body("text/css; charset=utf-8", css.clone(), 1420, "tok"),
+            css
+        );
     }
 
     #[test]

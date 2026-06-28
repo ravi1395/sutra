@@ -71,7 +71,8 @@ export class PreviewController {
       this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
       return;
     }
-    // html: text is a preview-server URL
+    // html: text is a preview-server URL. Reached only by interactive prompt_user
+    // forms; agent/file HTML renders are routed to the browser pane (see main.ts).
     if (!this.frame) {
       this.el.innerHTML = "";
       this.frame = document.createElement("iframe");

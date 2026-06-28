@@ -17,6 +17,8 @@ import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { BrowserPane } from "./browser";
+import { resolveUiQuery } from "./annotation-core";
+import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
@@ -37,6 +39,7 @@ import {
   onPreviewOpen,
   onDrive,
   onUiRequest,
+  onPromptRequest,
   mcpUiReply,
   mcpSetRoot,
   mcpWriteAgentConfig,
@@ -174,24 +177,43 @@ const search = new SearchPanel(
   $("search-results"),
 );
 search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+const browserFrame = $<HTMLIFrameElement>("browser-frame");
 const browser = new BrowserPane(
   $("browser-area"),
-  $<HTMLIFrameElement>("browser-frame"),
+  browserFrame,
   $<HTMLInputElement>("browser-url"),
   $<HTMLButtonElement>("btn-back"),
   $<HTMLButtonElement>("btn-reload"),
   $<HTMLButtonElement>("btn-browser-maximize"),
 );
+const annotations = new AnnotationsPanel(
+  browserFrame,
+  $("annotation-list"),
+  $<HTMLButtonElement>("btn-annotate"),
+);
+browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
+editor.onHtmlPreview = (url) => {
+  setBrowser(true);
+  browser.show();
+  browser.loadDirect(url);
+};
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
   setBrowser(true);
   browser.show();
-  browser.open(url);
+  void browser.open(url);
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
+// HTML → browser pane (focused); md/diagram → editor preview split.
 void onPreviewOpen((p) => {
+  if (p.kind === "html" && p.url) {
+    setBrowser(true);
+    browser.show();
+    browser.loadDirect(p.url);
+    return;
+  }
   void editor.showAgentPreview(p).catch((e) =>
     console.error("agent preview failed", e),
   );
@@ -218,16 +240,41 @@ void onDrive((d) => {
     case "openTerminal":
       void terminals.create(undefined, d.cwd);
       break;
+    case "navigateBrowser":
+      if (d.url) {
+        setBrowser(true);
+        browser.show();
+        void browser.open(d.url).catch((e) => console.error("agent navigate failed", e));
+      }
+      break;
+  }
+});
+
+// Show an MCP interactive prompt in the preview pane; the iframe posts the
+// user's submission back via window.postMessage (see the bridge listener below).
+void onPromptRequest((r) => {
+  void editor
+    .showAgentPreview({ kind: "html", url: r.url })
+    .catch((e) => console.error("agent prompt failed", e));
+});
+
+// Bridge: rendered prompt iframes postMessage their result tagged with the
+// pending request id; forward to the MCP reply command to resolve prompt_user.
+window.addEventListener("message", (e) => {
+  const d = e.data as { __sutraPrompt?: boolean; id?: number; data?: unknown };
+  if (d && d.__sutraPrompt === true && typeof d.id === "number") {
+    void mcpUiReply(d.id, d.data ?? {});
   }
 });
 
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
 void onUiRequest((r) => {
-  const payload =
-    r.query === "openTabs"
-      ? { tabs: editor.getOpenTabs() }
-      : editor.getSelection();
-  void mcpUiReply(r.id, payload);
+  const result = resolveUiQuery(r.query, {
+    openTabs: () => editor.getOpenTabs(),
+    selection: () => editor.getSelection(),
+    annotations: () => annotations.currentRouteAnnotations(),
+  });
+  void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
 
 // Native workspace watcher refreshes the visible tree and git badges after
@@ -761,7 +808,7 @@ const btnBrowser = $("btn-browser");
 const btnPalette = $("btn-palette");
 const btnMenu = $("btn-menu");
 function setBrowser(on: boolean): void {
-  browserArea.classList.toggle("hidden", !on);
+  if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
 }

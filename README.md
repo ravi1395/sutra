@@ -288,10 +288,35 @@ preview loopback servers.
 
 | Tool | Argument | Effect |
 |---|---|---|
-| `render_html` | `html` | Renders self-contained HTML (scripts run in an isolated localhost iframe). |
-| `render_markdown` | `md` | Renders sanitized Markdown. |
-| `render_diagram` | `mermaid` | Renders a Mermaid diagram (`securityLevel: strict`). |
-| `open_preview` | `path` | Opens an existing workspace `.html`/`.md` file in the preview pane. |
+| `render_html` | `html` | Renders self-contained HTML in the browser pane (scripts run in an isolated localhost iframe). |
+| `render_markdown` | `md` | Renders sanitized Markdown in the preview pane. |
+| `render_diagram` | `mermaid` | Renders a Mermaid diagram in the preview pane (`securityLevel: strict`). |
+| `open_preview` | `path` | Opens an existing workspace file: `.html` in the browser pane, `.md` in the preview pane. |
+
+HTML renders (`render_html`, `open_preview` on `.html`, and the manual preview
+toggle on an `.html` tab) open in the **browser pane** with its URL bar and
+annotation support; Markdown and Mermaid render in the editor's **preview split**.
+
+### Interactive tools
+
+| Tool | Argument | Effect |
+|---|---|---|
+| `prompt_user` | `html` | Renders an interactive HTML form/UI in the preview pane and **blocks until the user submits** (up to 300s), returning the submitted JSON. |
+
+The supplied HTML runs in an isolated localhost iframe. A submit bridge is
+injected automatically: any `<form>` submit is captured as a `field→value`
+object, or call `window.sutraSubmit(obj)` with any JSON-serializable value. The
+result is delivered back to the model via the same UI round-trip channel as the
+read tools (keyed by request id), so concurrent prompts resolve independently.
+
+```html
+<!-- example prompt_user html -->
+<form>
+  <label>Pick env: <select name="env"><option>dev<option>prod</select></label>
+  <button>Submit</button>
+</form>
+<!-- returns: {"env":"prod"} -->
+```
 
 ### Drive tools (P2)
 
@@ -301,6 +326,7 @@ preview loopback servers.
 | `reveal_in_tree` | `path` | Expands the file tree to the path and highlights it. |
 | `show_diff` | `path` | Opens the file and jumps to its first changed git hunk. |
 | `open_terminal` | `cwd?` | Opens a new integrated terminal, optionally at a directory. |
+| `navigate_browser` | `url` | Opens a URL in the browser pane (routed through the dev proxy for localhost apps). Scheme optional, defaults to `http://`. |
 
 ### Read tools (P3)
 
@@ -318,13 +344,79 @@ root** and reject paths outside it. Live reads (`get_open_tabs`,
 `get_selection`) round-trip to the frontend with a 2s timeout; other reads are
 served directly from Rust.
 
+## Browser and Preview Annotations
+
+Sutra can annotate live HTML elements in the browser pane — whether a live dev
+page or an agent-rendered HTML mockup (both open there) — then expose those
+annotations to the in-app agent via the `get_annotations` MCP tool.
+
+### What it does
+
+Open a live dev page or agent HTML mockup, then click **Annotate** to enter
+picker mode for the active pane. Hover over any element — it highlights with a
+red outline — then click to attach a numbered annotation. A small inline
+textarea appears over the element so you can type design feedback. Each
+annotation records:
+
+- a sequential number and your feedback text
+- the element's stable CSS selector
+- its tag name and truncated `outerHTML` (up to 2048 chars)
+- a subset of computed styles (`display`, `position`, `color`,
+  `backgroundColor`, `fontSize`, etc.)
+- locator hints — `data-testid`, `role`, `aria-label`, and visible text (up to
+  80 chars)
+
+Annotations appear in the side list, scoped to the current route. Ask the
+in-app agent `review my annotations` (or any prompt that calls the
+`get_annotations` MCP tool) to pull the current list into context.
+
+### How it works
+
+Dev URLs load through a loopback reverse proxy (`src-tauri/src/proxy.rs`);
+agent mockups load through the token-gated static preview server
+(`src-tauri/src/preview_server.rs`). Both inject the annotation agent script
+(`src-tauri/agent/annotation-agent.js`) into HTML. The script receives the Tauri
+parent origin and the serving iframe origin as injected globals so it can post
+messages only to the real parent window.
+
+The parent-side `AnnotationsPanel` (`src/annotations.ts`) retargets to the
+active HTML iframe and validates every incoming `postMessage` against that
+iframe's known origin and `contentWindow` before acting on it. The agent
+notifies the parent on SPA route changes
+(history API patches + `popstate` + `hashchange`) so the side list stays scoped
+to the current route.
+
+### How to use
+
+1. Open a localhost dev URL in the browser pane (e.g. `http://localhost:5173`),
+   or ask the agent to render an HTML mockup (`render_html`) — it opens in the
+   browser pane.
+2. Click **Annotate** — the button turns active for the current pane.
+3. Hover over any element; it highlights with a red outline.
+4. Click the element — a pin number appears and an inline textarea opens.
+5. Type your feedback; it saves as you type and appears in the side list.
+6. To remove an annotation, click **✕** beside it in the side list.
+7. Ask the in-app agent: `review my annotations` — it reads the list via
+   `get_annotations`.
+
+### First-iteration boundaries
+
+| Implemented | Deferred |
+|---|---|
+| Loopback `http`/`https` dev origins only (e.g. `localhost`, `127.0.0.1`, `[::1]`) | Non-proxied or public origins |
+| CSP stripped on the proxied page so the agent script can run | Sites with strict CORS that block postMessage |
+| Stable CSS selector + computed styles + locator hints per element | Element screenshots / vision-based annotation |
+| SPA route awareness (hash routing + History API) | Disk persistence of annotations across sessions |
+| One dev origin per browser tab | Multiple simultaneous proxied origins |
+| Cross-origin third-party subresources load un-proxied and are not annotatable | Annotating cross-origin iframes or subresources |
+
 ## Architecture
 
 | Layer | Path | Responsibility |
 |---|---|---|
 | Rust: agent tracker | `src-tauri/src/agent_tracker.rs` | integrated-terminal process attribution, workspace snapshots, safe revert |
 | Rust: watcher | `src-tauri/src/watcher.rs` | recursive native workspace watcher, debounced `fs-changed` event |
-| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 13 MCP tools, agent-config commands, UI-read reply registry |
+| Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 15 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
 | Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |

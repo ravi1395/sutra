@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=/tmp/sutra-tests && node --test /tmp/sutra-tests/*.test.js",
-    "build": "tsc && vite build",
+    "build:agent": "esbuild src/annotation-agent.ts --bundle --format=iife --outfile=src-tauri/agent/annotation-agent.js",
+    "build": "npm run build:agent && tsc && vite build",
+    "pretauri": "npm run build:agent",
     "preview": "vite preview",
     "tauri": "tauri"
   },

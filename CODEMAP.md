@@ -26,13 +26,20 @@ Main boot flow:
 
 | Path | Owns | Key functions/classes |
 |---|---|---|
-| `src/main.ts` | App bootstrap, workspace open/session restore, loom/titlebar chrome, breadcrumb + whisper bar render, terminal drawer state, settings/theme apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/review flow | `$`, `saveTab`, `openWorkspace`, `renderBreadcrumb`, `renderWhisperBar`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `openSettings` |
+| `src/main.ts` | App bootstrap, workspace open/session restore, loom/titlebar chrome, open-editors switcher, breadcrumb + whisper bar render, terminal drawer state, settings/theme apply, native watcher refresh, save/save-as/save-all, panel toggles, global shortcuts, tree-file drag-to-pane drops, MCP event routing, worktree-aware git index fallback polling, integrated-agent polling/review flow | `$`, `saveTab`, `openWorkspace`, `openOpenEditorsMenu`, `renderBreadcrumb`, `renderWhisperBar`, `setTerminal`, `setDiff`, `pollAgentChanges`, `viewChangedPath`, `openSettings` |
 | `src/agent-tracking.ts` | Pure integrated-agent presentation helpers, whisper-bar copy, and direct terminal command hint | `mergeChangedFiles`, `aiChanges`, `whisperText`, `firstViewableAgentChange`, `isIntegratedAgentCommand` |
-| `src/shortcuts.ts` | Shared global shortcut predicates and listener options | `GLOBAL_SHORTCUT_OPTIONS`, `isPreviewShortcut` |
+| `src/shortcuts.ts` | Shared global shortcut predicates, platform-modifier detection, and display formatting for shortcut labels | `GLOBAL_SHORTCUT_OPTIONS`, `IS_MAC`, `isPreviewShortcut`, `isMod`, `fmtShortcut` |
 | `src/menubar.ts` | Workspace wordmark menu and shared popover primitive reused by the app menu | `mountWorkspaceBar`, `WorkspaceBarHandle`, `openPopover`, `closeAll` |
 | `src/icons.ts` | Inline SVG icon set (single source for toolbar + dropdowns) | `icon` (15 callers), `IconName` |
 | `src/palette.ts` | Command palette UI — fuzzy search over recent/workspace verbs, sectioned list, keyboard navigation | `mountPalette`, `groupCommands` |
 | `src/updater.ts` | Self-update controller — 6h poll of the release endpoint, titlebar update pill beside the palette, manual "check for updates" feedback path, download+install+relaunch | `mountUpdater`, `progressPercent` |
+| `src/composer.ts` | Docked prompt-composer panel — template/tag sections, trust gate, `@file` + `/asset` completion, chip rail, agent-target picker, draft/history restore, staged/submitted send flow | `mountComposer` |
+| `src/prompt-builder.ts` | Pure prompt assembly for tagged sections, routed chips, fenced selections, and optional thinking prelude | `buildPrompt`, `renderChip`, `defaultSection`, `fenceFor` |
+| `src/prompt-tags.ts` | Composer tag/template schema plus trust-gated config normalization from `.sutra/prompt-tags.json` | `DEFAULT_CONFIG`, `normalizeConfig`, `resolveConfig`, `templateTags` |
+| `src/composer-store.ts` | Local draft/history persistence for the composer, scoped per workspace | `saveDraft`, `loadDraft`, `clearDraft`, `loadHistory`, `saveHistory`, `pushHistory` |
+| `src/composer-complete.ts` | Pure `@file` and `/asset` completion matching plus asset-token formatting | `matchFiles`, `matchAssets`, `assetToken` |
+| `src/tag-manager.ts` | Composer tag/template editor modal for trusted workspace config | `mountTagManager` |
+| `src/delivery.ts` | PTY-delivery wrapper that stages vs submits prompts for agent terminals | `wrapForDelivery` |
 | `src/editor.ts` | CodeMirror manager, tabs/splits, preview, theme-aware syntax styling, diff gutter, inline hunk lens, marginalia, clean-tab reload, hunk revert, MCP tab/selection snapshots | `EditorManager`, `Pane`, `openFile`, `openLatestFile`, `getOpenTabs`, `getSelection`, `firstHunkLine`, `reloadFromDisk`, `recomputeDiff`, `revertHunk`, `openLens` |
 | `src/debug.ts` | DAP client, adapter detection, and per-adapter launch config shaping for Rust/Go/Python | `DapClient`, `detectAdapter`, `resolveLaunchConfig`, `cargoPackageName` |
 | `src/debug-session.ts` | Debug session controller that starts/stops resolved adapters, wires breakpoints, and renders paused state | `DebugSession`, `start`, `stop`, `toggleBreakpoint` |
@@ -54,8 +61,11 @@ Main boot flow:
 | `src/settings.ts` | Persisted editor/terminal/behavior/theme settings and clamp/update helpers | `loadSettings`, `saveSettings`, `nextFontSettings`, `clampSettings` |
 | `src/settings-modal.ts` | Cmd+, settings overlay UI with Editor/Terminal/Behavior/Shortcuts/About sections; host-driven live apply wiring | `openSettingsModal`, `SettingsModalDeps`, `ShortcutEntry` |
 | `src/preview.ts` | Markdown/HTML live preview in split pane; Markdown via `marked` + `DOMPurify`; HTML via static preview server | `PreviewController` |
-| `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply`, `checkForUpdate`, `installUpdate`, `relaunchApp` |
+| `src/ipc.ts` | Typed Tauri command/event boundary | filesystem/git/search/PTY wrappers plus `agentTrackingBegin`, `agentTrackingPoll`, `agentTrackingAccept`, `agentTrackingRevert`, `onDrive`, `onUiRequest`, `mcpUiReply`, `checkForUpdate`, `installUpdate`, `relaunchApp`, `proxyUrl` |
 | `src/git-index.ts` | Pure helpers for resolving the real Git index in regular repos and linked worktrees | `parseGitDirLine`, `resolveGitIndexPathFromGitDir` |
+| `src/annotation-core.ts` | Pure DOM-independent helpers for stable selector generation, route key computation, state reduction, and validated postMessage trust checks — no DOM imports, fully unit-testable | `selectorFor`, `routeKey`, `reduce`, `isTrustedMessage`; types: `Annotation`, `AnnAction`, `PickedPayload`, `NodeShape` |
+| `src/annotation-agent.ts` | In-iframe annotation picker — runs inside the proxied dev page as a standalone IIFE; highlights hovered elements, captures selector/styles/locator hints on click, renders pin numbers and inline feedback textareas, patches History API for SPA route tracking; built by `npm run build:agent` into `src-tauri/agent/annotation-agent.js` | `capture`, `drawPin`, `openEditor`, `onMove`, `onClick`, `emitRoute`, `computedSubset`, `toNodeShape` |
+| `src/annotations.ts` | Parent-side annotation panel — owns canonical `Annotation[]` state, renders the side list, drives the Annotate toggle button, and bridges parent↔agent via validated `postMessage` (origin + contentWindow checked on every message) | `AnnotationsPanel`, `toggle`, `onMessage`, `dispatch`, `render`, `currentRouteAnnotations`, `setProxyOrigin` |
 | `src/layout.ts` | Drag resize behavior for vertical and horizontal splitters; horizontal targets may shrink to remain inside app bounds | `vResizer`, `hResizer` |
 | `src/styles.css` | Ink/Washi theme tokens, viewport-clipped app root, vendored `@font-face`, loom/titlebar chrome, shared `.menu-card` grammar, panes, tabs, breadcrumb, marginalia, diff lens/viewer, terminal drawer, whisper bar | CSS selectors only |
 | `src/assets/fonts/` | Vendored variable woff2 fonts for UI/voice/mono stacks — no runtime font network request | `InstrumentSans-Variable.woff2`, `Fraunces-Italic-Variable.woff2`, `HankenGrotesk-Variable.woff2`, `SplineSansMono-Variable.woff2` |
@@ -70,10 +80,12 @@ Main boot flow:
 | `src-tauri/src/fs_cmds.rs` | Directory listing, symlink/depth-safe compact folders, capped text file read/write, Trash-backed delete, and Sutra-originated mutation reporting | `list_dir`, `read_file`, `write_file`, `rename_path`, `move_path`, `delete_path`, `create_dir` |
 | `src-tauri/src/git.rs` | Git operations via git2: status, HEAD diff baseline, branch info, ahead/behind, changed files, worktrees | `git_status`, `git_head_content`, `git_branch`, `git_ahead_behind`, `git_changed_files`, `git_worktrees`; structs: `StatusEntry`, `AheadBehindResult`, `ChangedFile`, `WorktreeInfo`, `BranchInfo` |
 | `src-tauri/src/debug.rs` | DAP proxy, codelldb binary resolution, stdio adapter spawning, and socket adapter spawning/connection | `resolve_debug_adapter`, `debug_start`, `debug_send`, `debug_stop`, `drain_frames` |
+| `src-tauri/src/assets.rs` | Scan user/project `.claude` commands, skills, and subagents into composer asset suggestions | `scan_agent_assets`, `scan_dir`, `invocation_for` |
 | `src-tauri/src/mcp.rs` | Token-gated in-process MCP server exposing display, drive, read tools, loopback edit ingest, agent config writers, and UI-read reply registry | `McpState`, `SutraMcp`, `start`, `ingest_edit`, `mcp_server_url`, `mcp_set_root`, `mcp_write_agent_config`, `mcp_ui_reply` |
 | `src-tauri/src/mcp_config.rs` | Config-file merge helpers for MCP agent registration — idempotent JSON/TOML/Claude settings patch, `.gitignore` append | `merge_mcp_json`, `merge_codex_toml`, `merge_claude_settings`, `ensure_gitignore` |
 | `src-tauri/src/preview_server.rs` | Session-local token-gated static server for saved HTML preview files rooted at the opened workspace | `PreviewServerState`, `preview_server_url`, `serve`, `handle_client`, `safe_request_path`, `mime_for`, `percent_decode`, `percent_encode` |
-| `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, and integrated shell PID registration | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`; structs: `PtyState`, `Session` |
+| `src-tauri/src/proxy.rs` | Loopback-only reverse proxy for dev-browser work: validates target scheme/host on every connection, rewrites request/response heads, strips CSP, injects the annotation agent script, sets loopback auth cookie, and raw-relays websocket traffic | `parse_target`, `host_is_loopback`, `request_is_authorized`, `inject_agent`, `ProxyServerState`, `proxy_url`, `handle_conn`, `rewrite_request_head`, `rewrite_html_response_head`, `pump_bidirectional` |
+| `src-tauri/src/pty.rs` | Portable PTY lifecycle, output streaming, integrated shell PID registration, and agent-terminal discovery/write gating for prompt delivery | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill`, `pty_list_agents`, `classify_state`; structs: `PtyState`, `Session`, `AgentTerminal` |
 | `src-tauri/src/search.rs` | Project-wide file search, literal by default with explicit regex opt-in | `search_dir`; structs: `SearchMatch`, `SearchResult` |
 | `src-tauri/src/watcher.rs` | Recursive native filesystem watching for the active workspace; debounces changed paths into `fs-changed` events | `WatcherState`, `watch_start`, `watch_stop` |
 | `src-tauri/src/lang/` | In-process Tree-sitter language engine for open-document parsing, query-backed symbols/outline, hover, completion, goto-definition, and workspace symbol indexing | `LangEngine`, `lang_did_open`, `lang_document_symbols`, `lang_hover`, `symbols_for_source`, `collect_query_symbols` |
@@ -98,11 +110,20 @@ Workspace wordmark menu / app menu / `⌘O` → `openFolderDialog` (native dialo
 **Preview:**
 `Shift+Cmd+V` → `main.togglePreview` → `EditorManager.togglePreview`. Markdown: renders current buffer through `preview.ts` (`marked` + `DOMPurify`) and external links open via the opener plugin. HTML: requires saved file in workspace → `ipc.previewServerUrl` → Rust `preview_server_url` → starts/reuses a token-gated `127.0.0.1` static server → preview iframe.
 
+**Dev browser proxy + annotation:**
+Frontend callers request `ipc.proxyUrl(target)` → Rust `proxy_url` validates `http(s)` + resolved loopback host and lazily starts `ProxyServerState` on `127.0.0.1` → `handle_conn` authorizes via query token or loopback cookie, re-validates the resolved target on each request, strips CSP headers/meta for HTML, injects `src-tauri/agent/annotation-agent.js` (built from `src/annotation-agent.ts`), rewrites heads for subresources, and raw-relays websocket upgrades. Inside the iframe, the agent sends `postMessage` to the parent. `AnnotationsPanel` (`src/annotations.ts`) validates every incoming message against the known proxy origin and iframe `contentWindow` before dispatching into `reduce` (`annotation-core.ts`). The Annotate button toggles arm/disarm; picks flow back through `onMessage → dispatch → render`. Invariant: the dev browser always loads through the loopback proxy; parent↔agent communication is validated postMessage only — no shared globals.
+
 **Self-update:**
 Boot schedules `mountUpdater` → silent `checkForUpdate` after 12s and every 6h. When a newer release exists, the titlebar `Update` pill downloads, installs, and relaunches. Workspace menu `check for updates…` calls the same controller in user-initiated mode, which reports both "up to date" and "update available" outcomes instead of staying silent.
 
 **Settings:**
 App menu / workspace wordmark menu / `Cmd+,` / Command Palette Settings → `main.openSettings` → `openSettingsModal`, which reuses live `settings`, persists via `saveSettings`, and applies changes through `applySettings`.
+
+**Open editors switcher:**
+Titlebar `btn-open-editors` → `main.openOpenEditorsMenu` → reads `editor.tabs` across panes → renders `.menu-card` rows with active/dirty/path state → row click calls `editor.activate(tab)` in the owning pane.
+
+**Prompt composer:**
+Titlebar `btn-composer` → `main.setComposer` / `ensureComposer` → `mountComposer({ root, getFiles, getSelection })`. The composer loads trusted tag config from `.sutra/prompt-tags.json`, scans user/project `.claude` assets through `scan_agent_assets`, polls `pty_list_agents` for live Claude/Codex terminals + idle/busy gating, builds XML-tagged prompt text via `buildPrompt`, then stages or submits through `deliverToPty` → `wrapForDelivery` → `pty_write`.
 
 **Git bar:**
 `createGitBar(#branch-whisper)` refreshes from native `fs-changed` events plus a 10s fallback poll → `ipc.gitBranch` + `ipc.gitAheadBehind` + `ipc.gitWorktrees` + `ipc.gitBranches` → Rust `git_branch`, `git_ahead_behind`, `git_worktrees`, `git_branches` → renders branch whisper button + branch/worktree dropdown. `main.pollGitIndex` resolves `.git/index` once per workspace, including linked worktree `.git` pointer files.
@@ -148,11 +169,13 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 | Check Rust | `cargo check --manifest-path src-tauri/Cargo.toml` |
 | Run Rust tests | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | CI | `.github/workflows/ci.yml` runs Node 20 + Rust stable on macOS with `npm ci`, `npm run build`, `npm test`, `cargo test --lib` |
-| Release CI | `.github/workflows/release.yml` creates one draft release, serializes macOS universal + Windows uploads so updater `latest.json` merges cleanly, then publishes the release as latest |
+| Release CI | `.github/workflows/release.yml` creates one draft release, serializes macOS universal + Windows + Linux uploads so updater `latest.json` merges cleanly, then publishes the release as latest |
 
 ## Test Strategy
 
 - Workspace tab filtering/session restore, breadcrumb/menu models, settings, recents, agent presentation helpers, language detection, split-drop helpers, terminal groups/drawer state, native Edit menu structure: `npm test`
+- Composer prompt assembly, tag-config normalization, asset/file completion, draft/history persistence, shortcut helpers, and tag-manager pure helpers: `npm test`
+- Proxy target parsing/auth/injection/rewrite helpers: `cargo test --manifest-path src-tauri/Cargo.toml proxy::tests`
 - Rust language engine outline/hover/completion/goto-definition behavior: `cargo test --manifest-path src-tauri/Cargo.toml lang::tests -- --nocapture`
 - Agent snapshot/process/mutation/revert logic: `cargo test --manifest-path src-tauri/Cargo.toml agent_tracker`
 - MCP path, preview, edit-ingest hook helpers, and UI-reply registry logic: `cargo test --manifest-path src-tauri/Cargo.toml mcp`
@@ -177,6 +200,10 @@ Integrated-terminal agent calls local `sutra` MCP tools over tokenized `127.0.0.
 - Safe revert compares current bytes with the last observed candidate state; later external edits become manual-review-only.
 - MCP UI-only reads depend on the frontend event loop replying within 2s; blocked UI returns a timeout instead of hanging, and stale pending entries must be removed.
 - Direct command hint closes the first-poll race for plain `claude`/`codex`; aliases/wrappers rely on process command-line ancestry detection.
+- Composer terminal targeting relies on Unix `ps`/`lsof` or Linux `/proc` cwd inspection plus PTY output quiesce timing; unsupported platforms or prompt-text drift can hide valid agent terminals or misclassify busy vs awaiting-input state.
+- Composer custom tags are trust-gated, but trusted `.sutra/prompt-tags.json` still shapes prompt structure/defaults; malformed trusted config falls back to defaults rather than partially applying.
+- `proxy.rs` is a new loopback trust boundary: target validation depends on per-request DNS resolution, auth is split between query token and loopback cookie, and response rewriting currently strips CSP to inject a local script. Regressions here can broaden proxy scope or break subresources/websockets silently.
+- `src-tauri/agent/annotation-agent.js` is currently a checked-in build artifact/placeholder consumed via `include_str!`; if the generated script and Rust injection assumptions drift, the proxy can compile while the browser annotation path stays functionally inert.
 - Terminal paste should stay on xterm/native Edit responders; adding a parallel `Mod+V` writer path duplicates input.
 - Terminal split moves existing `Term` + xterm DOM between group hosts; no PTY re-spawn on group move.
 - Folder switch kills all PTYs; next visible terminal starts in opened cwd.

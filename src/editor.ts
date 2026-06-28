@@ -1021,6 +1021,8 @@ export class EditorManager {
   onDocChanged?: () => void;
   /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
   onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
+  /** Fires when an HTML preview should open in the browser pane (main.ts wires it). */
+  onHtmlPreview?: (url: string) => void;
 
   private container: HTMLElement;
   private splitter: HTMLElement | null = null;
@@ -1525,6 +1527,13 @@ export class EditorManager {
     if (!source) return;
     const { previewKind } = await import("./preview");
     if (!previewKind(source.name)) return; // not md/html → no-op
+
+    // HTML previews go to the browser pane, not the editor split.
+    if (previewKind(source.name) === "html") {
+      const url = await this.previewRenderValue(source);
+      this.onHtmlPreview?.(url);
+      return;
+    }
 
     // already previewing this exact source in the right pane → close it
     const right = this.panes[1];

@@ -35,3 +35,7 @@ plans*
 .codex/
 design/
 .claude/
+
+# Tauri updater signing keys — NEVER commit the private key.
+*.key
+sutra.key.pub
