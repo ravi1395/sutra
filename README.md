@@ -288,10 +288,14 @@ preview loopback servers.
 
 | Tool | Argument | Effect |
 |---|---|---|
-| `render_html` | `html` | Renders self-contained HTML (scripts run in an isolated localhost iframe). |
-| `render_markdown` | `md` | Renders sanitized Markdown. |
-| `render_diagram` | `mermaid` | Renders a Mermaid diagram (`securityLevel: strict`). |
-| `open_preview` | `path` | Opens an existing workspace `.html`/`.md` file in the preview pane. |
+| `render_html` | `html` | Renders self-contained HTML in the browser pane (scripts run in an isolated localhost iframe). |
+| `render_markdown` | `md` | Renders sanitized Markdown in the preview pane. |
+| `render_diagram` | `mermaid` | Renders a Mermaid diagram in the preview pane (`securityLevel: strict`). |
+| `open_preview` | `path` | Opens an existing workspace file: `.html` in the browser pane, `.md` in the preview pane. |
+
+HTML renders (`render_html`, `open_preview` on `.html`, and the manual preview
+toggle on an `.html` tab) open in the **browser pane** with its URL bar and
+annotation support; Markdown and Mermaid render in the editor's **preview split**.
 
 ### Interactive tools
 
@@ -340,18 +344,19 @@ root** and reject paths outside it. Live reads (`get_open_tabs`,
 `get_selection`) round-trip to the frontend with a 2s timeout; other reads are
 served directly from Rust.
 
-## Dev Browser Annotations
+## Browser and Preview Annotations
 
-Sutra's browser pane can annotate live HTML elements in a running dev app and
-expose those annotations to the in-app agent via the `get_annotations` MCP
-tool.
+Sutra can annotate live HTML elements in the browser pane — whether a live dev
+page or an agent-rendered HTML mockup (both open there) — then expose those
+annotations to the in-app agent via the `get_annotations` MCP tool.
 
 ### What it does
 
-Click **Annotate** in the browser pane toolbar to enter picker mode. Hover over
-any element in the page — it highlights with a red outline — then click to
-attach a numbered annotation. A small inline textarea appears over the element
-so you can type design feedback. Each annotation records:
+Open a live dev page or agent HTML mockup, then click **Annotate** to enter
+picker mode for the active pane. Hover over any element — it highlights with a
+red outline — then click to attach a numbered annotation. A small inline
+textarea appears over the element so you can type design feedback. Each
+annotation records:
 
 - a sequential number and your feedback text
 - the element's stable CSS selector
@@ -361,31 +366,32 @@ so you can type design feedback. Each annotation records:
 - locator hints — `data-testid`, `role`, `aria-label`, and visible text (up to
   80 chars)
 
-Annotations appear in the side list beside the browser pane, scoped to the
-current SPA route. Ask the in-app agent `review my annotations` (or any prompt
-that calls the `get_annotations` MCP tool) to pull the current list into
-context.
+Annotations appear in the side list, scoped to the current route. Ask the
+in-app agent `review my annotations` (or any prompt that calls the
+`get_annotations` MCP tool) to pull the current list into context.
 
 ### How it works
 
-Dev URLs load through a loopback reverse proxy (`src-tauri/src/proxy.rs`).
-When the proxy serves an HTML response it strips any `Content-Security-Policy`
-headers and `<meta http-equiv="Content-Security-Policy">` tags, then injects
-the annotation agent script (`src-tauri/agent/annotation-agent.js`) immediately
-after the opening `<head>` tag. The script receives the Tauri parent origin and
-the dev target origin as injected globals so it can post messages only to the
-real parent window.
+Dev URLs load through a loopback reverse proxy (`src-tauri/src/proxy.rs`);
+agent mockups load through the token-gated static preview server
+(`src-tauri/src/preview_server.rs`). Both inject the annotation agent script
+(`src-tauri/agent/annotation-agent.js`) into HTML. The script receives the Tauri
+parent origin and the serving iframe origin as injected globals so it can post
+messages only to the real parent window.
 
-The parent-side `AnnotationsPanel` (`src/annotations.ts`) validates every
-incoming `postMessage` against the known proxy origin and iframe `contentWindow`
-before acting on it. The agent notifies the parent on SPA route changes
+The parent-side `AnnotationsPanel` (`src/annotations.ts`) retargets to the
+active HTML iframe and validates every incoming `postMessage` against that
+iframe's known origin and `contentWindow` before acting on it. The agent
+notifies the parent on SPA route changes
 (history API patches + `popstate` + `hashchange`) so the side list stays scoped
 to the current route.
 
 ### How to use
 
-1. Open a localhost dev URL in the browser pane (e.g. `http://localhost:5173`).
-2. Click **Annotate** in the browser toolbar — the button turns active.
+1. Open a localhost dev URL in the browser pane (e.g. `http://localhost:5173`),
+   or ask the agent to render an HTML mockup (`render_html`) — it opens in the
+   browser pane.
+2. Click **Annotate** — the button turns active for the current pane.
 3. Hover over any element; it highlights with a red outline.
 4. Click the element — a pin number appears and an inline textarea opens.
 5. Type your feedback; it saves as you type and appears in the side list.
