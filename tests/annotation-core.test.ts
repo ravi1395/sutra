@@ -25,3 +25,21 @@ test("selectorFor builds nth-of-type path to nearest id ancestor", () => {
   const li: NodeShape = { id: null, tag: "li", typeIndex: 3, parent: ul };
   assert.equal(selectorFor(li), "#app > ul:nth-of-type(1) > li:nth-of-type(3)");
 });
+
+import { routeKey } from "../src/annotation-core";
+
+test("routeKey uses target origin + pathname + search, excludes hash by default", () => {
+  const loc = { pathname: "/products", search: "?id=7", hash: "#reviews" };
+  assert.equal(
+    routeKey("http://localhost:5173", loc),
+    "http://localhost:5173/products?id=7",
+  );
+});
+
+test("routeKey includes hash for hash-routing", () => {
+  const loc = { pathname: "/", search: "", hash: "#/dashboard" };
+  assert.equal(
+    routeKey("http://localhost:5173", loc, { hashRouting: true }),
+    "http://localhost:5173/#/dashboard",
+  );
+});

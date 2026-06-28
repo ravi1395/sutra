@@ -31,3 +31,11 @@ export function selectorFor(node: NodeShape): string {
   }
   return parts.join(" > ");
 }
+
+export interface LocationShape { pathname: string; search: string; hash: string }
+export interface RouteOpts { hashRouting?: boolean }
+
+export function routeKey(targetOrigin: string, loc: LocationShape, opts: RouteOpts = {}): string {
+  const base = `${targetOrigin}${loc.pathname}${loc.search}`;
+  return opts.hashRouting ? `${base}${loc.hash}` : base;
+}
