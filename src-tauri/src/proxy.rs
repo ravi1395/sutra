@@ -142,7 +142,7 @@ fn head_insert_index(lower: &str) -> Option<usize> {
 // src-tauri/src/proxy.rs  (append; std-only, blocking, thread-per-connection)
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -168,6 +168,11 @@ fn agent_script(parent_origin: &str, target_origin: &str) -> String {
 #[derive(Default)]
 pub struct ProxyServerState {
     port: Mutex<Option<u16>>,
+    // Target is bound server-side via `proxy_url()` (a trusted Tauri command) and
+    // is the ONLY thing the proxy routes to. The per-request `u` param is never
+    // trusted for target selection, so hosted page content cannot pivot the proxy
+    // to other loopback services (confused-deputy SSRF).
+    target: Arc<Mutex<Option<Target>>>,
 }
 
 impl ProxyServerState {
@@ -179,19 +184,28 @@ impl ProxyServerState {
         }
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let target = Arc::clone(&self.target);
         thread::Builder::new()
             .name("sutra-annotation-proxy".into())
             .spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let tok = token.clone();
+                    let bound = Arc::clone(&target);
                     thread::spawn(move || {
-                        let _ = handle_conn(stream, &tok);
+                        let _ = handle_conn(stream, &tok, &bound);
                     });
                 }
             })
             .map_err(|e| e.to_string())?;
         *guard = Some(port);
         Ok(port)
+    }
+
+    /// Bind the proxy's upstream target. Only callable via the trusted `proxy_url`
+    /// command — never from request data.
+    fn set_target(&self, t: Target) -> Result<(), String> {
+        *self.target.lock().map_err(|e| e.to_string())? = Some(t);
+        Ok(())
     }
 }
 
@@ -201,8 +215,9 @@ pub fn proxy_url(
     token: tauri::State<LocalAuthToken>,
     target: String,
 ) -> Result<String, String> {
-    // Validate up-front so the UI gets an immediate error for bad targets.
-    parse_target(&target)?;
+    // Validate and bind the target server-side; the proxy routes only here.
+    let parsed = parse_target(&target)?;
+    state.set_target(parsed)?;
     let port = state.ensure(token.value().to_string())?;
     let encoded = percent_encode_query(&target);
     Ok(with_auth_token(
@@ -223,6 +238,7 @@ fn percent_encode_query(s: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn percent_decode_query(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::new();
@@ -303,30 +319,24 @@ fn write_status(s: &mut TcpStream, status: &str, msg: &str) {
     let _ = s.write_all(body.as_bytes());
 }
 
-fn handle_conn(mut client: TcpStream, token: &str) -> io::Result<()> {
+fn handle_conn(
+    mut client: TcpStream,
+    token: &str,
+    bound: &Mutex<Option<Target>>,
+) -> io::Result<()> {
     let _ = client.set_read_timeout(Some(Duration::from_secs(30)));
     let Some(req) = read_head(&mut client)? else {
         return Ok(());
     };
     let (path, query) = req.target_path_query();
 
-    // The very first navigation carries ?u=<target>&token=. Subsequent
-    // subresource requests are same-origin and carry the cookie + their own
-    // path; we resolve the target from the `u` param if present, else default
-    // to "the dev origin of this proxy" — for the spike-simple model we require
-    // `u` on the top navigation and reconstruct the origin for subresources by
-    // reusing the most recent target. To keep this stateless and robust, the
-    // injected <base> approach is avoided; instead the agent rewrites nothing and
-    // root-relative subresources include `u` via the cookie-carried origin.
-    //
-    // Concretely: target origin is taken from `u` when present; otherwise the
-    // request path is forwarded to the same dev origin recorded at navigation.
-    let target_str = query
+    // Presence of `u` marks the top navigation (vs a same-origin subresource);
+    // used only to decide whether to set the auth cookie. It is NOT used to pick
+    // the upstream target — see below.
+    let is_navigation = query
         .as_deref()
-        .and_then(|q| {
-            q.split('&')
-                .find_map(|kv| kv.strip_prefix("u=").map(percent_decode_query))
-        });
+        .map(|q| q.split('&').any(|kv| kv.starts_with("u=")))
+        .unwrap_or(false);
 
     // Auth: query token OR cookie.
     let cookie = req.get("cookie");
@@ -335,30 +345,18 @@ fn handle_conn(mut client: TcpStream, token: &str) -> io::Result<()> {
         return Ok(());
     }
 
-    let target = match &target_str {
-        Some(t) => match parse_target(t) {
-            Ok(t) => t,
-            Err(e) => {
-                write_status(&mut client, "400 Bad Request", &e);
-                return Ok(());
-            }
-        },
-        None => {
-            // Subresource with no `u`: forward path to the dev origin encoded in
-            // the Referer's `u`, else reject. (First iteration: require navigation
-            // first so the cookie+referer are present.)
-            match req
-                .get("referer")
-                .and_then(|r| r.split("u=").nth(1))
-                .map(|r| percent_decode_query(r.split('&').next().unwrap_or("")))
-                .and_then(|t| parse_target(&t).ok())
-            {
-                Some(t) => t,
-                None => {
-                    write_status(&mut client, "400 Bad Request", "missing target");
-                    return Ok(());
-                }
-            }
+    // Route ONLY to the server-side bound target. The request's `u` param is
+    // untrusted and deliberately ignored here, so hosted page content cannot
+    // redirect the proxy at other loopback services (confused-deputy SSRF).
+    let target = match bound.lock().map(|g| g.clone()) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            write_status(&mut client, "400 Bad Request", "no proxy target bound");
+            return Ok(());
+        }
+        Err(_) => {
+            write_status(&mut client, "500 Internal Server Error", "state poisoned");
+            return Ok(());
         }
     };
 
@@ -406,7 +404,7 @@ fn handle_conn(mut client: TcpStream, token: &str) -> io::Result<()> {
         let body = read_full_body(&mut upstream, &resp)?;
         let script = agent_script(PARENT_ORIGIN, &target.origin());
         let injected = inject_agent(&body, &script);
-        let out = rewrite_html_response_head(&resp, injected.len(), token, target_str.is_some());
+        let out = rewrite_html_response_head(&resp, injected.len(), token, is_navigation);
         client.write_all(&out)?;
         client.write_all(&injected)?;
     } else {
@@ -706,6 +704,17 @@ mod tests {
     fn strips_only_proxy_params() {
         assert_eq!(strip_proxy_params("u=http%3A%2F%2Fx&token=abc&a=1"), "a=1");
         assert_eq!(strip_proxy_params("a=1&b=2"), "a=1&b=2");
+    }
+
+    #[test]
+    fn set_target_binds_server_side() {
+        // Target is bound via the trusted command path and is independent of any
+        // request `u` param (the SSRF fix: requests cannot rebind the target).
+        let state = ProxyServerState::default();
+        state.set_target(parse_target("http://127.0.0.1:5173").unwrap()).unwrap();
+        let bound = state.target.lock().unwrap().clone().unwrap();
+        assert_eq!(bound.host, "127.0.0.1");
+        assert_eq!(bound.port, 5173);
     }
 
     #[test]
