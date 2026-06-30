@@ -250,9 +250,14 @@ void onDrive((d) => {
   }
 });
 
+// Track the origin of the currently active prompt URL so the bridge listener
+// can reject messages from any other source.
+let promptOrigin: string | null = null;
+
 // Show an MCP interactive prompt in the preview pane; the iframe posts the
 // user's submission back via window.postMessage (see the bridge listener below).
 void onPromptRequest((r) => {
+  promptOrigin = new URL(r.url).origin;
   void editor
     .showAgentPreview({ kind: "html", url: r.url })
     .catch((e) => console.error("agent prompt failed", e));
@@ -260,7 +265,9 @@ void onPromptRequest((r) => {
 
 // Bridge: rendered prompt iframes postMessage their result tagged with the
 // pending request id; forward to the MCP reply command to resolve prompt_user.
+// Guard on origin to prevent spoofed replies from other frames.
 window.addEventListener("message", (e) => {
+  if (e.origin !== promptOrigin) return;
   const d = e.data as { __sutraPrompt?: boolean; id?: number; data?: unknown };
   if (d && d.__sutraPrompt === true && typeof d.id === "number") {
     void mcpUiReply(d.id, d.data ?? {});
