@@ -272,7 +272,7 @@ export class TerminalManager {
         // Regular char: add to input (simple; doesn't handle cursor movement).
         t.currentInput += d;
       }
-      const send = () => void ptyWrite(id, d).catch(() => {});
+      const send = () => void ptyWrite(id, d).catch((e) => console.error("[sutra] ptyWrite failed", id, e));
       if (submittedCommand && this.cwd && isIntegratedAgentCommand(submittedCommand)) {
         t.agentAttached = true;
         this.renderTabs();

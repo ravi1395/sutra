@@ -14,7 +14,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Shared so pty_write can grab a handle and drop the PtyState lock before a
+    /// (potentially blocking) write — a full PTY input buffer must not freeze the
+    /// whole terminal subsystem.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     pid: Option<u32>,
     /// Last time the reader thread saw output; drives the quiesce signal.
@@ -102,7 +105,7 @@ pub fn pty_spawn(
     drop(pair.slave); // parent no longer needs the slave fd
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
 
     let last_output = Arc::new(Mutex::new(Instant::now()));
     let tail = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -159,13 +162,17 @@ pub fn pty_spawn(
 
 #[tauri::command]
 pub fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
-    let mut map = state.0.lock().unwrap();
-    let session = map.get_mut(&id).ok_or("no such terminal")?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string())?;
-    session.writer.flush().map_err(|e| e.to_string())
+    // Grab the writer handle under the map lock, then drop the map lock before
+    // the blocking write so a full PTY input buffer can't stall spawn/kill/
+    // resize/list (all share PtyState).
+    let writer = {
+        let map = state.0.lock().unwrap();
+        let session = map.get(&id).ok_or("no such terminal")?;
+        Arc::clone(&session.writer)
+    };
+    let mut w = writer.lock().unwrap();
+    w.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    w.flush().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
