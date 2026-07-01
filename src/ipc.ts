@@ -96,6 +96,15 @@ export const agentTrackingRevert = (root: string) =>
   invoke<AgentRevertResult>("agent_tracking_revert", { root });
 export const agentBaseContent = (root: string, path: string) =>
   invoke<string | null>("agent_base_content", { root, path });
+export const agentRevertHunk = (
+  root: string,
+  path: string,
+  newFrom: number,
+  newTo: number,
+  oldText: string[],
+) => invoke<AgentTrackingStatus>("agent_revert_hunk", { root, path, newFrom, newTo, oldText });
+export const agentAcceptPath = (root: string, path: string) =>
+  invoke<AgentTrackingStatus>("agent_accept_path", { root, path });
 
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });

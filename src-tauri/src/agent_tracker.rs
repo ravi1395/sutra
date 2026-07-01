@@ -195,6 +195,84 @@ impl Tracker {
         }
     }
 
+    /// Accept all AI changes in one file: fold current content into the baseline
+    /// and drop it from pending (the per-file rebase).
+    fn accept_path(&mut self, root: &Path, path: &Path) -> Result<AgentTrackingStatus, String> {
+        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+            return Ok(disabled_status());
+        };
+        match fs::read(path).ok() {
+            Some(bytes) => {
+                let signature = signature_for_current_or_bytes(path, &bytes, session.last_scan.get(path));
+                session.baseline.insert(path.to_path_buf(), signature.clone());
+                session.last_scan.insert(path.to_path_buf(), signature);
+            }
+            None => {
+                session.baseline.remove(path);
+                session.last_scan.remove(path);
+            }
+        }
+        session.pending.remove(path);
+        Ok(session_status(session))
+    }
+
+    /// Reject one AI hunk: restore its base slice into the file without marking
+    /// the file human-touched. Refuses if the file changed after the last agent
+    /// observation or is already human-touched (reuses the safe-revert stance).
+    fn revert_hunk(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        new_from: usize,
+        new_to: usize,
+        old_text: &[String],
+    ) -> Result<AgentTrackingStatus, String> {
+        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+            return Ok(disabled_status());
+        };
+        let Some(change) = session.pending.get(path) else {
+            return Ok(session_status(session));
+        };
+        let current = fs::read(path).map_err(|error| error.to_string())?;
+        if change.human_touched || change.observed.as_ref() != Some(&current) {
+            if let Some(change) = session.pending.get_mut(path) {
+                change.human_touched = true;
+            }
+            return Ok(session_status(session));
+        }
+        let current_str = String::from_utf8(current).map_err(|error| error.to_string())?;
+        let next = revert_hunk_in(&current_str, new_from, new_to, old_text);
+        fs::write(path, next.as_bytes()).map_err(|error| error.to_string())?;
+
+        let baseline = session.baseline.get(path).cloned();
+        let now = fs::read(path).ok();
+        if bytes_option_matches_signature(now.as_deref(), baseline.as_ref()) {
+            session.pending.remove(path);
+            match now.as_deref() {
+                Some(bytes) => {
+                    let signature = signature_for_current_or_bytes(path, bytes, session.last_scan.get(path));
+                    session.last_scan.insert(path.to_path_buf(), signature);
+                }
+                None => {
+                    session.last_scan.remove(path);
+                }
+            }
+        } else if let Some(change) = session.pending.get_mut(path) {
+            change.observed = now.clone();
+            change.status = match (baseline.as_ref(), now.as_ref()) {
+                (None, Some(_)) => "A",
+                (Some(_), None) => "D",
+                _ => "M",
+            }
+            .to_string();
+            if let Some(bytes) = now.as_deref() {
+                let signature = signature_for_current_or_bytes(path, bytes, session.last_scan.get(path));
+                session.last_scan.insert(path.to_path_buf(), signature);
+            }
+        }
+        Ok(session_status(session))
+    }
+
     fn revert(&mut self, root: &Path) -> Result<AgentRevertResult, String> {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(AgentRevertResult::default());
@@ -785,6 +863,21 @@ fn git_head_id(root: &Path) -> Option<String> {
         .map(|oid| oid.to_string())
 }
 
+/// Replace current lines [new_from, new_to) with `old_text`, mirroring the
+/// frontend diff's split/join on '\n' so line indices line up. Out-of-range
+/// bounds are clamped; an inverted range returns the input unchanged.
+pub fn revert_hunk_in(content: &str, new_from: usize, new_to: usize, old_text: &[String]) -> String {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    let from = new_from.min(lines.len());
+    let to = new_to.min(lines.len());
+    if from > to {
+        return content.to_string();
+    }
+    let replacement: Vec<&str> = old_text.iter().map(|s| s.as_str()).collect();
+    lines.splice(from..to, replacement);
+    lines.join("\n")
+}
+
 fn revert_safe_changes(pending: &mut BTreeMap<PathBuf, PendingChange>) -> AgentRevertResult {
     let mut result = AgentRevertResult::default();
     let paths = pending.keys().cloned().collect::<Vec<_>>();
@@ -840,6 +933,35 @@ pub fn agent_tracking_begin(
     root: String,
 ) -> Result<AgentTrackingStatus, String> {
     state.0.lock().unwrap().poll(Path::new(&root), true, true)
+}
+
+#[tauri::command]
+pub fn agent_revert_hunk(
+    state: State<'_, AgentTrackerState>,
+    root: String,
+    path: String,
+    new_from: usize,
+    new_to: usize,
+    old_text: Vec<String>,
+) -> Result<AgentTrackingStatus, String> {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .revert_hunk(Path::new(&root), Path::new(&path), new_from, new_to, &old_text)
+}
+
+#[tauri::command]
+pub fn agent_accept_path(
+    state: State<'_, AgentTrackerState>,
+    root: String,
+    path: String,
+) -> Result<AgentTrackingStatus, String> {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .accept_path(Path::new(&root), Path::new(&path))
 }
 
 #[tauri::command]
@@ -1289,6 +1411,62 @@ mod tests {
             agent_descendant_kind(&shells, &codex_only),
             Some(AgentKind::Codex)
         ));
+    }
+
+    #[test]
+    fn revert_hunk_in_replaces_only_the_target_slice() {
+        let current = "a\nAGENT1\nAGENT2\nc\n";
+        let out = revert_hunk_in(current, 1, 3, &["b".to_string()]);
+        assert_eq!(out, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn revert_hunk_in_reinserts_a_pure_deletion() {
+        let current = "a\nc\n";
+        let out = revert_hunk_in(current, 1, 1, &["b".to_string()]);
+        assert_eq!(out, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn revert_hunk_in_removes_a_pure_addition() {
+        let current = "a\nNEW\nb\n";
+        let out = revert_hunk_in(current, 1, 2, &[]);
+        assert_eq!(out, "a\nb\n");
+    }
+
+    #[test]
+    fn accept_path_drops_pending_and_advances_baseline() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "agent-final").unwrap();
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            path.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: false,
+                observed: Some(b"agent-final".to_vec()),
+                restore: RestoreSource::Bytes(b"base".to_vec()),
+            },
+        );
+        let mut tracker = Tracker {
+            session: Some(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "h".into(),
+                baseline: scan_workspace(dir.path(), None).unwrap(),
+                last_scan: scan_workspace(dir.path(), None).unwrap(),
+                pending,
+                agent_active: false,
+                settle_polls: 0,
+                report_mode: true,
+            }),
+            ..Tracker::default()
+        };
+
+        tracker.accept_path(dir.path(), &path).unwrap();
+        let session = tracker.session.as_ref().unwrap();
+        assert!(!session.pending.contains_key(&path));
+        assert!(bytes_match_signature(b"agent-final", &session.baseline[&path]));
     }
 
     #[test]

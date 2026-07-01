@@ -26,6 +26,8 @@ import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointS
 import {
   agentTrackingPoll,
   agentBaseContent,
+  agentRevertHunk,
+  agentAcceptPath,
   listDir,
   readFile,
   writeFile,
@@ -695,8 +697,22 @@ async function refreshDiffFileList(): Promise<void> {
         const file = files.find((candidate) => candidate.path === path);
         void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
       },
-      onAccept: (_path: string) => {}, // wired in Task 3
-      onReject: (_path: string, _hunk) => {}, // wired in Task 3
+      onAccept: (path: string) => {
+        void agentAcceptPath(root, path).then((next) => {
+          agentStatus = next;
+          editor.setAgentChanges(next.changes);
+          void refreshDiffFileList();
+        });
+      },
+      onReject: (path: string, hunk) => {
+        void agentRevertHunk(root, path, hunk.newFrom, hunk.newTo, hunk.oldText).then((next) => {
+          agentStatus = next;
+          editor.setAgentChanges(next.changes);
+          const tab = editor.tabByPath(path);
+          if (tab && !tab.dirty) void editor.openLatestFile(path, "M");
+          void refreshDiffFileList();
+        });
+      },
     });
   } catch (e) {
     // Silently skip on error
@@ -1046,6 +1062,10 @@ async function pollAgentChanges(): Promise<void> {
     if (currentRoot !== root) return;
     agentStatus = next;
     editor.setAgentChanges(next.changes);
+    editor.setAgentActive(
+      next.agentActive,
+      next.changes.filter((c) => !c.humanTouched).map((c) => c.path),
+    );
     renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
