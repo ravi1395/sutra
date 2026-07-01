@@ -72,6 +72,7 @@ pub fn run() {
             agent_tracker::agent_tracking_poll,
             agent_tracker::agent_tracking_accept,
             agent_tracker::agent_tracking_revert,
+            agent_tracker::agent_base_content,
             fs_cmds::list_dir,
             fs_cmds::read_file,
             fs_cmds::write_file,

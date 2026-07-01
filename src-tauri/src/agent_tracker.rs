@@ -184,6 +184,17 @@ impl Tracker {
         Ok(session_status(session))
     }
 
+    /// Pre-agent content for a pending path: the base the agent edited from.
+    /// `Bytes` → original text; `Delete` (agent-created) → empty; `Unsafe`/absent → None.
+    fn base_content(&self, root: &Path, path: &Path) -> Option<String> {
+        let session = self.session.as_ref().filter(|session| session.root == root)?;
+        match &session.pending.get(path)?.restore {
+            RestoreSource::Bytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+            RestoreSource::Delete => Some(String::new()),
+            RestoreSource::Unsafe => None,
+        }
+    }
+
     fn revert(&mut self, root: &Path) -> Result<AgentRevertResult, String> {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(AgentRevertResult::default());
@@ -832,6 +843,19 @@ pub fn agent_tracking_begin(
 }
 
 #[tauri::command]
+pub fn agent_base_content(
+    state: State<'_, AgentTrackerState>,
+    root: String,
+    path: String,
+) -> Result<Option<String>, String> {
+    Ok(state
+        .0
+        .lock()
+        .unwrap()
+        .base_content(Path::new(&root), Path::new(&path)))
+}
+
+#[tauri::command]
 pub fn agent_tracking_poll(
     state: State<'_, AgentTrackerState>,
     root: String,
@@ -1265,6 +1289,63 @@ mod tests {
             agent_descendant_kind(&shells, &codex_only),
             Some(AgentKind::Codex)
         ));
+    }
+
+    #[test]
+    fn base_content_maps_restore_source_to_pre_agent_text() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let modified = root.join("m.txt");
+        let created = root.join("c.txt");
+        let unsafe_path = root.join("u.txt");
+
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            modified.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: false,
+                observed: Some(b"new".to_vec()),
+                restore: RestoreSource::Bytes(b"old".to_vec()),
+            },
+        );
+        pending.insert(
+            created.clone(),
+            PendingChange {
+                status: "A".into(),
+                human_touched: false,
+                observed: Some(b"new".to_vec()),
+                restore: RestoreSource::Delete,
+            },
+        );
+        pending.insert(
+            unsafe_path.clone(),
+            PendingChange {
+                status: "M".into(),
+                human_touched: false,
+                observed: Some(b"new".to_vec()),
+                restore: RestoreSource::Unsafe,
+            },
+        );
+
+        let tracker = Tracker {
+            session: Some(TrackingSession {
+                root: root.clone(),
+                head: "h".into(),
+                baseline: BTreeMap::new(),
+                last_scan: BTreeMap::new(),
+                pending,
+                agent_active: false,
+                settle_polls: 0,
+                report_mode: true,
+            }),
+            ..Tracker::default()
+        };
+
+        assert_eq!(tracker.base_content(&root, &modified), Some("old".to_string()));
+        assert_eq!(tracker.base_content(&root, &created), Some(String::new()));
+        assert_eq!(tracker.base_content(&root, &unsafe_path), None);
+        assert_eq!(tracker.base_content(&root, &root.join("absent.txt")), None);
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {

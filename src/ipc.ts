@@ -94,6 +94,8 @@ export const agentTrackingAccept = (root: string) =>
   invoke<AgentTrackingStatus>("agent_tracking_accept", { root });
 export const agentTrackingRevert = (root: string) =>
   invoke<AgentRevertResult>("agent_tracking_revert", { root });
+export const agentBaseContent = (root: string, path: string) =>
+  invoke<string | null>("agent_base_content", { root, path });
 
 export const previewServerUrl = (root: string, path: string) =>
   invoke<string>("preview_server_url", { root, path });
