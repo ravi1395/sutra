@@ -683,10 +683,14 @@ async function refreshDiffFileList(): Promise<void> {
         if (!file || file.status === "D") return [];
         try {
           const source = baseSourceFor(agentStatus.changes.find((c) => c.path === path));
+          // An empty agent base (agent-created file, no pre-agent content) falls
+          // through to git HEAD so a file that exists in HEAD still shows a real
+          // per-hunk diff instead of the whole file as one added hunk.
+          const agentBase = source === "agent" ? await agentBaseContent(root, path).catch(() => null) : null;
           const base =
-            source === "agent"
-              ? ((await agentBaseContent(root, path).catch(() => null)) ?? (await gitHeadContent(path).catch(() => "")) ?? "")
-              : ((await gitHeadContent(path).catch(() => "")) ?? "");
+            (agentBase && agentBase.length > 0 ? agentBase : null) ??
+            (await gitHeadContent(path).catch(() => "")) ??
+            "";
           const current = await readFile(path);
           return hunkSummaries(computeLineDiff(base, current).hunks);
         } catch {
@@ -1089,7 +1093,9 @@ async function viewChangedPath(path: string): Promise<void> {
   try {
     if (change && baseSourceFor(change) === "agent" && currentRoot) {
       const base = await agentBaseContent(currentRoot, path).catch(() => null);
-      if (base != null) editor.setAgentBaseOverride(path, base);
+      // Skip empty bases (agent-created files) so the editor gutter falls back to
+      // git HEAD instead of rendering the whole file as one added hunk.
+      if (base != null && base.length > 0) editor.setAgentBaseOverride(path, base);
     }
     await editor.openLatestFile(path, change?.status ?? "M");
     tree.setActive(path);
