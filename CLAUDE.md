@@ -74,7 +74,7 @@ tests/  one .test.ts per frontend module (node:test)
 - Menu: in-window bar is source of truth; native macOS menu suppressed in `lib.rs`
 
 ## State
-- Version: v1.4.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
+- Version: v1.4.1 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
 - Tests: `npm test` → 216 pass; `cargo test` (inside src-tauri/) for Rust
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, etc.) via `mcp.rs`
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
