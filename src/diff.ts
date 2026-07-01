@@ -210,6 +210,9 @@ export class DiffViewer {
       onHunkPick: (path: string, startLine: number) => void;
       onAccept?: (path: string) => void;
       onReject?: (path: string, hunk: HunkRow) => void;
+      // Gate: only agent-tracked files can be reject/accept'd; others (human/git
+      // changes) get no controls and use the in-editor gutter revert instead.
+      reviewable?: (path: string) => boolean;
     },
   ): void {
     const nextKey = files.map((file) => `${file.status}\0${file.path}`).join("\0");
@@ -249,7 +252,8 @@ export class DiffViewer {
       name.title = file.path; // Full path in tooltip
 
       row.append(chevron, status, name);
-      if (handlers.onAccept) {
+      const reviewable = handlers.reviewable?.(file.path) ?? true;
+      if (handlers.onAccept && reviewable) {
         const accept = document.createElement("button");
         accept.className = "diff-file-action accept";
         accept.textContent = "accept";
@@ -286,7 +290,7 @@ export class DiffViewer {
           label.className = "diff-hunk-label";
           label.textContent = hr.label;
           hrow.append(dot, label);
-          if (handlers.onReject) {
+          if (handlers.onReject && reviewable) {
             const reject = document.createElement("button");
             reject.className = "diff-hunk-action reject";
             reject.textContent = "reject";

@@ -54,7 +54,7 @@ import {
   resolveDebugAdapter,
   type AgentTrackingStatus,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, mergeChangedFiles, reviewablePaths, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -676,8 +676,10 @@ async function refreshDiffFileList(): Promise<void> {
     if (currentRoot !== root) return;
     const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
+    const aiPaths = reviewablePaths(agentStatus.changes);
     diffViewer.renderFileList(files, activePath, {
       onFilePick: (path: string) => void viewChangedPath(path),
+      reviewable: (path: string) => aiPaths.has(path),
       onExpand: async (path: string) => {
         const file = files.find((candidate) => candidate.path === path);
         if (!file || file.status === "D") return [];

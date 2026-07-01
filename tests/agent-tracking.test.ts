@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { aiChanges, baseSourceFor, firstViewableAgentChange, whisperText } from "../src/agent-tracking";
+import { aiChanges, baseSourceFor, firstViewableAgentChange, reviewablePaths, whisperText } from "../src/agent-tracking";
 import type { AgentChange, AgentTrackingStatus } from "../src/ipc";
 
 const change = (path: string, humanTouched = false): AgentChange => ({
@@ -48,4 +48,14 @@ test("baseSourceFor: deleted, binary, or missing use git HEAD", () => {
   assert.equal(baseSourceFor({ ...change("a"), status: "D" }), "git-head");
   assert.equal(baseSourceFor({ ...change("a"), binary: true }), "git-head");
   assert.equal(baseSourceFor(undefined), "git-head");
+});
+
+test("reviewablePaths includes only agent-attributed changes", () => {
+  const set = reviewablePaths([
+    change("ai.ts"),
+    change("human.ts", true),
+    { ...change("del.ts"), status: "D" },
+    { ...change("bin.ts"), binary: true },
+  ]);
+  assert.deepEqual([...set].sort(), ["ai.ts"]);
 });

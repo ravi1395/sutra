@@ -42,6 +42,14 @@ export function baseSourceFor(change: AgentChange | undefined): BaseSource {
   return "git-head";
 }
 
+/** Paths eligible for per-hunk reject / per-file accept: agent-attributed
+ * changes the tracker holds (baseSourceFor === "agent"). Other changed files —
+ * human edits, git-only/hand-made changes not in the agent session — are not
+ * reviewable this way and use the in-editor gutter revert instead. */
+export function reviewablePaths(changes: readonly AgentChange[]): Set<string> {
+  return new Set(changes.filter((change) => baseSourceFor(change) === "agent").map((change) => change.path));
+}
+
 export function isIntegratedAgentCommand(command: string): boolean {
   const first = command.trim().split(/\s+/, 1)[0] ?? "";
   const name = first.split("/").pop()?.toLowerCase();
