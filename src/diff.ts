@@ -180,6 +180,13 @@ export class DiffViewer {
     });
   }
 
+  // Force the next renderFileList to fully rebuild (and re-fetch hunk rows for
+  // expanded files) even if the status\0path key is unchanged. Call after a
+  // reject/accept mutates file content so stale hunk offsets can't be reused.
+  invalidate(): void {
+    this.lastFileListKey = "";
+  }
+
   // Show a one-line status (deleted/binary/unreadable) above the file list without clearing it.
   renderStatus(label: string, message: string): void {
     this.titleEl.textContent = label;

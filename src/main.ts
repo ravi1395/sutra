@@ -701,6 +701,7 @@ async function refreshDiffFileList(): Promise<void> {
         void agentAcceptPath(root, path).then((next) => {
           agentStatus = next;
           editor.setAgentChanges(next.changes);
+          diffViewer.invalidate();
           void refreshDiffFileList();
         });
       },
@@ -710,6 +711,7 @@ async function refreshDiffFileList(): Promise<void> {
           editor.setAgentChanges(next.changes);
           const tab = editor.tabByPath(path);
           if (tab && !tab.dirty) void editor.openLatestFile(path, "M");
+          diffViewer.invalidate();
           void refreshDiffFileList();
         });
       },

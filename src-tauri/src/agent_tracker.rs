@@ -227,6 +227,13 @@ impl Tracker {
         new_to: usize,
         old_text: &[String],
     ) -> Result<AgentTrackingStatus, String> {
+        // Reject oversized replacement payloads before allocating/writing: bounds
+        // the memory a single frontend call can force while holding the lock.
+        const MAX_HUNK_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+        let total: usize = old_text.iter().map(|line| line.len() + 1).sum();
+        if total > MAX_HUNK_BYTES {
+            return Err("hunk text too large".into());
+        }
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(disabled_status());
         };
