@@ -1030,6 +1030,7 @@ export class EditorManager {
   private previewTimer: number | undefined;
   private workspaceRoot: string | null = null;
   private agentChanges: readonly AgentChange[] = [];
+  private pendingOverrides = new Map<string, string>();
   private themeObserver: MutationObserver;
 
   constructor(container: HTMLElement) {
@@ -1223,6 +1224,17 @@ export class EditorManager {
     for (const pane of this.panes) pane.syncMarginalia();
   }
 
+  /** Point an open (or soon-to-open) tab's diff baseline at the agent base. */
+  setAgentBaseOverride(path: string, base: string): void {
+    const tab = this.tabByPath(path);
+    if (tab) {
+      tab.override = base;
+      this.recomputeDiff();
+    } else {
+      this.pendingOverrides.set(path, base);
+    }
+  }
+
   attributionForTab(tab: Tab): string | null {
     if (!tab.path) return null;
     const change = this.agentChanges.find(
@@ -1269,6 +1281,11 @@ export class EditorManager {
       lastMtime,
       hunks: [],
     };
+    const queued = this.pendingOverrides.get(path);
+    if (queued != null) {
+      tab.override = queued;
+      this.pendingOverrides.delete(path);
+    }
     pane.addTab(tab);
     this.activateInPane(pane, tab);
     if (line !== undefined) this.revealLine(line);

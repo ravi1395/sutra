@@ -25,6 +25,7 @@ import { DebugSession } from "./debug-session";
 import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointStore } from "./debug";
 import {
   agentTrackingPoll,
+  agentBaseContent,
   listDir,
   readFile,
   writeFile,
@@ -51,7 +52,7 @@ import {
   resolveDebugAdapter,
   type AgentTrackingStatus,
 } from "./ipc";
-import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -679,7 +680,11 @@ async function refreshDiffFileList(): Promise<void> {
         const file = files.find((candidate) => candidate.path === path);
         if (!file || file.status === "D") return [];
         try {
-          const base = (await gitHeadContent(path).catch(() => "")) ?? "";
+          const source = baseSourceFor(agentStatus.changes.find((c) => c.path === path));
+          const base =
+            source === "agent"
+              ? ((await agentBaseContent(root, path).catch(() => null)) ?? (await gitHeadContent(path).catch(() => "")) ?? "")
+              : ((await gitHeadContent(path).catch(() => "")) ?? "");
           const current = await readFile(path);
           return hunkSummaries(computeLineDiff(base, current).hunks);
         } catch {
@@ -690,6 +695,8 @@ async function refreshDiffFileList(): Promise<void> {
         const file = files.find((candidate) => candidate.path === path);
         void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
       },
+      onAccept: (_path: string) => {}, // wired in Task 3
+      onReject: (_path: string, _hunk) => {}, // wired in Task 3
     });
   } catch (e) {
     // Silently skip on error
@@ -1058,6 +1065,10 @@ async function viewChangedPath(path: string): Promise<void> {
     return;
   }
   try {
+    if (change && baseSourceFor(change) === "agent" && currentRoot) {
+      const base = await agentBaseContent(currentRoot, path).catch(() => null);
+      if (base != null) editor.setAgentBaseOverride(path, base);
+    }
     await editor.openLatestFile(path, change?.status ?? "M");
     tree.setActive(path);
   } catch (e) {

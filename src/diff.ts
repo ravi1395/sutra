@@ -41,6 +41,9 @@ export interface HunkRow {
   kind: DiffKind;
   startLine: number; // 0-based start line in current doc (= hunk.newFrom)
   label: string;
+  newFrom: number;
+  newTo: number;
+  oldText: string[];
 }
 
 /** Compact per-hunk index rows for the diff viewer; labels mirror lensModel. */
@@ -53,7 +56,7 @@ export function hunkSummaries(hunks: readonly Hunk[]): HunkRow[] {
         : last > h.newFrom + 1
           ? `lines ${h.newFrom + 1}–${last}`
           : `line ${h.newFrom + 1}`;
-    return { kind: h.kind, startLine: h.newFrom, label };
+    return { kind: h.kind, startLine: h.newFrom, label, newFrom: h.newFrom, newTo: h.newTo, oldText: h.oldText };
   });
 }
 
@@ -198,6 +201,8 @@ export class DiffViewer {
       onFilePick: (path: string) => void;
       onExpand: (path: string) => Promise<HunkRow[]>;
       onHunkPick: (path: string, startLine: number) => void;
+      onAccept?: (path: string) => void;
+      onReject?: (path: string, hunk: HunkRow) => void;
     },
   ): void {
     const nextKey = files.map((file) => `${file.status}\0${file.path}`).join("\0");
@@ -237,6 +242,17 @@ export class DiffViewer {
       name.title = file.path; // Full path in tooltip
 
       row.append(chevron, status, name);
+      if (handlers.onAccept) {
+        const accept = document.createElement("button");
+        accept.className = "diff-file-action accept";
+        accept.textContent = "accept";
+        accept.title = "Accept all AI changes in this file (rebase to current)";
+        accept.onclick = (ev) => {
+          ev.stopPropagation();
+          handlers.onAccept!(file.path);
+        };
+        row.append(accept);
+      }
 
       const hunksBox = document.createElement("div");
       hunksBox.className = "diff-hunk-list hidden";
@@ -263,6 +279,17 @@ export class DiffViewer {
           label.className = "diff-hunk-label";
           label.textContent = hr.label;
           hrow.append(dot, label);
+          if (handlers.onReject) {
+            const reject = document.createElement("button");
+            reject.className = "diff-hunk-action reject";
+            reject.textContent = "reject";
+            reject.title = "Restore this hunk from the pre-agent base";
+            reject.onclick = (ev) => {
+              ev.stopPropagation();
+              handlers.onReject!(file.path, hr);
+            };
+            hrow.append(reject);
+          }
           hrow.onclick = (ev) => {
             ev.stopPropagation();
             handlers.onHunkPick(file.path, hr.startLine);

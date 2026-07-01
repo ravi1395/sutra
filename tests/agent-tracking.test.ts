@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { aiChanges, firstViewableAgentChange, whisperText } from "../src/agent-tracking";
+import { aiChanges, baseSourceFor, firstViewableAgentChange, whisperText } from "../src/agent-tracking";
 import type { AgentChange, AgentTrackingStatus } from "../src/ipc";
 
 const change = (path: string, humanTouched = false): AgentChange => ({
@@ -34,4 +34,18 @@ test("whisperText: count summary, human-touched excluded, empty when nothing", (
   assert.equal(whisperText(two, null, "claude"), "2 changes woven by claude");
   const human = { enabled: true, agentActive: false, changes: [change("/p/a.ts", true)] } as AgentTrackingStatus;
   assert.equal(whisperText(human, null), "");
+});
+
+test("baseSourceFor: AI-authored recoverable file uses agent base", () => {
+  assert.equal(baseSourceFor(change("a")), "agent");
+});
+
+test("baseSourceFor: human-touched file uses git HEAD", () => {
+  assert.equal(baseSourceFor(change("a", true)), "git-head");
+});
+
+test("baseSourceFor: deleted, binary, or missing use git HEAD", () => {
+  assert.equal(baseSourceFor({ ...change("a"), status: "D" }), "git-head");
+  assert.equal(baseSourceFor({ ...change("a"), binary: true }), "git-head");
+  assert.equal(baseSourceFor(undefined), "git-head");
 });

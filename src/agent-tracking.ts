@@ -33,6 +33,15 @@ export function whisperText(status: AgentTrackingStatus, activeFile: string | nu
   return `${ai.length} ${noun} woven by ${agentName}`;
 }
 
+export type BaseSource = "agent" | "git-head";
+
+/** AI-authored, non-binary, non-deleted files with a recoverable base diff
+ * against the captured agent base; everything else against git HEAD. */
+export function baseSourceFor(change: AgentChange | undefined): BaseSource {
+  if (change && !change.humanTouched && change.status !== "D" && !change.binary) return "agent";
+  return "git-head";
+}
+
 export function isIntegratedAgentCommand(command: string): boolean {
   const first = command.trim().split(/\s+/, 1)[0] ?? "";
   const name = first.split("/").pop()?.toLowerCase();
