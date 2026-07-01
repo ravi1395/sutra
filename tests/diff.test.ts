@@ -111,7 +111,7 @@ test("hunkSummaries labels a single modified line", () => {
   const { hunks } = computeLineDiff("one\ntwo\nthree", "one\ndos\nthree");
   const rows = hunkSummaries(hunks);
   assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0], { kind: "modified", startLine: 1, label: "line 2" });
+  assert.deepEqual(rows[0], { kind: "modified", startLine: 1, label: "line 2", newFrom: 1, newTo: 2, oldText: ["two"] });
 });
 
 test("hunkSummaries labels a multi-line added range", () => {
@@ -145,7 +145,7 @@ test("DiffViewer keeps expanded hunk rows visible across file-list rerenders", a
       },
       onExpand: async () => {
         expansions++;
-        return [{ kind: "modified" as const, startLine: 4, label: "line 5" }];
+        return [{ kind: "modified" as const, startLine: 4, label: "line 5", newFrom: 4, newTo: 5, oldText: ["old"] }];
       },
       onHunkPick: () => {},
     };

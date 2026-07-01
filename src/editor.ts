@@ -63,6 +63,7 @@ export interface Tab {
   savedContent: string;
   lastMtime: number | null;
   hunks: Hunk[];
+  readOnly?: boolean; // soft-lock while an integrated agent is editing this file
 }
 
 /**
@@ -471,6 +472,7 @@ export class Pane {
   private languageCompartment = new Compartment();
   private indentCompartment = new Compartment();
   private wrapCompartment = new Compartment();
+  private readOnlyCompartment = new Compartment();
   // Per-tab monotonic version counter and debounce timer for lang_did_change.
   private langVersions = new Map<string, number>();
   private langTimer: ReturnType<typeof setTimeout> | null = null;
@@ -602,6 +604,7 @@ export class Pane {
       this.languageCompartment.of(detectLanguage(name) ?? []),
       this.indentCompartment.of(indentSettings(this.mgr.indentSize)),
       this.wrapCompartment.of(this.mgr.wordWrap ? EditorView.lineWrapping : []),
+      this.readOnlyCompartment.of(EditorState.readOnly.of(false)),
       // Language-intelligence: completion and hover extensions (degrade gracefully when backend absent).
       langAutocompletionExt(() => this.active?.path ?? null),
       langHoverTooltipExt(() => this.active?.path ?? null),
@@ -824,6 +827,14 @@ export class Pane {
     this.detectAndRenderConflicts();
   }
 
+  /** Soft-lock: toggle read-only for a tab, reconfiguring the view if it is showing. */
+  setTabReadOnly(tab: Tab, readOnly: boolean): void {
+    tab.readOnly = readOnly;
+    if (this.active === tab) {
+      this.view.dispatch({ effects: this.readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)) });
+    }
+  }
+
   /** Show `tab` in this pane's view, checkpointing the outgoing tab's state. */
   activate(tab: Tab): void {
     this.closeLens();
@@ -831,6 +842,7 @@ export class Pane {
     if (this.active && this.active !== tab) this.active.state = this.view.state;
     this.active = tab;
     this.view.setState(tab.state);
+    this.view.dispatch({ effects: this.readOnlyCompartment.reconfigure(EditorState.readOnly.of(tab.readOnly ?? false)) });
     this.applyEditorTheme();
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1030,6 +1042,7 @@ export class EditorManager {
   private previewTimer: number | undefined;
   private workspaceRoot: string | null = null;
   private agentChanges: readonly AgentChange[] = [];
+  private pendingOverrides = new Map<string, string>();
   private themeObserver: MutationObserver;
 
   constructor(container: HTMLElement) {
@@ -1223,6 +1236,28 @@ export class EditorManager {
     for (const pane of this.panes) pane.syncMarginalia();
   }
 
+  /** Soft-lock: agent-touched files become read-only while an agent is active. */
+  setAgentActive(active: boolean, paths: readonly string[]): void {
+    const locked = new Set(paths);
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        const shouldLock = active && !!tab.path && locked.has(tab.path);
+        if ((tab.readOnly ?? false) !== shouldLock) pane.setTabReadOnly(tab, shouldLock);
+      }
+    }
+  }
+
+  /** Point an open (or soon-to-open) tab's diff baseline at the agent base. */
+  setAgentBaseOverride(path: string, base: string): void {
+    const tab = this.tabByPath(path);
+    if (tab) {
+      tab.override = base;
+      this.recomputeDiff();
+    } else {
+      this.pendingOverrides.set(path, base);
+    }
+  }
+
   attributionForTab(tab: Tab): string | null {
     if (!tab.path) return null;
     const change = this.agentChanges.find(
@@ -1269,6 +1304,11 @@ export class EditorManager {
       lastMtime,
       hunks: [],
     };
+    const queued = this.pendingOverrides.get(path);
+    if (queued != null) {
+      tab.override = queued;
+      this.pendingOverrides.delete(path);
+    }
     pane.addTab(tab);
     this.activateInPane(pane, tab);
     if (line !== undefined) this.revealLine(line);

@@ -25,6 +25,9 @@ import { DebugSession } from "./debug-session";
 import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointStore } from "./debug";
 import {
   agentTrackingPoll,
+  agentBaseContent,
+  agentRevertHunk,
+  agentAcceptPath,
   listDir,
   readFile,
   writeFile,
@@ -51,7 +54,7 @@ import {
   resolveDebugAdapter,
   type AgentTrackingStatus,
 } from "./ipc";
-import { firstViewableAgentChange, mergeChangedFiles, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, mergeChangedFiles, reviewablePaths, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -673,13 +676,23 @@ async function refreshDiffFileList(): Promise<void> {
     if (currentRoot !== root) return;
     const files = mergeChangedFiles(gitFiles, agentStatus.changes);
     const activePath = editor.active?.path ?? null;
+    const aiPaths = reviewablePaths(agentStatus.changes);
     diffViewer.renderFileList(files, activePath, {
       onFilePick: (path: string) => void viewChangedPath(path),
+      reviewable: (path: string) => aiPaths.has(path),
       onExpand: async (path: string) => {
         const file = files.find((candidate) => candidate.path === path);
         if (!file || file.status === "D") return [];
         try {
-          const base = (await gitHeadContent(path).catch(() => "")) ?? "";
+          const source = baseSourceFor(agentStatus.changes.find((c) => c.path === path));
+          // An empty agent base (agent-created file, no pre-agent content) falls
+          // through to git HEAD so a file that exists in HEAD still shows a real
+          // per-hunk diff instead of the whole file as one added hunk.
+          const agentBase = source === "agent" ? await agentBaseContent(root, path).catch(() => null) : null;
+          const base =
+            (agentBase && agentBase.length > 0 ? agentBase : null) ??
+            (await gitHeadContent(path).catch(() => "")) ??
+            "";
           const current = await readFile(path);
           return hunkSummaries(computeLineDiff(base, current).hunks);
         } catch {
@@ -689,6 +702,24 @@ async function refreshDiffFileList(): Promise<void> {
       onHunkPick: (path: string, startLine: number) => {
         const file = files.find((candidate) => candidate.path === path);
         void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+      },
+      onAccept: (path: string) => {
+        void agentAcceptPath(root, path).then((next) => {
+          agentStatus = next;
+          editor.setAgentChanges(next.changes);
+          diffViewer.invalidate();
+          void refreshDiffFileList();
+        });
+      },
+      onReject: (path: string, hunk) => {
+        void agentRevertHunk(root, path, hunk.newFrom, hunk.newTo, hunk.oldText).then((next) => {
+          agentStatus = next;
+          editor.setAgentChanges(next.changes);
+          const tab = editor.tabByPath(path);
+          if (tab && !tab.dirty) void editor.openLatestFile(path, "M");
+          diffViewer.invalidate();
+          void refreshDiffFileList();
+        });
       },
     });
   } catch (e) {
@@ -1039,6 +1070,10 @@ async function pollAgentChanges(): Promise<void> {
     if (currentRoot !== root) return;
     agentStatus = next;
     editor.setAgentChanges(next.changes);
+    editor.setAgentActive(
+      next.agentActive,
+      next.changes.filter((c) => !c.humanTouched).map((c) => c.path),
+    );
     renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
@@ -1058,6 +1093,12 @@ async function viewChangedPath(path: string): Promise<void> {
     return;
   }
   try {
+    if (change && baseSourceFor(change) === "agent" && currentRoot) {
+      const base = await agentBaseContent(currentRoot, path).catch(() => null);
+      // Skip empty bases (agent-created files) so the editor gutter falls back to
+      // git HEAD instead of rendering the whole file as one added hunk.
+      if (base != null && base.length > 0) editor.setAgentBaseOverride(path, base);
+    }
     await editor.openLatestFile(path, change?.status ?? "M");
     tree.setActive(path);
   } catch (e) {

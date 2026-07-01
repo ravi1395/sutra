@@ -199,6 +199,21 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - Tracking baselines store per-file signatures instead of full workspace bytes.
   Full bytes are retained only for changed files when needed for safe revert.
 
+### AI change review (per-hunk)
+- Files edited by an integrated agent are diffed against the **pre-agent base**
+  (the content captured when the agent turn began), not just Git `HEAD`. Files
+  you touched, binary files, and deletions fall back to the `HEAD` baseline.
+- Each AI hunk in the diff list carries a **reject** control; each file an
+  **accept** control. Reject restores only that hunk's slice from the base,
+  leaving your edits and other hunks intact. Accept folds the file's current
+  content into the baseline (the per-turn rebase) and drops it from review.
+- Reject refuses files changed after the last agent observation or already
+  edited in Sutra, preserving the existing safe-revert guards.
+- **Soft-lock:** while an integrated agent is active, the files it is editing are
+  read-only in the editor, so concurrent human edits can't be mis-attributed.
+  The lock releases when the agent goes idle.
+- Scope is terminal-agent only; agents launched outside Sutra are not reviewed.
+
 ## Settings
 
 Open with the titlebar Settings button, **⌘,**, or "Settings" in the command palette. Changes apply
