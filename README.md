@@ -148,6 +148,7 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   - **Deleted** boundary → red underline
 - **Click a gutter marker** to open the diff viewer focused on that hunk.
 - Each hunk has a **Revert** button that restores that hunk to its HEAD version.
+- Top-bar branch selector scrolls when branch/worktree lists exceed dropdown height.
 
 ### Search
 
