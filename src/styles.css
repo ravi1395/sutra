@@ -136,6 +136,11 @@ body {
   padding: 4px 0;
   z-index: 60;
 }
+.gitbar-menu-card {
+  max-height: min(60vh, calc(100vh - 32px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .menu-row {
   display: flex;
   align-items: center;
