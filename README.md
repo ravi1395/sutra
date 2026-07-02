@@ -210,9 +210,11 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   content into the baseline (the per-turn rebase) and drops it from review.
 - Reject refuses files changed after the last agent observation or already
   edited in Sutra, preserving the existing safe-revert guards.
-- **Soft-lock:** while an integrated agent is active, the files it is editing are
-  read-only in the editor, so concurrent human edits can't be mis-attributed.
-  The lock releases when the agent goes idle.
+- **Soft-lock:** a file the agent is *actively writing* is read-only in the
+  editor, so concurrent human edits can't be mis-attributed. The lock releases
+  on its own once that file's writes settle (a few seconds after the last
+  change) — no accept needed to hand-edit a finished file — and re-engages if
+  the agent writes it again.
 - Scope is terminal-agent only; agents launched outside Sutra are not reviewed.
 
 ## Settings
