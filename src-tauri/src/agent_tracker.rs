@@ -41,6 +41,10 @@ pub struct AgentChange {
     pub status: String,
     pub human_touched: bool,
     pub binary: bool,
+    // True while the agent is actively writing this file: session live and the
+    // file's mtime is within WRITE_SETTLE_NANOS of now. Drives the editor
+    // soft-lock, so a finished file releases once the agent moves on.
+    pub writing: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -555,7 +559,20 @@ fn disabled_status() -> AgentTrackingStatus {
     }
 }
 
+/// A file counts as actively-being-written for this long after its last mtime
+/// bump. ~2 poll intervals (1.5s each), so a settled file releases the soft-lock
+/// within a couple of polls while a burst of writes keeps it held.
+const WRITE_SETTLE_NANOS: u128 = 3_000_000_000;
+
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0)
+}
+
 fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
+    let now = now_nanos();
     AgentTrackingStatus {
         enabled: true,
         agent_active: session.agent_active || session.settle_polls > 0,
@@ -570,6 +587,17 @@ fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
                         RestoreSource::Bytes(bytes) => Some(bytes.as_slice()),
                         RestoreSource::Delete | RestoreSource::Unsafe => None,
                     });
+                // Only an active session with a freshly-touched file is "writing";
+                // once the agent stops (or exits) the file ages out and unlocks.
+                let writing = session.agent_active
+                    && session
+                        .last_scan
+                        .get(path)
+                        .map(|signature| {
+                            signature.mtime_nanos != 0
+                                && now.saturating_sub(signature.mtime_nanos) < WRITE_SETTLE_NANOS
+                        })
+                        .unwrap_or(false);
                 AgentChange {
                     path: path.to_string_lossy().into_owned(),
                     status: change.status.clone(),
@@ -577,6 +605,7 @@ fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
                     binary: bytes
                         .map(|bytes| std::str::from_utf8(bytes).is_err())
                         .unwrap_or(false),
+                    writing,
                 }
             })
             .collect(),
@@ -1531,6 +1560,49 @@ mod tests {
         assert_eq!(tracker.base_content(&root, &created), Some(String::new()));
         assert_eq!(tracker.base_content(&root, &unsafe_path), None);
         assert_eq!(tracker.base_content(&root, &root.join("absent.txt")), None);
+    }
+
+    #[test]
+    fn writing_flag_tracks_recent_mtime_only_while_agent_active() {
+        let now = now_nanos();
+        let fresh = PathBuf::from("/x/fresh.txt");
+        let stale = PathBuf::from("/x/stale.txt");
+        let pending_change = || PendingChange {
+            status: "A".into(),
+            human_touched: false,
+            observed: Some(b"x".to_vec()),
+            restore: RestoreSource::Delete,
+        };
+        let mut pending = BTreeMap::new();
+        pending.insert(fresh.clone(), pending_change());
+        pending.insert(stale.clone(), pending_change());
+        let mut last_scan = Snapshot::new();
+        last_scan.insert(fresh.clone(), signature(1, now, 0));
+        last_scan.insert(stale.clone(), signature(1, now.saturating_sub(10_000_000_000), 0));
+        let mut session = TrackingSession {
+            root: PathBuf::from("/x"),
+            head: "h".into(),
+            baseline: BTreeMap::new(),
+            last_scan,
+            pending,
+            agent_active: true,
+            settle_polls: 0,
+            report_mode: true,
+        };
+
+        let by_path = |status: &AgentTrackingStatus, path: &str| {
+            status.changes.iter().find(|c| c.path == path).unwrap().writing
+        };
+
+        let active = session_status(&session);
+        assert!(by_path(&active, "/x/fresh.txt"), "recent write should be writing");
+        assert!(!by_path(&active, "/x/stale.txt"), "settled file should release");
+
+        // Agent gone: nothing is locked, even a file just written.
+        session.agent_active = false;
+        let idle = session_status(&session);
+        assert!(!by_path(&idle, "/x/fresh.txt"));
+        assert!(!by_path(&idle, "/x/stale.txt"));
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {

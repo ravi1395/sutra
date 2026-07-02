@@ -50,6 +50,14 @@ export function reviewablePaths(changes: readonly AgentChange[]): Set<string> {
   return new Set(changes.filter((change) => baseSourceFor(change) === "agent").map((change) => change.path));
 }
 
+/** Paths the editor soft-locks: files the agent is actively writing right now
+ * (`writing`) and not yet taken over by a human. A finished file drops out of
+ * this set once its writes settle, so it becomes hand-editable without an
+ * accept on the git bar. */
+export function lockedPaths(changes: readonly AgentChange[]): string[] {
+  return changes.filter((change) => change.writing && !change.humanTouched).map((change) => change.path);
+}
+
 export function isIntegratedAgentCommand(command: string): boolean {
   const first = command.trim().split(/\s+/, 1)[0] ?? "";
   const name = first.split("/").pop()?.toLowerCase();

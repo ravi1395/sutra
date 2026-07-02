@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { aiChanges, baseSourceFor, firstViewableAgentChange, reviewablePaths, whisperText } from "../src/agent-tracking";
+import { aiChanges, baseSourceFor, firstViewableAgentChange, lockedPaths, reviewablePaths, whisperText } from "../src/agent-tracking";
 import type { AgentChange, AgentTrackingStatus } from "../src/ipc";
 
 const change = (path: string, humanTouched = false): AgentChange => ({
@@ -8,6 +8,16 @@ const change = (path: string, humanTouched = false): AgentChange => ({
   status: "M",
   humanTouched,
   binary: false,
+});
+
+test("lockedPaths: only files being actively written and not human-touched", () => {
+  const set: AgentChange[] = [
+    { ...change("writing-ai"), writing: true },
+    { ...change("settled-ai"), writing: false },
+    change("no-flag"),
+    { ...change("writing-human", true), writing: true },
+  ];
+  assert.deepEqual(lockedPaths(set), ["writing-ai"]);
 });
 
 test("aiChanges excludes human-touched paths", () => {

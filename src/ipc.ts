@@ -72,6 +72,9 @@ export const gitCheckout = (root: string, branch: string) =>
 export interface AgentChange extends ChangedFile {
   humanTouched: boolean;
   binary: boolean;
+  // Backend always sets this; optional for hand-built test fixtures. True only
+  // while the agent is actively writing the file (mtime fresh + session live).
+  writing?: boolean;
 }
 
 export interface AgentTrackingStatus {

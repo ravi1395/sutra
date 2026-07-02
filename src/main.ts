@@ -54,7 +54,7 @@ import {
   resolveDebugAdapter,
   type AgentTrackingStatus,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, mergeChangedFiles, reviewablePaths, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, lockedPaths, mergeChangedFiles, reviewablePaths, whisperText } from "./agent-tracking";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -1070,10 +1070,7 @@ async function pollAgentChanges(): Promise<void> {
     if (currentRoot !== root) return;
     agentStatus = next;
     editor.setAgentChanges(next.changes);
-    editor.setAgentActive(
-      next.agentActive,
-      next.changes.filter((c) => !c.humanTouched).map((c) => c.path),
-    );
+    editor.setAgentActive(next.agentActive, lockedPaths(next.changes));
     renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
   } catch {
