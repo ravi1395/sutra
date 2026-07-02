@@ -72,9 +72,6 @@ export const gitCheckout = (root: string, branch: string) =>
 export interface AgentChange extends ChangedFile {
   humanTouched: boolean;
   binary: boolean;
-  // Backend always sets this; optional for hand-built test fixtures. True only
-  // while the agent is actively writing the file (mtime fresh + session live).
-  writing?: boolean;
 }
 
 export interface AgentTrackingStatus {
@@ -342,4 +339,62 @@ export async function deliverToPty(args: {
     await ptyWrite(args.targetId, wrapForDelivery(args.text, false));
   }
   return { ok: true };
+}
+
+// --- Harness v2: runner, diagnostics, turns, worktree sessions ---
+// FROZEN CONTRACT (see .superpowers/sdd/contracts.md): all wave tasks code
+// against these exact shapes. Rust structs serialize camelCase.
+export interface Diagnostic { path: string; line: number; col: number; severity: "error" | "warning"; message: string; source: string }
+export interface DiagJob { source: string; command: string; cwd: string; parser: "tsc" | "cargo" | "go" | "ruff" | "regex"; regex?: string }
+export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean }
+export interface TestStatus { state: "running" | "pass" | "fail" | "skipped"; exitCode?: number | null; durationMs?: number; outputTail: string }
+export interface TurnFileEntry { path: string; beforeHash?: string | null; afterHash?: string | null; snapshotted: boolean; unsafeBefore?: boolean }
+export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
+export interface TurnPollResult { openTurn?: Turn | null; closed: Turn[] }
+export interface RollbackResult { restored: string[]; failed: { path: string; error: string }[] }
+export interface WorktreeRoot { path: string; branch: string }
+export interface HookStatus { claude: boolean; codex: boolean }
+
+export async function runnerRun(id: string, cmd: string, cwd: string, timeoutMs: number): Promise<void> {
+  return invoke<void>("runner_run", { id, cmd, cwd, timeoutMs });
+}
+export async function runnerCancel(id: string): Promise<boolean> {
+  return invoke<boolean>("runner_cancel", { id });
+}
+export async function diagDetect(root: string): Promise<DiagJob[]> {
+  return invoke<DiagJob[]>("diag_detect", { root });
+}
+export async function diagRun(root: string, jobs: DiagJob[]): Promise<void> {
+  return invoke<void>("diag_run", { root, jobs });
+}
+export async function turnPoll(root: string): Promise<TurnPollResult> {
+  return invoke<TurnPollResult>("turn_poll", { root });
+}
+export async function turnList(root: string): Promise<Turn[]> {
+  return invoke<Turn[]>("turn_list", { root });
+}
+export async function turnRollback(root: string, turnId: number, paths: string[]): Promise<RollbackResult> {
+  return invoke<RollbackResult>("turn_rollback", { root, turnId, paths });
+}
+export async function turnTestRecord(root: string, turnId: number, status: TestStatus): Promise<void> {
+  return invoke<void>("turn_test_record", { root, turnId, status });
+}
+/** Current on-disk xxh3 hashes for `paths` under `root`; null = absent/unreadable. */
+export async function turnDiskHashes(root: string, paths: string[]): Promise<[string, string | null][]> {
+  return invoke<[string, string | null][]>("turn_disk_hashes", { root, paths });
+}
+export async function hookInstall(root: string, agent: "claude" | "codex"): Promise<boolean> {
+  return invoke<boolean>("hook_install", { root, agent });
+}
+export async function hookStatus(root: string): Promise<HookStatus> {
+  return invoke<HookStatus>("hook_status", { root });
+}
+export async function listWorktreeRoots(root: string): Promise<WorktreeRoot[]> {
+  return invoke<WorktreeRoot[]>("list_worktree_roots", { root });
+}
+export function onRunnerDone(cb: (p: RunnerDone) => void): Promise<UnlistenFn> {
+  return listen<RunnerDone>("runner-done", (e) => cb(e.payload));
+}
+export function onDiagnosticsUpdated(cb: (p: { root: string; source: string; diagnostics: Diagnostic[] }) => void): Promise<UnlistenFn> {
+  return listen<{ root: string; source: string; diagnostics: Diagnostic[] }>("diagnostics-updated", (e) => cb(e.payload));
 }

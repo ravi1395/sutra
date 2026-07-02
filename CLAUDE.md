@@ -38,8 +38,11 @@ src/
   gitbar.ts            branch whisper + dropdown  |  git-index.ts  worktree helpers
   conflict.ts          merge conflict parse + resolution
   marginalia.ts        AiRange, AI stitch decorations
-  agent-tracking.ts    ReviewFile model, AI change diffs, human-touch flags
-  automations.ts       per-project shell commands (.sutra/automations.json)
+  agent-tracking.ts    ReviewFile model, AI change diffs, human-touch flags, turn headers
+  automations.ts       per-project commands (.sutra/automations.json): shell | diagnostics | test kinds
+  diagnostics.ts       squiggles, problems panel, statusbar chip, fs-settle trigger
+  sessions.ts          multi-root (worktree) agent sessions panel + aggregate strip
+  rollback-dialog.ts   per-file turn rollback checklist (human-touched/unsnapshotted/unsafe)
   lang.ts              hover/completion/outline UI (bridges ipc.ts lang_* calls)
   debug.ts             DapClient, BreakpointStore
   debug-session.ts     active debug session (step/continue/reset)
@@ -53,6 +56,8 @@ src/
 src-tauri/src/
   lib.rs               ← invoke_handler![] (all command registrations)
   fs_cmds.rs           list_dir, read/write, mtime  |  git.rs  HEAD diff baseline
+  runner.rs            command runner (pgroup kill, deadlines) + diagnostics jobs/parsers
+  turns.rs             agent turn engine: signal/quiet boundaries, snapshot blob store, rollback
   pty.rs               PTY spawn/write/resize/kill + base64 output stream
   search.rs            ripgrep search  |  watcher.rs  mtime debounce
   agent_tracker.rs     agent change tracking  |  debug.rs  DAP backend
@@ -72,10 +77,13 @@ tests/  one .test.ts per frontend module (node:test)
 - AI tracker: 1.5s mtime poll, disabled when Track AI is off
 - Preview: `<iframe srcdoc sandbox="">` (null origin, scripts off); Markdown DOMPurified
 - Menu: in-window bar is source of truth; native macOS menu suppressed in `lib.rs`
+- Turn boundaries: `.sutra/turn-signal.jsonl` Stop-hook lines, else 10 s quiet window; snapshots in content-addressed store `.sutra/turns/objects` (10 MB/file cap)
+- Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap)
+- Poll cadences: agent tracker + turn poll 1.5 s piggyback; sessions panel polls cheap, full only for active roots
 
 ## State
 - Version: v1.4.1 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 216 pass; `cargo test` (inside src-tauri/) for Rust
+- Tests: `npm test` → 253 pass; `cargo test` (inside src-tauri/) → 137 pass
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, etc.) via `mcp.rs`
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
 

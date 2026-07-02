@@ -148,7 +148,6 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   - **Deleted** boundary → red underline
 - **Click a gutter marker** to open the diff viewer focused on that hunk.
 - Each hunk has a **Revert** button that restores that hunk to its HEAD version.
-- Top-bar branch selector scrolls when branch/worktree lists exceed dropdown height.
 
 ### Search
 
@@ -210,12 +209,52 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   content into the baseline (the per-turn rebase) and drops it from review.
 - Reject refuses files changed after the last agent observation or already
   edited in Sutra, preserving the existing safe-revert guards.
-- **Soft-lock:** a file the agent is *actively writing* is read-only in the
-  editor, so concurrent human edits can't be mis-attributed. The lock releases
-  on its own once that file's writes settle (a few seconds after the last
-  change) — no accept needed to hand-edit a finished file — and re-engages if
-  the agent writes it again.
+- **Soft-lock:** while an integrated agent is active, the files it is editing are
+  read-only in the editor, so concurrent human edits can't be mis-attributed.
+  The lock releases when the agent goes idle.
 - Scope is terminal-agent only; agents launched outside Sutra are not reviewed.
+
+## Harness
+
+The harness turns Sutra into a review surface for agent-driven coding: project
+diagnostics run automatically after file changes (editor squiggles, a Problems
+panel, and a statusbar error/warning chip), agent work is grouped into **turns**
+with per-file snapshots, an optional test automation runs after each turn and
+stamps the turn header with a pass/fail chip (output tail on hover), any turn
+can be **rolled back** file-by-file from a checklist dialog, and a sessions
+panel aggregates agent activity across the primary root and its git worktrees.
+Diagnostics and per-hunk error badges also appear in the AI review diff list,
+so you can see which agent hunk introduced which error.
+
+Diagnostics and tests are configured as automations (see the automations
+picker) with two new kinds on top of plain `shell`:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `kind` | `shell` (default) · `diagnostics` · `test` | `diagnostics` runs after fs changes settle (1 s) with a 120 s cap; `test` auto-runs after each closed agent turn (10 min cap) |
+| `parser` | `tsc` · `cargo` · `go` · `ruff` · `regex` | Required for `diagnostics`: how stdout/stderr becomes squiggles |
+| `regex` | any pattern with `file`/`line`/`msg` groups | Required when `parser` is `regex` |
+
+If a diagnostics tool itself fails (bad flags, missing binary), the last good
+diagnostics are kept and the failure is surfaced on the source chip instead of
+wiping the panel.
+
+Turn boundaries close on a Claude Code **Stop hook** when installed (Settings →
+hook install writes it to `.claude/settings.local.json`, idempotently), or on a
+10 s quiet window otherwise. The hook appends one line per agent turn:
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ {
+  "type": "command",
+  "command": "mkdir -p \"$CLAUDE_PROJECT_DIR/.sutra\" && printf '{\"agent\":\"claude\",\"ts\":%s}\\n' \"$(date +%s)\" >> \"$CLAUDE_PROJECT_DIR/.sutra/turn-signal.jsonl\""
+} ] } ] } }
+```
+
+Snapshots live in a content-addressed blob store under `.sutra/turns/`
+(per-file cap 10 MB; oldest turns GC'd past the store caps). The rollback
+dialog default-unchecks files it cannot restore safely: `human-touched` (disk
+hash diverged from the turn's after-state), `unsnapshotted` (skipped by the
+size cap), and `unsafe` (pre-edit content was never capturable).
 
 ## Settings
 

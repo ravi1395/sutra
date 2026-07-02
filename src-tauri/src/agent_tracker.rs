@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::State;
 use xxhash_rust::xxh3::xxh3_64;
@@ -41,10 +41,6 @@ pub struct AgentChange {
     pub status: String,
     pub human_touched: bool,
     pub binary: bool,
-    // True while the agent is actively writing this file: session live and the
-    // file's mtime is within WRITE_SETTLE_NANOS of now. Drives the editor
-    // soft-lock, so a finished file releases once the agent moves on.
-    pub writing: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,8 +76,15 @@ struct Tracker {
     session: Option<TrackingSession>,
 }
 
+// Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
+// unit handle so command signatures keep `State<'_, AgentTrackerState>`, but the
+// real state lives here so free functions (pending_snapshot, detected_agent_kind,
+// reconcile_restored) can reach it without a State param — turns.rs consumes
+// those across the root-string boundary the harness-v2 contract defines.
+static TRACKER: LazyLock<Mutex<Tracker>> = LazyLock::new(|| Mutex::new(Tracker::default()));
+
 #[derive(Default)]
-pub struct AgentTrackerState(Mutex<Tracker>);
+pub struct AgentTrackerState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentKind {
@@ -527,11 +530,11 @@ impl Tracker {
 
 impl AgentTrackerState {
     pub fn register_shell(&self, pid: u32, cwd: PathBuf) {
-        self.0.lock().unwrap().shells.insert(pid, cwd);
+        TRACKER.lock().unwrap().shells.insert(pid, cwd);
     }
 
     pub fn unregister_shell(&self, pid: u32) {
-        self.0.lock().unwrap().shells.remove(&pid);
+        TRACKER.lock().unwrap().shells.remove(&pid);
     }
 
     pub fn record_sutra_mutation(
@@ -539,7 +542,7 @@ impl AgentTrackerState {
         before: BTreeMap<PathBuf, Option<Vec<u8>>>,
         after_roots: &[PathBuf],
     ) {
-        self.0
+        TRACKER
             .lock()
             .unwrap()
             .record_sutra_mutation(before, after_roots);
@@ -547,8 +550,69 @@ impl AgentTrackerState {
 
     /// Record an agent-reported edit path against the active session.
     pub fn record_agent_report(&self, root: &Path, path: PathBuf) {
-        self.0.lock().unwrap().record_agent_report(root, path);
+        TRACKER.lock().unwrap().record_agent_report(root, path);
     }
+}
+
+// ---- harness v2 cross-module contract (Task 0 stubs; Task B implements) ----
+
+/// Agent-pre-edit snapshot bytes pending for `root`: (path, bytes-before-edit,
+/// unsafe_before). `bytes` is `None` for a created file (`Delete`) or an
+/// unrecoverable original (`Unsafe`); `unsafe_before` is true only for the
+/// `Unsafe` case, so the turn ledger can tell an agent-created file (safe to
+/// delete on rollback) apart from a file whose pre-edit content was never
+/// captured (must NOT be deleted, and gets a visible checklist label).
+pub fn pending_snapshot(root: &str) -> Vec<(String, Option<Vec<u8>>, bool)> {
+    let root = Path::new(root);
+    let tracker = TRACKER.lock().unwrap();
+    let Some(session) = tracker.session.as_ref().filter(|session| session.root == root) else {
+        return vec![];
+    };
+    session
+        .pending
+        .iter()
+        .map(|(path, change)| {
+            let (before, unsafe_before) = match &change.restore {
+                RestoreSource::Bytes(bytes) => (Some(bytes.clone()), false),
+                RestoreSource::Delete => (None, false),
+                RestoreSource::Unsafe => (None, true),
+            };
+            (path.to_string_lossy().into_owned(), before, unsafe_before)
+        })
+        .collect()
+}
+
+/// Detected agent kind ("claude" | "codex") for `root`, when known.
+pub fn detected_agent_kind(root: &str) -> Option<String> {
+    let tracker = TRACKER.lock().unwrap();
+    match tracker.agent_kind_for_root(Path::new(root))? {
+        AgentKind::Claude => Some("claude".to_string()),
+        AgentKind::Codex => Some("codex".to_string()),
+    }
+}
+
+/// Fold caller-supplied bytes (from a turn rollback restore) into the tracker
+/// baseline for `path`, mirroring `accept_path` but without re-reading disk —
+/// the caller (turns.rs) just wrote/deleted the file itself.
+pub fn reconcile_restored(root: &str, path: &str, bytes: Option<Vec<u8>>) {
+    let root = Path::new(root);
+    let path = Path::new(path);
+    let mut tracker = TRACKER.lock().unwrap();
+    let Some(session) = tracker.session.as_mut().filter(|session| session.root == root) else {
+        return;
+    };
+    match bytes {
+        Some(bytes) => {
+            let signature = signature_for_current_or_bytes(path, &bytes, session.last_scan.get(path));
+            session.baseline.insert(path.to_path_buf(), signature.clone());
+            session.last_scan.insert(path.to_path_buf(), signature);
+        }
+        None => {
+            session.baseline.remove(path);
+            session.last_scan.remove(path);
+        }
+    }
+    session.pending.remove(path);
 }
 
 fn disabled_status() -> AgentTrackingStatus {
@@ -559,20 +623,7 @@ fn disabled_status() -> AgentTrackingStatus {
     }
 }
 
-/// A file counts as actively-being-written for this long after its last mtime
-/// bump. ~2 poll intervals (1.5s each), so a settled file releases the soft-lock
-/// within a couple of polls while a burst of writes keeps it held.
-const WRITE_SETTLE_NANOS: u128 = 3_000_000_000;
-
-fn now_nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0)
-}
-
 fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
-    let now = now_nanos();
     AgentTrackingStatus {
         enabled: true,
         agent_active: session.agent_active || session.settle_polls > 0,
@@ -587,17 +638,6 @@ fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
                         RestoreSource::Bytes(bytes) => Some(bytes.as_slice()),
                         RestoreSource::Delete | RestoreSource::Unsafe => None,
                     });
-                // Only an active session with a freshly-touched file is "writing";
-                // once the agent stops (or exits) the file ages out and unlocks.
-                let writing = session.agent_active
-                    && session
-                        .last_scan
-                        .get(path)
-                        .map(|signature| {
-                            signature.mtime_nanos != 0
-                                && now.saturating_sub(signature.mtime_nanos) < WRITE_SETTLE_NANOS
-                        })
-                        .unwrap_or(false);
                 AgentChange {
                     path: path.to_string_lossy().into_owned(),
                     status: change.status.clone(),
@@ -605,7 +645,6 @@ fn session_status(session: &TrackingSession) -> AgentTrackingStatus {
                     binary: bytes
                         .map(|bytes| std::str::from_utf8(bytes).is_err())
                         .unwrap_or(false),
-                    writing,
                 }
             })
             .collect(),
@@ -965,23 +1004,22 @@ fn revert_safe_changes(pending: &mut BTreeMap<PathBuf, PendingChange>) -> AgentR
 
 #[tauri::command]
 pub fn agent_tracking_begin(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
 ) -> Result<AgentTrackingStatus, String> {
-    state.0.lock().unwrap().poll(Path::new(&root), true, true)
+    TRACKER.lock().unwrap().poll(Path::new(&root), true, true)
 }
 
 #[tauri::command]
 pub fn agent_revert_hunk(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
     path: String,
     new_from: usize,
     new_to: usize,
     old_text: Vec<String>,
 ) -> Result<AgentTrackingStatus, String> {
-    state
-        .0
+    TRACKER
         .lock()
         .unwrap()
         .revert_hunk(Path::new(&root), Path::new(&path), new_from, new_to, &old_text)
@@ -989,12 +1027,11 @@ pub fn agent_revert_hunk(
 
 #[tauri::command]
 pub fn agent_accept_path(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
     path: String,
 ) -> Result<AgentTrackingStatus, String> {
-    state
-        .0
+    TRACKER
         .lock()
         .unwrap()
         .accept_path(Path::new(&root), Path::new(&path))
@@ -1002,12 +1039,11 @@ pub fn agent_accept_path(
 
 #[tauri::command]
 pub fn agent_base_content(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
     path: String,
 ) -> Result<Option<String>, String> {
-    Ok(state
-        .0
+    Ok(TRACKER
         .lock()
         .unwrap()
         .base_content(Path::new(&root), Path::new(&path)))
@@ -1015,10 +1051,10 @@ pub fn agent_base_content(
 
 #[tauri::command]
 pub fn agent_tracking_poll(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
 ) -> Result<AgentTrackingStatus, String> {
-    let mut tracker = state.0.lock().unwrap();
+    let mut tracker = TRACKER.lock().unwrap();
     let root = Path::new(&root);
     let kind = tracker.agent_kind_for_root(root);
     let agent_active = kind.is_some();
@@ -1028,18 +1064,18 @@ pub fn agent_tracking_poll(
 
 #[tauri::command]
 pub fn agent_tracking_accept(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
 ) -> Result<AgentTrackingStatus, String> {
-    state.0.lock().unwrap().accept(Path::new(&root))
+    TRACKER.lock().unwrap().accept(Path::new(&root))
 }
 
 #[tauri::command]
 pub fn agent_tracking_revert(
-    state: State<'_, AgentTrackerState>,
+    _state: State<'_, AgentTrackerState>,
     root: String,
 ) -> Result<AgentRevertResult, String> {
-    state.0.lock().unwrap().revert(Path::new(&root))
+    TRACKER.lock().unwrap().revert(Path::new(&root))
 }
 
 #[cfg(test)]
@@ -1560,49 +1596,6 @@ mod tests {
         assert_eq!(tracker.base_content(&root, &created), Some(String::new()));
         assert_eq!(tracker.base_content(&root, &unsafe_path), None);
         assert_eq!(tracker.base_content(&root, &root.join("absent.txt")), None);
-    }
-
-    #[test]
-    fn writing_flag_tracks_recent_mtime_only_while_agent_active() {
-        let now = now_nanos();
-        let fresh = PathBuf::from("/x/fresh.txt");
-        let stale = PathBuf::from("/x/stale.txt");
-        let pending_change = || PendingChange {
-            status: "A".into(),
-            human_touched: false,
-            observed: Some(b"x".to_vec()),
-            restore: RestoreSource::Delete,
-        };
-        let mut pending = BTreeMap::new();
-        pending.insert(fresh.clone(), pending_change());
-        pending.insert(stale.clone(), pending_change());
-        let mut last_scan = Snapshot::new();
-        last_scan.insert(fresh.clone(), signature(1, now, 0));
-        last_scan.insert(stale.clone(), signature(1, now.saturating_sub(10_000_000_000), 0));
-        let mut session = TrackingSession {
-            root: PathBuf::from("/x"),
-            head: "h".into(),
-            baseline: BTreeMap::new(),
-            last_scan,
-            pending,
-            agent_active: true,
-            settle_polls: 0,
-            report_mode: true,
-        };
-
-        let by_path = |status: &AgentTrackingStatus, path: &str| {
-            status.changes.iter().find(|c| c.path == path).unwrap().writing
-        };
-
-        let active = session_status(&session);
-        assert!(by_path(&active, "/x/fresh.txt"), "recent write should be writing");
-        assert!(!by_path(&active, "/x/stale.txt"), "settled file should release");
-
-        // Agent gone: nothing is locked, even a file just written.
-        session.agent_active = false;
-        let idle = session_status(&session);
-        assert!(!by_path(&idle, "/x/fresh.txt"));
-        assert!(!by_path(&idle, "/x/stale.txt"));
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {

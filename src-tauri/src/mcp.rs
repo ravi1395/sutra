@@ -359,6 +359,14 @@ struct SearchArgs {
     is_regex: Option<bool>,
 }
 
+/// Args shared by `get_diagnostics` / `get_test_status`: optional root override,
+/// defaulting to the server's active workspace root.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct RootParam {
+    /// Workspace root to query. Defaults to Sutra's active workspace root.
+    root: Option<String>,
+}
+
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
 /// session; all clones share the same `AppHandle` and active-root `Arc`.
 #[derive(Clone)]
@@ -744,6 +752,50 @@ impl SutraMcp {
         self.active_root()?;
         let value = self.request_ui("annotations").await?;
         Ok(Self::ok_json(value))
+    }
+
+    /// Active workspace root as a string, for tools that accept an optional
+    /// `root` override (falls back to Sutra's active workspace root).
+    fn workspace_root(&self) -> String {
+        self.active_root()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    #[tool(
+        description = "Get current typecheck/lint diagnostics for the workspace (or a given root). \
+                       Empty list means clean or diagnostics disabled."
+    )]
+    fn get_diagnostics(
+        &self,
+        Parameters(p): Parameters<RootParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = p.root.unwrap_or_else(|| self.workspace_root());
+        let diags = crate::runner::latest_diagnostics(&root);
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "root": root, "count": diags.len(), "diagnostics": diags })
+                .to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Get the latest test run status Sutra recorded for an agent turn \
+                       (state pass|fail|running|skipped, exit code, output tail)."
+    )]
+    fn get_test_status(
+        &self,
+        Parameters(p): Parameters<RootParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = p.root.unwrap_or_else(|| self.workspace_root());
+        let body = match crate::turns::latest_test_status(&root) {
+            Some((turn_id, status)) => {
+                serde_json::json!({ "root": root, "turnId": turn_id, "status": status })
+            }
+            None => serde_json::json!({ "root": root, "status": null }),
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 }
 

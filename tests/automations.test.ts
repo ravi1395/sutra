@@ -4,16 +4,20 @@ import {
   makeAutomation,
   validateName,
   validateCommand,
+  validateAutomation,
   isDuplicateName,
   upsertAutomation,
   removeAutomation,
   parseAutomationsFile,
   serializeAutomations,
   automationMenuModel,
+  normalizeLoaded,
+  diagnosticsAutomations,
+  testAutomation,
   type Automation,
 } from "../src/automations";
 
-const a = (name: string, command: string, id = name): Automation => ({ id, name, command });
+const a = (name: string, command = "c", id = name): Automation => ({ id, name, command });
 
 test("makeAutomation trims fields and assigns an id", () => {
   const made = makeAutomation("  Build  ", "  npm run tauri build  ");
@@ -103,6 +107,24 @@ test("automationMenuModel sorts running first then alpha", () => {
   assert.deepEqual(rows.map(r => r.name), ["dev", "test"]);
   assert.equal(rows[0].running, true);
   assert.equal(rows[1].status, "✓ 1.9s");
+});
+
+test("v1 entries load as kind shell", () => {
+  const list = normalizeLoaded([{ id: "1", name: "n", command: "c" }]);
+  assert.equal(list[0].kind ?? "shell", "shell");
+});
+
+test("kind filters", () => {
+  const list = [a("s"), { ...a("d"), kind: "diagnostics" as const, parser: "tsc" as const }, { ...a("t"), kind: "test" as const }];
+  assert.equal(diagnosticsAutomations(list).length, 1);
+  assert.equal(testAutomation(list)?.name, "t");
+  assert.equal(testAutomation([a("s")]), null);
+});
+
+test("diagnostics kind requires parser; regex parser requires regex", () => {
+  assert.ok(validateAutomation({ ...a("d"), kind: "diagnostics" }));               // error string
+  assert.equal(validateAutomation({ ...a("d"), kind: "diagnostics", parser: "tsc" }), null);
+  assert.ok(validateAutomation({ ...a("d"), kind: "diagnostics", parser: "regex" })); // missing regex
 });
 
 test("parseAutomationsFile filters out entries missing required fields", () => {

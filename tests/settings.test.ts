@@ -10,6 +10,9 @@ import {
   deserializeSettings,
   serializeSettings,
   nextFontSettings,
+  updateSettings,
+  isTestAutoRunEnabled,
+  setTestAutoRunEnabled,
   type UserSettings,
 } from "../src/settings";
 
@@ -102,4 +105,27 @@ test("clampSettings defaults theme to ink", () => {
 test("clampSettings accepts washi and rejects junk", () => {
   assert.equal(clampSettings({ theme: "washi" } as Partial<UserSettings>).theme, "washi");
   assert.equal(clampSettings({ theme: "neon" as never }).theme, "ink");
+});
+
+// node:test runs without DOM localStorage; per-root helpers need a shim.
+if (typeof (globalThis as { localStorage?: unknown }).localStorage === "undefined") {
+  const store = new Map<string, string>();
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+  };
+}
+
+test("quietWindowMs clamps 3000-60000, default 10000", () => {
+  assert.equal(updateSettings(DEFAULT_SETTINGS, { quietWindowMs: 100 }).quietWindowMs, 3000);
+  assert.equal(updateSettings(DEFAULT_SETTINGS, { quietWindowMs: 999999 }).quietWindowMs, 60000);
+  assert.equal(DEFAULT_SETTINGS.quietWindowMs, 10000);
+});
+
+test("testAutoRun is per-root and defaults off", () => {
+  assert.equal(isTestAutoRunEnabled("/r1"), false);
+  setTestAutoRunEnabled("/r1", true);
+  assert.equal(isTestAutoRunEnabled("/r1"), true);
+  assert.equal(isTestAutoRunEnabled("/r2"), false);
 });

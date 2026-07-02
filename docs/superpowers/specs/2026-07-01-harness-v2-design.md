@@ -130,11 +130,25 @@ Backend is nearly free by construction: every tracker and turn command already t
 - **TS (`node:test`, `tests/`):** diagnostics staleness and hunk-intersection badges; turn grouping model; sessions-panel aggregation; automations v1→v2 migration.
 - **Manual per phase (`npm run tauri dev`):** break a type → squiggle + review badge; run an agent turn → chip lifecycle; rollback dialog human-touched defaults; two worktree agents → dashboard.
 
-## Delivery order
+## Delivery: parallel puzzle (skeleton → wave → assembly)
 
-1. **Phase 1** — `runner.rs`, parsers, `diagnostics.ts`, review badges, `get_diagnostics` MCP tool.
-2. **Phase 2** — `turns.rs` boundaries, hook install, test automation kind, turn header UI, `get_test_status`.
-3. **Phase 3** — snapshot store, rollback command + dialog.
-4. **Phase 4** — root discovery, sessions panel, aggregate strip.
+Not four serial phases. Execution is a sandwich built around exclusive file ownership, so parallel subagents never touch the same file.
 
-Each phase lands green (`npm test` + `cargo test`) and is independently mergeable; later phases only add to earlier ones.
+**Phase 0 — skeleton (serial, one agent).** All new modules created as compiling stubs (`todo!()` bodies), every command registered in `lib.rs`, every typed wrapper in `ipc.ts`, every type, event name, and signature frozen as contracts in the implementation plan. Compiles; the existing test suite stays green. Rationale: without the skeleton, `lib.rs`/`ipc.ts` reference functions owned by other agents and no worktree builds.
+
+**Wave — 8 parallel subagents, disjoint file ownership.** Each agent works in its own worktree, fills in the bodies of the files it exclusively owns, codes against the frozen contracts (never against another agent's output), and runs its scoped tests (other modules remain stubs).
+
+| Piece | Exclusive files | Delivers |
+|---|---|---|
+| A | `src-tauri/src/runner.rs` | one-shot runner, diagnostics parsers, auto-detection, Rust tests |
+| B | `src-tauri/src/turns.rs`, `src-tauri/src/agent_tracker.rs` | boundary state machine, snapshot store, rollback, Rust tests |
+| C | `src-tauri/src/mcp.rs` | `get_diagnostics` + `get_test_status` tool bodies |
+| D | `src/diagnostics.ts` + its test file | squiggles, problems panel, statusbar chip |
+| E | `src/agent-tracking.ts`, rollback-dialog module + tests | turn grouping, test chips, and the diagnostics hunk badges (single-owner rule: E covers D's needs in E's files) |
+| F | `src/sessions.ts` + test file | cross-root dashboard model + panel |
+| G | `src/automations.ts`, `src/settings.ts`, `src/settings-modal.ts` + tests | schema v2, toggles, hook-install button |
+| H | `src/main.ts`, CSS/`index.html` | all wiring and styles (D/E/F emit contract-frozen class names; H styles them) |
+
+**Phase Z — assembly (serial).** Merge the eight disjoint diffs (conflict-free by construction), run the full `npm test` + `cargo test` suites, manual verification via `npm run tauri dev`, README/CLAUDE.md updates, version bump.
+
+A single piece is deliberately incomplete (its collaborators are stubs); the union is the whole feature set.

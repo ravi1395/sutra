@@ -210,6 +210,8 @@ export class DiffViewer {
       onHunkPick: (path: string, startLine: number) => void;
       onAccept?: (path: string) => void;
       onReject?: (path: string, hunk: HunkRow) => void;
+      // Optional per-hunk adornment (e.g. diagnostics-count badge).
+      hunkBadge?: (path: string, hunk: HunkRow) => HTMLElement | null;
       // Gate: only agent-tracked files can be reject/accept'd; others (human/git
       // changes) get no controls and use the in-editor gutter revert instead.
       reviewable?: (path: string) => boolean;
@@ -290,6 +292,8 @@ export class DiffViewer {
           label.className = "diff-hunk-label";
           label.textContent = hr.label;
           hrow.append(dot, label);
+          const diagBadge = handlers.hunkBadge?.(file.path, hr);
+          if (diagBadge) hrow.append(diagBadge);
           if (handlers.onReject && reviewable) {
             const reject = document.createElement("button");
             reject.className = "diff-hunk-action reject";

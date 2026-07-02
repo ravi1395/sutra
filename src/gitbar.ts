@@ -101,7 +101,7 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
     container.classList.add("open");
 
     const dd = document.createElement("div");
-    dd.className = "menu-card gitbar-menu-card";
+    dd.className = "menu-card";
 
     if (branches.length > 0) {
       const head = document.createElement("div");

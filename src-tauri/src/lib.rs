@@ -1,6 +1,8 @@
 use tauri::Manager;
 
-mod agent_tracker;
+// agent_tracker/runner/turns are pub: their contract fns are stubbed for the
+// harness-v2 wave and consumed cross-module (kept out of dead_code until wired).
+pub mod agent_tracker;
 mod assets;
 mod debug;
 mod fs_cmds;
@@ -11,7 +13,9 @@ mod mcp_config;
 mod preview_server;
 mod proxy;
 mod pty;
+pub mod runner;
 mod search;
+pub mod turns;
 mod watcher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -103,6 +107,18 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_is_busy,
             pty::pty_list_agents,
+            runner::runner_run,
+            runner::runner_cancel,
+            runner::diag_detect,
+            runner::diag_run,
+            turns::turn_poll,
+            turns::turn_list,
+            turns::turn_rollback,
+            turns::turn_test_record,
+            turns::turn_disk_hashes,
+            turns::hook_install,
+            turns::hook_status,
+            turns::list_worktree_roots,
             debug::debug_start,
             debug::debug_send,
             debug::debug_stop,

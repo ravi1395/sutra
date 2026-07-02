@@ -1236,8 +1236,7 @@ export class EditorManager {
     for (const pane of this.panes) pane.syncMarginalia();
   }
 
-  /** Soft-lock: files the agent is actively writing become read-only; they
-   * release once writes settle (see backend `writing` flag). */
+  /** Soft-lock: agent-touched files become read-only while an agent is active. */
   setAgentActive(active: boolean, paths: readonly string[]): void {
     const locked = new Set(paths);
     for (const pane of this.panes) {

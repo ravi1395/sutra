@@ -21,6 +21,8 @@ dist
 dist-ssr
 *.local
 plans*
+!docs/superpowers/plans/
+!docs/superpowers/plans/**
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -39,3 +41,7 @@ design/
 # Tauri updater signing keys — NEVER commit the private key.
 *.key
 sutra.key.pub
+
+# Harness v2 turn ledger (snapshots + agent turn signals)
+.sutra/turns/
+.sutra/turn-signal.jsonl

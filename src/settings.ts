@@ -12,6 +12,8 @@ export interface UserSettings {
   agentTracking: boolean;
   autosaveOnBlur: boolean;
   theme: "ink" | "washi";
+  diagnosticsEnabled: boolean;
+  quietWindowMs: number; // harness v2 turn quiet-window; clamped 3000–60000
 }
 
 // Whitelists: every multi-choice setting validates against one of these.
@@ -41,11 +43,20 @@ export const DEFAULT_SETTINGS: UserSettings = {
   agentTracking: true,
   autosaveOnBlur: false,
   theme: "ink",
+  diagnosticsEnabled: true,
+  quietWindowMs: 10000,
 };
 
 const SETTINGS_KEY = "sutra.settings";
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 24;
+const MIN_QUIET_MS = 3000;
+const MAX_QUIET_MS = 60000;
+
+function clampQuietWindow(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(MAX_QUIET_MS, Math.max(MIN_QUIET_MS, Math.round(value)));
+}
 
 function clampFontSize(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -76,7 +87,14 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     agentTracking: pickBool(value.agentTracking, d.agentTracking),
     autosaveOnBlur: pickBool(value.autosaveOnBlur, d.autosaveOnBlur),
     theme: value.theme === "washi" ? "washi" : "ink",
+    diagnosticsEnabled: pickBool(value.diagnosticsEnabled, d.diagnosticsEnabled),
+    quietWindowMs: clampQuietWindow(value.quietWindowMs, d.quietWindowMs),
   };
+}
+
+/** Merge a partial patch into current settings and re-clamp the result. Pure. */
+export function updateSettings(current: UserSettings, patch: Partial<UserSettings>): UserSettings {
+  return clampSettings({ ...current, ...patch });
 }
 
 export function serializeSettings(settings: UserSettings): string {
@@ -107,6 +125,23 @@ export function loadSettings(): UserSettings {
     return deserializeSettings(localStorage.getItem(SETTINGS_KEY));
   } catch {
     return DEFAULT_SETTINGS;
+  }
+}
+
+// Per-root test auto-run toggle (harness v2), keyed "sutra.testAutoRun.<root>".
+export function isTestAutoRunEnabled(root: string): boolean {
+  try {
+    return localStorage.getItem(`sutra.testAutoRun.${root}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setTestAutoRunEnabled(root: string, on: boolean): void {
+  try {
+    localStorage.setItem(`sutra.testAutoRun.${root}`, on ? "1" : "0");
+  } catch {
+    /* storage unavailable / quota - toggle remains off for this run */
   }
 }
 

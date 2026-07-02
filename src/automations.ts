@@ -9,6 +9,9 @@ export interface Automation {
   id: string;
   name: string;
   command: string;
+  kind?: "shell" | "diagnostics" | "test"; // missing = "shell"
+  parser?: "tsc" | "cargo" | "go" | "ruff" | "regex"; // diagnostics kind only
+  regex?: string; // parser === "regex" only
 }
 
 const NAME_MAX = 40;
@@ -75,13 +78,37 @@ function isAutomation(value: unknown): value is Automation {
   );
 }
 
+const KINDS: readonly string[] = ["shell", "diagnostics", "test"];
+const PARSERS: readonly string[] = ["tsc", "cargo", "go", "ruff", "regex"];
+
+/** Normalize loaded entries: v1 passthrough (missing kind = shell); unknown kind/parser fields dropped. */
+export function normalizeLoaded(items: readonly unknown[]): Automation[] {
+  return items.filter(isAutomation).map((raw) => {
+    const a: Automation = { id: raw.id, name: raw.name, command: raw.command };
+    const { kind, parser, regex } = raw;
+    if (typeof kind === "string" && KINDS.includes(kind)) a.kind = kind as Automation["kind"];
+    if (typeof parser === "string" && PARSERS.includes(parser)) a.parser = parser as Automation["parser"];
+    if (typeof regex === "string") a.regex = regex;
+    return a;
+  });
+}
+
+/** Kind-aware validation: diagnostics needs a parser; regex parser needs a regex. Returns error or null. */
+export function validateAutomation(a: Automation): string | null {
+  if (a.kind === "diagnostics") {
+    if (!a.parser) return "Diagnostics automations require a parser";
+    if (a.parser === "regex" && !a.regex?.trim()) return "Regex parser requires a regex pattern";
+  }
+  return null;
+}
+
 /** Tolerant parse: bad JSON, wrong shape, or junk entries yield a clean list (never throws). */
 export function parseAutomationsFile(raw: string): Automation[] {
   try {
     const parsed: unknown = JSON.parse(raw);
     const items = (parsed as { automations?: unknown })?.automations;
     if (!Array.isArray(items)) return [];
-    return items.filter(isAutomation);
+    return normalizeLoaded(items);
   } catch {
     return [];
   }
@@ -90,6 +117,16 @@ export function parseAutomationsFile(raw: string): Automation[] {
 /** Serialize to the on-disk file shape (pretty-printed for human-editable JSON). */
 export function serializeAutomations(list: readonly Automation[]): string {
   return JSON.stringify({ version: 1, automations: list }, null, 2);
+}
+
+/** Automations that feed the diagnostics pipeline (kind === "diagnostics"). */
+export function diagnosticsAutomations(list: readonly Automation[]): Automation[] {
+  return list.filter((a) => a.kind === "diagnostics");
+}
+
+/** First test automation (kind === "test"), or null when none. */
+export function testAutomation(list: readonly Automation[]): Automation | null {
+  return list.find((a) => a.kind === "test") ?? null;
 }
 
 // ---- persistence (wraps fs IPC; not unit-tested) ----

@@ -52,9 +52,26 @@ import {
   langIndexBuild,
   langIndexInvalidate,
   resolveDebugAdapter,
+  turnPoll,
+  turnTestRecord,
+  turnRollback,
+  turnDiskHashes,
+  runnerRun,
+  onRunnerDone,
   type AgentTrackingStatus,
+  type Turn,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, lockedPaths, mergeChangedFiles, reviewablePaths, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, mergeChangedFiles, onTurnClosed, reviewablePaths, setTurnState, turnHeaderEl, whisperText } from "./agent-tracking";
+import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
+import { Facet, StateEffect } from "@codemirror/state";
+import {
+  diagChipEl,
+  diagnosticsExtension,
+  initDiagnostics,
+  notifyDocChanged,
+  problemsPanelEl,
+} from "./diagnostics";
+import { aggregateStripEl, initSessions, sessionsPanelEl } from "./sessions";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -67,6 +84,8 @@ import {
   removeAutomation,
   validateName,
   validateCommand,
+  validateAutomation,
+  testAutomation,
   type Automation,
   type AutomationBarHandle,
 } from "./automations";
@@ -87,6 +106,7 @@ import {
 import {
   DEFAULT_SETTINGS,
   clampSettings,
+  isTestAutoRunEnabled,
   loadSettings,
   nextFontSettings,
   saveSettings,
@@ -665,10 +685,44 @@ function setTerminal(on: boolean): void {
 btnTerm.onclick = () => setTerminal(!drawerState.open);
 terminals.onTabsChanged = renderTerminalSeam;
 
+// ---- turn strip (harness v2) ----
+// Turn headers (Turn N · agent · N files · test chip) above the changed-file
+// list; Rollback opens the per-file checklist dialog backed by turn snapshots,
+// with live disk hashes powering human-touched detection.
+function renderTurnStrip(root: string): void {
+  const pane = document.getElementById("diff-pane");
+  if (!pane) return;
+  let strip = document.getElementById("turn-strip");
+  if (!strip) {
+    strip = document.createElement("div");
+    strip.id = "turn-strip";
+    pane.prepend(strip);
+  }
+  strip.textContent = "";
+  const turns = getTurns(root);
+  const onRollback = (turn: Turn) => {
+    openRollbackDialog(root, turn, {
+      turns,
+      onApply: async (paths) => {
+        const res = await turnRollback(root, rollbackTargetId(turn), paths);
+        diffViewer.invalidate();
+        void refreshDiffFileList();
+        return res;
+      },
+      getDiskHashes: async (r, ps) =>
+        Object.fromEntries(
+          (await turnDiskHashes(r, ps)).filter(([, hash]) => hash != null),
+        ) as Record<string, string>,
+    });
+  };
+  for (const turn of turns) strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+}
+
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
   const root = currentRoot;
+  renderTurnStrip(root);
   try {
     await editor.refreshCleanGitBaselines();
     if (currentRoot !== root) return;
@@ -703,6 +757,11 @@ async function refreshDiffFileList(): Promise<void> {
         const file = files.find((candidate) => candidate.path === path);
         void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
       },
+      // Diagnostics count per hunk: Diagnostic.line is 1-based, HunkRow.newFrom
+      // is 0-based with exclusive newTo, so the inclusive 1-based hunk range is
+      // [newFrom+1, newTo]. Deleted hunks (newTo === newFrom) yield an empty
+      // range and no badge.
+      hunkBadge: (path, hunk) => hunkDiagBadgeEl(path, hunk.newFrom + 1, hunk.newTo),
       onAccept: (path: string) => {
         void agentAcceptPath(root, path).then((next) => {
           agentStatus = next;
@@ -1070,12 +1129,105 @@ async function pollAgentChanges(): Promise<void> {
     if (currentRoot !== root) return;
     agentStatus = next;
     editor.setAgentChanges(next.changes);
-    editor.setAgentActive(next.agentActive, lockedPaths(next.changes));
+    editor.setAgentActive(
+      next.agentActive,
+      next.changes.filter((c) => !c.humanTouched).map((c) => c.path),
+    );
     renderWhisperBar();
     if (!diffPane.classList.contains("hidden")) void refreshDiffFileList();
+    // Turn-boundary piggyback: same 1.5 s cadence, fires onTurnClosed subscribers.
+    const res = await turnPoll(root);
+    if (currentRoot !== root) return;
+    setTurnState(root, res);
+    // Strip re-render after state update (refreshDiffFileList above ran pre-poll).
+    if (!diffPane.classList.contains("hidden")) renderTurnStrip(root);
   } catch {
     // Poll failures must not interrupt editing.
   }
+}
+
+// ---- harness v2 wiring (diagnostics, turns, sessions) ----
+initDiagnostics(() => currentRoot);
+initSessions(() => currentRoot);
+setRollbackEditor(editor);
+
+// Diagnostics squiggles are appended per-EditorState: fresh states created on
+// tab open/switch lack the extension, so re-apply whenever tabs change. The
+// marker facet detects states that already carry it.
+const diagExtInstalled = Facet.define<boolean>();
+function ensureDiagnosticsExtension(): void {
+  for (const pane of editor.panes) {
+    if (pane.view.state.facet(diagExtInstalled).length) continue;
+    pane.view.dispatch({
+      effects: StateEffect.appendConfig.of([
+        diagExtInstalled.of(true),
+        diagnosticsExtension(() => editor.active?.path ?? null),
+      ]),
+    });
+  }
+}
+ensureDiagnosticsExtension();
+{
+  const prevActive = editor.onActiveTabChanged;
+  editor.onActiveTabChanged = (tab) => {
+    prevActive?.(tab);
+    ensureDiagnosticsExtension();
+  };
+  const prevTabs = editor.onTabsChanged;
+  editor.onTabsChanged = () => {
+    prevTabs?.();
+    ensureDiagnosticsExtension();
+  };
+}
+
+// Auto-run the project's test automation when an agent turn closes.
+onTurnClosed((root, turn) => {
+  if (!isTestAutoRunEnabled(root)) return;
+  const test = testAutomation(automations);
+  if (!test) return;
+  void turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
+    .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
+    .catch(() => {});
+});
+
+// Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
+void onRunnerDone((p) => {
+  if (!p.id.startsWith("test:")) return;
+  const rest = p.id.slice("test:".length);
+  const sep = rest.lastIndexOf(":");
+  if (sep <= 0) return;
+  const root = rest.slice(0, sep);
+  const turnId = Number(rest.slice(sep + 1));
+  if (!Number.isFinite(turnId)) return;
+  void turnTestRecord(root, turnId, {
+    state: p.exitCode === 0 ? "pass" : "fail",
+    exitCode: p.exitCode,
+    durationMs: p.durationMs,
+    outputTail: (p.stdout + p.stderr).slice(-4000),
+  }).catch(() => {});
+});
+
+// MCP/agent navigation: open file + reveal line.
+window.addEventListener("sutra:goto", (e) => {
+  const detail = (e as CustomEvent<{ path?: string; line?: number }>).detail;
+  const path = detail?.path;
+  if (!path) return;
+  void editor
+    .openFile(path, detail.line)
+    .then(() => tree.setActive(path))
+    .catch(() => {});
+});
+
+// Panel hosts (index.html) receive the module-owned singleton panel roots.
+const problemsHost = $("problems-panel-host");
+problemsHost.append(problemsPanelEl());
+const sessionsHost = $("sessions-panel-host");
+sessionsHost.append(sessionsPanelEl());
+function setProblemsPanel(on: boolean): void {
+  problemsHost.classList.toggle("hidden", !on);
+}
+function setSessionsPanel(on: boolean): void {
+  sessionsHost.classList.toggle("hidden", !on);
 }
 
 async function viewChangedPath(path: string): Promise<void> {
@@ -1131,7 +1283,8 @@ function renderWhisperBar(): void {
     const selection = editor.getSelection();
     right.textContent = `ln ${selection.line}`;
   }
-  whisperBar.append(left, right);
+  // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
+  whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -1315,6 +1468,8 @@ btnMenu.onclick = () => {
       };
       mk("open folder…", "⌘O", () => actions.openFolder());
       mk("command palette", "⌘K", () => palette.open());
+      mk("problems", "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
+      mk("sessions", "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
       const foot = document.createElement("div");
       foot.className = "menu-foot";
       el.appendChild(foot);
@@ -1428,6 +1583,11 @@ async function runAutomation(a: Automation): Promise<void> {
 // Persist a new/edited automation and refresh the picker.
 async function persistAutomation(a: Automation): Promise<void> {
   if (!currentRoot) return;
+  const invalid = validateAutomation(a);
+  if (invalid) {
+    showErrorBanner(invalid);
+    return;
+  }
   automations = upsertAutomation(automations, a);
   try {
     await saveAutomations(currentRoot, automations);
@@ -1650,7 +1810,12 @@ editor.onActiveTabChanged = (tab) => {
   outlineView.onActiveFileChanged();
 };
 // Debounced outline refresh while editing the active file.
-editor.onDocChanged = () => outlineView.scheduleRefresh();
+editor.onDocChanged = () => {
+  outlineView.scheduleRefresh();
+  // Harness: edits invalidate the active file's diagnostics (marked stale).
+  const activePath = editor.active?.path;
+  if (activePath) notifyDocChanged(activePath);
+};
 
 // ---- boot ----
 applySettings(settings);

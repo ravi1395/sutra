@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { aiChanges, baseSourceFor, firstViewableAgentChange, lockedPaths, reviewablePaths, whisperText } from "../src/agent-tracking";
+import { aiChanges, baseSourceFor, firstViewableAgentChange, reviewablePaths, whisperText } from "../src/agent-tracking";
 import type { AgentChange, AgentTrackingStatus } from "../src/ipc";
 
 const change = (path: string, humanTouched = false): AgentChange => ({
@@ -8,16 +8,6 @@ const change = (path: string, humanTouched = false): AgentChange => ({
   status: "M",
   humanTouched,
   binary: false,
-});
-
-test("lockedPaths: only files being actively written and not human-touched", () => {
-  const set: AgentChange[] = [
-    { ...change("writing-ai"), writing: true },
-    { ...change("settled-ai"), writing: false },
-    change("no-flag"),
-    { ...change("writing-human", true), writing: true },
-  ];
-  assert.deepEqual(lockedPaths(set), ["writing-ai"]);
 });
 
 test("aiChanges excludes human-touched paths", () => {
@@ -68,4 +58,77 @@ test("reviewablePaths includes only agent-attributed changes", () => {
     { ...change("bin.ts"), binary: true },
   ]);
   assert.deepEqual([...set].sort(), ["ai.ts"]);
+});
+
+// --- Harness v2: turn grouping, chips, diag badges, turn state ---
+import {
+  getTurns,
+  groupHunksByTurn,
+  hunkDiagBadge,
+  onTurnClosed,
+  setTurnState,
+  turnChipClass,
+  type ReviewFile,
+} from "../src/agent-tracking";
+import type { Diagnostic, TestStatus, Turn } from "../src/ipc";
+
+const turnFixture = (id: number, paths: string[]): Turn => ({
+  id,
+  root: "/r",
+  agentKind: "claude",
+  boundarySource: "hook",
+  openedAt: id * 1000,
+  closedAt: id * 1000 + 500,
+  files: paths.map((path) => ({ path, beforeHash: "b", afterHash: "a", snapshotted: true })),
+  testStatus: null,
+  rolledBack: false,
+});
+
+const withStatus = (t: Turn, state: TestStatus["state"]): Turn => ({
+  ...t,
+  testStatus: { state, outputTail: "" },
+});
+
+const rf = (path: string): ReviewFile => ({ path, status: "M" });
+
+const diag = (path: string, line: number): Diagnostic => ({
+  path,
+  line,
+  col: 1,
+  severity: "error",
+  message: "boom",
+  source: "tsc",
+});
+
+test("hunks group under owning turn, leftovers last", () => {
+  const t1 = turnFixture(1, ["a.ts"]); const t2 = turnFixture(2, ["b.ts"]);
+  const groups = groupHunksByTurn([t2, t1], [rf("a.ts"), rf("b.ts"), rf("c.ts")]);
+  assert.deepEqual(groups.map(g => g.turn?.id ?? null), [2, 1, null]); // newest turn first
+  assert.deepEqual(groups[2].files.map(f => f.path), ["c.ts"]);
+});
+
+test("chip class per test state", () => {
+  assert.equal(turnChipClass(withStatus(turnFixture(1, []), "pass")), "turn-chip--pass");
+  assert.equal(turnChipClass(turnFixture(1, [])), "");
+});
+
+test("diag badge counts in-range only", () => {
+  const ds = [diag("a.ts", 5), diag("a.ts", 50)];
+  assert.equal(hunkDiagBadge(ds, 1, 10), 1);
+});
+
+test("setTurnState stores turns per root; onTurnClosed fires per closed turn", () => {
+  const closedSeen: [string, number][] = [];
+  onTurnClosed((root, turn) => closedSeen.push([root, turn.id]));
+  const t1 = turnFixture(1, ["a.ts"]);
+  const t2open = { ...turnFixture(2, ["b.ts"]), boundarySource: "open" as const, closedAt: null };
+  setTurnState("/rootA", { openTurn: t2open, closed: [t1] });
+  assert.deepEqual(getTurns("/rootA").map((t) => t.id), [1, 2]);
+  assert.deepEqual(getTurns("/rootB"), []);
+  assert.deepEqual(closedSeen, [["/rootA", 1]]);
+  // open turn later closes: replaced in store, subscriber fires once for it
+  const t2closed = turnFixture(2, ["b.ts"]);
+  setTurnState("/rootA", { openTurn: null, closed: [t2closed] });
+  assert.deepEqual(closedSeen, [["/rootA", 1], ["/rootA", 2]]);
+  assert.equal(getTurns("/rootA").find((t) => t.id === 2)?.boundarySource, "hook");
 });

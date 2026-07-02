@@ -7,8 +7,11 @@ import {
   SHELLS,
   SCROLLBACK_OPTIONS,
   TAB_SIZES,
+  isTestAutoRunEnabled,
+  setTestAutoRunEnabled,
   type UserSettings,
 } from "./settings";
+import { hookInstall, hookStatus } from "./ipc";
 import { icon } from "./icons";
 
 export interface ShortcutEntry {
@@ -21,12 +24,22 @@ export interface SettingsModalDeps {
   apply: (next: UserSettings) => void;
   version: Promise<string>;
   shortcuts: ShortcutEntry[];
+  /** Current workspace root; enables the per-root Harness controls when present. */
+  getRoot?: () => string | null;
 }
 
-const SECTIONS = ["Editor", "Terminal", "Behavior", "Shortcuts", "About"] as const;
+const SECTIONS = ["Editor", "Terminal", "Behavior", "Harness", "Shortcuts", "About"] as const;
 type Section = (typeof SECTIONS)[number];
 
 let openOverlay: HTMLElement | null = null;
+
+// Quiet-window choices shown in the Harness section (clamp in settings.ts still applies).
+const QUIET_WINDOW_OPTIONS: readonly number[] = [5000, 10000, 20000, 30000];
+
+// Codex has no hook installer; users paste this into ~/.codex/config.toml (spec: documented notify snippet).
+const CODEX_NOTIFY_SNIPPET = `# ~/.codex/config.toml
+notify = ["sh", "-c",
+  "mkdir -p \\"$PWD/.sutra\\" && printf '{\\"agent\\":\\"codex\\",\\"ts\\":%s}\\\\n' \\"$(date +%s)\\" >> \\"$PWD/.sutra/turn-signal.jsonl\\""]`;
 
 // Display label for a font-family stack: first family name, unquoted.
 function fontLabel(stack: string): string {
@@ -189,6 +202,54 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     );
   }
 
+  // Harness section: diagnostics toggle, turn quiet window, per-root test auto-run,
+  // Claude Code turn-hook install, and the documentation-only Codex notify snippet.
+  function renderHarness(): void {
+    const s = deps.get();
+    const root = deps.getRoot?.() ?? null;
+
+    const children: HTMLElement[] = [
+      head("Harness"),
+      row("Diagnostics", toggle(s.diagnosticsEnabled, (v) => patch({ diagnosticsEnabled: v }))),
+      row("Turn quiet window", select(QUIET_WINDOW_OPTIONS, s.quietWindowMs, (v) => `${v / 1000}s`, (v) => patch({ quietWindowMs: v }))),
+    ];
+
+    if (root) {
+      children.push(row("Auto-run tests on turn close", toggle(isTestAutoRunEnabled(root), (v) => setTestAutoRunEnabled(root, v))));
+
+      const installBtn = document.createElement("button");
+      installBtn.className = "settings-reset";
+      installBtn.textContent = "Install Claude Code turn hook";
+      const markInstalled = (): void => {
+        installBtn.textContent = "Installed ✓";
+        installBtn.disabled = true;
+      };
+      void hookStatus(root).then((st) => { if (st.claude) markInstalled(); }, () => undefined);
+      installBtn.onclick = () => {
+        void hookInstall(root, "claude")
+          .then(() => hookStatus(root))
+          .then((st) => { if (st.claude) markInstalled(); }, () => undefined);
+      };
+      children.push(row("Claude Code turn hook", installBtn));
+    } else {
+      const note = document.createElement("p");
+      note.className = "settings-note";
+      note.textContent = "Open a folder to configure per-project harness options.";
+      children.push(note);
+    }
+
+    const details = document.createElement("details");
+    details.className = "settings-note";
+    const summary = document.createElement("summary");
+    summary.textContent = "Codex turn signal (manual setup)";
+    const pre = document.createElement("pre");
+    pre.textContent = CODEX_NOTIFY_SNIPPET;
+    details.append(summary, pre);
+    children.push(details);
+
+    content.replaceChildren(...children);
+  }
+
   // Shortcuts section: read-only reference rendered from the host-supplied list.
   function renderShortcuts(): void {
     const table = document.createElement("div");
@@ -241,6 +302,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     Editor: renderEditor,
     Terminal: renderTerminal,
     Behavior: renderBehavior,
+    Harness: renderHarness,
     Shortcuts: renderShortcuts,
     About: renderAbout,
   };

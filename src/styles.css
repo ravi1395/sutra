@@ -136,11 +136,6 @@ body {
   padding: 4px 0;
   z-index: 60;
 }
-.gitbar-menu-card {
-  max-height: min(60vh, calc(100vh - 32px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
 .menu-row {
   display: flex;
   align-items: center;
@@ -2984,3 +2979,213 @@ button:hover {
 .ann-fb { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg); }
 .ann-del { flex: 0 0 auto; background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 12px; padding: 0 2px; }
 .ann-del:hover { color: var(--fg); }
+
+/* ===== harness v2 ===== */
+/* Theme note: colors reference the ink/washi custom properties defined at the
+   top of this file (`:root` = ink, `.theme-washi` overrides), so every rule
+   below adapts to both themes; explicit .theme-washi overrides only where the
+   raw value cannot come from a token. */
+
+/* -- diagnostics squiggles + gutter (CM6 decorations from diagnostics.ts) -- */
+.diag-squiggle-error {
+  text-decoration: underline wavy var(--deleted);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 3px;
+}
+.diag-squiggle-warning {
+  text-decoration: underline wavy var(--added);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 3px;
+}
+.diag-gutter-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--deleted);
+  margin: 0 2px;
+}
+.diag-stale { opacity: 0.45; }
+
+/* -- problems panel (bottom host) -- */
+#problems-panel-host {
+  flex: 0 0 auto;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line);
+}
+#problems-panel { padding: 4px 0; font-size: 12px; }
+.problem-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.problem-row:hover { background: var(--bg-3); color: var(--fg); }
+
+/* -- statusbar chips: small pills matching the gitbar badge styling -- */
+#diag-chip,
+.turn-chip,
+.hunk-diag-badge,
+.session-badge--busy,
+.session-badge--idle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: var(--ui);
+  white-space: nowrap;
+}
+#diag-chip:empty, #harness-aggregate:empty { display: none; }
+.diag-chip--running { color: var(--fg-dim); }
+.diag-chip--clean { color: var(--em); border-color: var(--em-dim); }
+.diag-chip--dirty { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 55%, transparent); }
+.diag-chip--toolfail { color: var(--added); border-color: color-mix(in srgb, var(--added) 55%, transparent); }
+
+/* -- turns (review panel) -- */
+.turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.turn-header:hover { background: var(--bg-3); }
+.turn-chip--pass { color: var(--em); border-color: var(--em-dim); }
+.turn-chip--fail { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 55%, transparent); }
+.turn-chip--running { color: var(--modified); border-color: color-mix(in srgb, var(--modified) 55%, transparent); }
+.turn-chip--skipped { color: var(--fg-faint); }
+.hunk-diag-badge {
+  padding: 0 6px;
+  color: var(--added);
+  border-color: color-mix(in srgb, var(--added) 55%, transparent);
+}
+
+/* -- rollback dialog: backdrop matches the settings-modal overlay -- */
+.rollback-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.theme-washi .rollback-overlay { background: rgba(31, 35, 31, 0.3); }
+.rollback-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--fg);
+  border-bottom: 1px solid var(--line);
+}
+.rollback-row--human { color: var(--added); }
+.rollback-dialog {
+  width: 480px;
+  max-width: calc(100vw - 80px);
+  max-height: calc(100vh - 120px);
+  background: var(--bg-3);
+  border: 1px solid var(--line-menu);
+  border-radius: var(--r-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--ui);
+}
+.rollback-title {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-menu);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.rollback-file-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.rollback-dirty-banner,
+.rollback-failures,
+.rollback-error {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--deleted);
+  white-space: pre-wrap;
+}
+.rollback-failures:empty { display: none; }
+.rollback-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line-menu);
+}
+
+/* -- turn strip: turn headers above the changed-file list -- */
+#turn-strip:empty { display: none; }
+#turn-strip { border-bottom: 1px solid var(--line); }
+.turn-rollback {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: var(--ui);
+  color: var(--fg-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.turn-rollback:hover:not(:disabled) { color: var(--fg); background: var(--bg-4); }
+.turn-rollback:disabled { opacity: 0.45; cursor: default; }
+
+/* -- sessions panel (right host) + aggregate strip -- */
+#sessions-panel-host {
+  flex: 0 0 260px;
+  min-width: 200px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border-left: 1px solid var(--line);
+}
+#sessions-panel { padding: 4px 0; font-size: 12px; }
+.session-section {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.session-section:not(:first-child) {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.session-badge--busy { color: var(--modified); border-color: color-mix(in srgb, var(--modified) 55%, transparent); }
+.session-badge--idle { color: var(--fg-faint); }
+#harness-aggregate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
