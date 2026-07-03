@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::State;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -79,7 +79,16 @@ struct Tracker {
     // reset on every cross-root poll, wiping pending changes and dropping agent
     // edit reports before they surface.
     sessions: HashMap<PathBuf, TrackingSession>,
+    // Last poll per root, kept beside `sessions` (Instant has no Default and
+    // test fixtures build TrackingSession literally). Feeds evict_idle so a
+    // long-lived process doesn't keep a whole-tree snapshot for every root
+    // ever visited.
+    last_polled: HashMap<PathBuf, Instant>,
 }
+
+/// Sessions idle past this with nothing pending are dropped (poll re-creates
+/// one on demand, re-capturing the baseline from HEAD).
+const SESSION_IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
 
 // Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
 // unit handle so command signatures keep `State<'_, AgentTrackerState>`, but the
@@ -105,12 +114,31 @@ struct ProcessInfo {
 }
 
 impl Tracker {
+    /// Drop sessions idle past `max_idle` holding no pending changes and no
+    /// active agent — the only removal path besides a root losing its git
+    /// HEAD, so `sessions` stays bounded across a long-lived process.
+    fn evict_idle(&mut self, now: Instant, max_idle: Duration) {
+        let stamps = &mut self.last_polled;
+        self.sessions.retain(|root, session| {
+            if !session.pending.is_empty() || session.agent_active || session.settle_polls > 0 {
+                return true;
+            }
+            let stamp = stamps.entry(root.clone()).or_insert(now);
+            now.duration_since(*stamp) <= max_idle
+        });
+        let sessions = &self.sessions;
+        stamps.retain(|root, _| sessions.contains_key(root));
+    }
+
     fn poll(
         &mut self,
         root: &Path,
         agent_active: bool,
         discover: bool,
     ) -> Result<AgentTrackingStatus, String> {
+        let now = Instant::now();
+        self.last_polled.insert(root.to_path_buf(), now);
+        self.evict_idle(now, SESSION_IDLE_EVICT);
         let head = match git_head_id(root) {
             Some(head) => head,
             None => {
@@ -1168,6 +1196,45 @@ mod tests {
             assert_eq!(self.sessions.len(), 1, "expected exactly one session");
             self.sessions.values().next().unwrap()
         }
+    }
+
+    fn idle_session(root: &Path) -> TrackingSession {
+        TrackingSession {
+            root: root.to_path_buf(),
+            head: "head".into(),
+            baseline: Snapshot::new(),
+            last_scan: Snapshot::new(),
+            pending: BTreeMap::new(),
+            agent_active: false,
+            settle_polls: 0,
+            report_mode: false,
+        }
+    }
+
+    // Idle sessions with nothing pending and no active agent are evicted so a
+    // long-lived process doesn't hold a whole-tree snapshot per root visited.
+    #[test]
+    fn idle_session_without_pending_evicted_past_threshold() {
+        let dir = tempdir().unwrap();
+        let mut tracker = tracker_with(idle_session(dir.path()));
+        let now = Instant::now();
+        tracker.evict_idle(now, Duration::ZERO); // first sweep stamps the root
+        assert_eq!(tracker.sessions.len(), 1, "freshly stamped session survives");
+        tracker.evict_idle(now + Duration::from_secs(1), Duration::ZERO);
+        assert!(tracker.sessions.is_empty(), "idle session evicted past threshold");
+    }
+
+    #[test]
+    fn sessions_with_pending_or_active_agent_never_evicted() {
+        let (_dir, mut tracker, _path) = active_session_with_reported_change(); // pending non-empty
+        let active_dir = tempdir().unwrap();
+        let mut active = idle_session(active_dir.path());
+        active.agent_active = true; // mid-turn, nothing pending yet
+        tracker.sessions.insert(active.root.clone(), active);
+        let now = Instant::now();
+        tracker.evict_idle(now, Duration::ZERO);
+        tracker.evict_idle(now + Duration::from_secs(3600), Duration::ZERO);
+        assert_eq!(tracker.sessions.len(), 2, "pending/active sessions must survive eviction");
     }
 
     // A nested git worktree/repo checked out inside the root must not be
