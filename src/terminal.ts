@@ -327,6 +327,23 @@ export class TerminalManager {
       return true;
     });
 
+    // Click anywhere in the instance (incl. the wrapper padding xterm's own
+    // handler never sees) recovers keyboard focus. WKWebView can leave the
+    // helper textarea as document.activeElement while no longer routing keys to
+    // it — so a bare focus() (xterm's built-in click handler, or ours) is a
+    // no-op and the terminal stays deaf (e.g. vim ignoring i/:). blur()+focus()
+    // forces a real refocus that breaks the stale state. stopPropagation avoids
+    // a redundant focusGroup() render pass from the group-body mousedown above.
+    el.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+      if (this.active !== t) {
+        this.activate(t);
+      } else {
+        t.term.blur();
+        t.term.focus();
+      }
+    });
+
     // Right-click context menu.
     el.addEventListener("contextmenu", (e: MouseEvent) => {
       e.preventDefault();

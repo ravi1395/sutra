@@ -679,7 +679,8 @@ function setTerminal(on: boolean): void {
   renderTerminalSeam();
   if (on) {
     if (terminals.count === 0) void terminals.create();
-    else requestAnimationFrame(() => terminals.refit());
+    // Refit, then focus so keystrokes reach the shell without a manual click.
+    else requestAnimationFrame(() => { terminals.refit(); terminals.focusActive(); });
   }
 }
 btnTerm.onclick = () => setTerminal(!drawerState.open);
