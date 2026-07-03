@@ -1,9 +1,9 @@
 // Worktree sessions dashboard (harness v2): pure row model (buildRows /
 // shouldFullPoll / aggregate) plus the panel. Refresh loop: listWorktreeRoots →
-// cheap agentTrackingPoll per root → expensive turnList only where
+// cheap agentTrackingRefresh per root → expensive turnList only where
 // shouldFullPoll passes → per-section re-render.
 import {
-  agentTrackingPeek,
+  agentTrackingRefresh,
   hookInstall,
   hookStatus,
   listWorktreeRoots,
@@ -209,11 +209,13 @@ export async function refreshSessions(): Promise<void> {
     const roots = [primary, ...worktrees.map((w) => w.path)];
     const polls = new Map<string, RootPoll>();
 
-    // Cheap poll: agent active + pending count per root; never let one root fail the pass.
+    // Cheap poll: agent active + pending count per root; never let one root fail
+    // the pass. Refresh = real poll for roots with a live session (keeps
+    // background worktree agents reconciling), read-only peek otherwise.
     await Promise.all(
       roots.map(async (root) => {
         try {
-          const st = await agentTrackingPeek(root);
+          const st = await agentTrackingRefresh(root);
           polls.set(root, {
             agentKind: st.agentActive ? "agent" : null,
             pending: st.changes.length,

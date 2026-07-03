@@ -222,6 +222,39 @@ impl Tracker {
     /// workspace. The multi-root sessions panel polls every worktree every few
     /// seconds; `peek` gives it live agent detection plus any existing pending
     /// count without the cost (a full baseline scan) or side effects of `poll`.
+    /// Poll `root` when it already has a live session (so background worktree
+    /// agents keep reconciling and reporting real pending counts); read-only
+    /// peek otherwise, so listing an idle worktree never creates a session or
+    /// scans its tree.
+    fn refresh(&mut self, root: &Path) -> Result<AgentTrackingStatus, String> {
+        if !self.sessions.contains_key(root) {
+            return Ok(self.peek(root));
+        }
+        let kind = self.agent_kind_for_root(root);
+        let agent_active = kind.is_some();
+        let discover = !matches!(kind, Some(AgentKind::Claude));
+        self.poll(root, agent_active, discover)
+    }
+
+    /// Record an agent-reported edit against the session owning `path`
+    /// (longest tracked ancestor root), falling back to `active_root` when the
+    /// path is inside it. Returns false when no tracked root contains the
+    /// path. Lets background worktree agents report to their own session
+    /// instead of being rejected against the active workspace root.
+    fn record_report_owned(&mut self, path: PathBuf, active_root: Option<&Path>) -> bool {
+        if let Some(owner) = self.owning_root(&path) {
+            self.record_agent_report(&owner, path);
+            return true;
+        }
+        let Some(root) = active_root else { return false };
+        let Ok(root_canon) = fs::canonicalize(root) else { return false };
+        if !path.starts_with(&root_canon) {
+            return false;
+        }
+        self.record_agent_report(root, path);
+        true
+    }
+
     fn peek(&self, root: &Path) -> AgentTrackingStatus {
         let agent_active = self.agent_kind_for_root(root).is_some();
         match self.sessions.get(root) {
@@ -623,6 +656,12 @@ impl AgentTrackerState {
     /// Record an agent-reported edit path against the active session.
     pub fn record_agent_report(&self, root: &Path, path: PathBuf) {
         TRACKER.lock().unwrap().record_agent_report(root, path);
+    }
+
+    /// Record an agent-reported edit against whichever tracked session owns
+    /// the path, falling back to `active_root`. See `Tracker::record_report_owned`.
+    pub fn record_agent_report_owned(&self, path: PathBuf, active_root: Option<&Path>) -> bool {
+        TRACKER.lock().unwrap().record_report_owned(path, active_root)
     }
 }
 
@@ -1145,6 +1184,17 @@ pub fn agent_tracking_poll(
     tracker.poll(root, agent_active, discover)
 }
 
+/// Sessions-panel status for `root`: a real poll when the root already has a
+/// live tracking session (background worktree agents keep reconciling), a
+/// read-only peek otherwise (listing an idle worktree never creates a session).
+#[tauri::command]
+pub fn agent_tracking_refresh(
+    _state: State<'_, AgentTrackerState>,
+    root: String,
+) -> Result<AgentTrackingStatus, String> {
+    TRACKER.lock().unwrap().refresh(Path::new(&root))
+}
+
 /// Read-only agent-tracking status for `root`; never mutates the shared session.
 /// The sessions panel uses this to poll worktree roots without clobbering the
 /// active workspace's tracking session.
@@ -1235,6 +1285,53 @@ mod tests {
         tracker.evict_idle(now, Duration::ZERO);
         tracker.evict_idle(now + Duration::from_secs(3600), Duration::ZERO);
         assert_eq!(tracker.sessions.len(), 2, "pending/active sessions must survive eviction");
+    }
+
+    // refresh() must never create a session (the panel would otherwise spin up
+    // a whole-tree baseline for every idle worktree it lists)…
+    #[test]
+    fn refresh_without_session_is_readonly() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        commit_all(&repo, "init");
+        let mut tracker = Tracker::default();
+        let status = tracker.refresh(dir.path()).unwrap();
+        assert!(!status.enabled);
+        assert!(tracker.sessions.is_empty(), "refresh must not create a session");
+    }
+
+    // …but for a root that already has a live session (background worktree
+    // agent), refresh polls it so scan-based reconciliation keeps running and
+    // the panel sees real pending counts instead of a frozen peek.
+    #[test]
+    fn refresh_with_session_reconciles_new_edits() {
+        let (dir, mut tracker, path) = active_session_with_reported_change();
+        fs::write(dir.path().join("new-edit.txt"), "agent wrote this").unwrap();
+        let status = tracker.refresh(dir.path()).unwrap();
+        assert!(status.enabled);
+        assert!(
+            status.changes.iter().any(|c| c.path.ends_with("f.txt")),
+            "previously reported change must survive refresh"
+        );
+        let _ = path;
+    }
+
+    // Agent edit reported for a path owned by a non-active tracked root (a
+    // background worktree) must land in that root's session.
+    #[test]
+    fn record_agent_report_owned_routes_to_owning_session() {
+        let (_active_dir, mut tracker, _path) = active_session_with_reported_change();
+        let other = tempdir().unwrap();
+        let repo = git2::Repository::init(other.path()).unwrap();
+        commit_all(&repo, "other");
+        tracker.poll(other.path(), false, false).unwrap(); // live session for the worktree
+        let edited = other.path().join("agent.txt");
+        fs::write(&edited, "agent edit").unwrap();
+        assert!(tracker.record_report_owned(edited.clone(), None));
+        assert!(
+            tracker.sessions.get(other.path()).unwrap().pending.contains_key(&edited),
+            "report must land in the owning root's session"
+        );
     }
 
     // A nested git worktree/repo checked out inside the root must not be

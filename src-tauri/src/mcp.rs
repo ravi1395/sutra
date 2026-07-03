@@ -173,26 +173,40 @@ struct IngestBody {
     path: String,
 }
 
-/// Record an agent-reported edit. Validates the path stays inside the active
-/// workspace root (`resolve_in_root`); otherwise rejects. Loopback-only,
-/// best-effort.
+/// Record an agent-reported edit. The path must land inside a tracked session
+/// root (background worktree agents report to their own session, not the
+/// active workspace's) or inside the active workspace root; anything else
+/// rejects. Loopback-only, best-effort.
 async fn ingest_edit(
     AxumState(ctx): AxumState<IngestCtx>,
     Json(body): Json<IngestBody>,
 ) -> StatusCode {
-    let Some(root) = ctx.root.lock().ok().and_then(|guard| guard.clone()) else {
-        return StatusCode::SERVICE_UNAVAILABLE;
+    let active = ctx.root.lock().ok().and_then(|guard| guard.clone());
+    let candidate = {
+        let p = Path::new(&body.path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(root) = &active {
+            root.join(p)
+        } else {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
     };
-    let Ok(path) = resolve_in_root(&root, &body.path) else {
+    let Ok(path) = std::fs::canonicalize(&candidate) else {
         return StatusCode::BAD_REQUEST;
     };
     let app = ctx.app.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let recorded = tokio::task::spawn_blocking(move || {
         app.state::<crate::agent_tracker::AgentTrackerState>()
-            .record_agent_report(&root, path);
+            .record_agent_report_owned(path, active.as_deref())
     })
-    .await;
-    StatusCode::NO_CONTENT
+    .await
+    .unwrap_or(false);
+    if recorded {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 /// Write the live ingest base URL to `<root>/.sutra/endpoint` for hook scripts.

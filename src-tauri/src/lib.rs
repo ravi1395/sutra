@@ -79,6 +79,7 @@ pub fn run() {
             agent_tracker::agent_tracking_begin,
             agent_tracker::agent_tracking_poll,
             agent_tracker::agent_tracking_peek,
+            agent_tracker::agent_tracking_refresh,
             agent_tracker::agent_tracking_accept,
             agent_tracker::agent_tracking_revert,
             agent_tracker::agent_base_content,
