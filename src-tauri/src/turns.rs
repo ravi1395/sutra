@@ -490,8 +490,9 @@ fn blob_store(root: &str) -> BlobStore {
     BlobStore::new(turns_dir(root).join("objects"))
 }
 
-/// Load all turns from the manifest. On a corrupt line, the manifest is
-/// renamed to `.bak` and an empty list is returned.
+/// Load all turns from the manifest. Corrupt lines (torn writes, concurrent
+/// readers observing a partial append) are skipped, never fatal: wiping the
+/// whole file on one bad line destroyed all turn/rollback history for the root.
 fn load_manifest(root: &str) -> Vec<Turn> {
     let path = manifest_path(root);
     let Ok(file) = fs::File::open(&path) else {
@@ -504,13 +505,8 @@ fn load_manifest(root: &str) -> Vec<Turn> {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Turn>(&line) {
-            Ok(turn) => turns.push(turn),
-            Err(_) => {
-                let backup = path.with_extension("jsonl.bak");
-                let _ = fs::rename(&path, backup);
-                return vec![];
-            }
+        if let Ok(turn) = serde_json::from_str::<Turn>(&line) {
+            turns.push(turn);
         }
     }
     turns
@@ -541,7 +537,11 @@ fn rewrite_manifest(root: &str, turns: &[Turn]) -> Result<(), String> {
         out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
         out.push('\n');
     }
-    fs::write(&path, out).map_err(|e| e.to_string())
+    // Temp-file + rename so a reader never observes a truncated mid-rewrite
+    // manifest (also survives a crash mid-write).
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// GC the manifest + blob store for `root`: past the turn-count or blob-size
@@ -674,6 +674,9 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
 /// List recorded turns for `root`.
 #[tauri::command]
 pub fn turn_list(root: String) -> Result<Vec<Turn>, String> {
+    // Same lock discipline as the writers (turn_poll/turn_rollback/GC) so a
+    // read never interleaves with an in-progress append/rewrite.
+    let _roots = ROOTS.lock().unwrap();
     Ok(load_manifest(&root))
 }
 
@@ -899,6 +902,7 @@ fn branch_of(path: &Path) -> String {
 
 /// Latest recorded test status for `root` (consumed by mcp.rs).
 pub fn latest_test_status(root: &str) -> Option<(u64, TestStatus)> {
+    let _roots = ROOTS.lock().unwrap(); // read under writer lock, see turn_list
     load_manifest(root)
         .into_iter()
         .filter_map(|turn| turn.test_status.map(|status| (turn.id, status)))
@@ -1065,6 +1069,28 @@ mod tests {
         let plan = resolve_restore(&turns, 0);
         assert!(!plan.contains_key("unsafe.rs")); // excluded from rollback
         assert_eq!(plan.get("created.rs"), Some(&None)); // created → delete
+    }
+
+    // A torn/garbage manifest line (interrupted write, concurrent reader) must
+    // not wipe the whole history — parseable lines around it still load and the
+    // manifest file stays in place.
+    #[test]
+    fn load_manifest_skips_corrupt_lines_without_wiping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        append_manifest(root, &turn_fixture(1, vec![("a", Some("h0"), Some("h1"))])).unwrap();
+        {
+            use std::io::Write;
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(manifest_path(root))
+                .unwrap();
+            writeln!(f, "{{\"id\": 2, \"root\"").unwrap(); // torn line
+        }
+        append_manifest(root, &turn_fixture(3, vec![("b", Some("h2"), Some("h3"))])).unwrap();
+        let turns = load_manifest(root);
+        assert_eq!(turns.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
+        assert!(manifest_path(root).exists()); // not renamed away
     }
 
     // An oversized (>10MB cap) pre-existing file records before_hash=None with
