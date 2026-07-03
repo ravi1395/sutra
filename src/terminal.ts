@@ -631,7 +631,13 @@ export class TerminalManager {
   }
 
   focusActive(): void {
-    this.active?.term.focus();
+    const t = this.active;
+    if (!t) return;
+    // Don't steal focus into a terminal whose group (or item) is display:none —
+    // e.g. this.active still points at a pane in a group hidden by maximize/collapse.
+    // offsetParent is null under any display:none ancestor.
+    if (t.term.element?.offsetParent === null) return;
+    t.term.focus();
   }
 
   /** Apply terminal font size to current and future terminal sessions. */
