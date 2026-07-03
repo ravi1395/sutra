@@ -1,25 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { hoistTask, isFirstRunDraft, clampDrawerHeight, orderSections } from "../src/composer-layout";
-
-test("hoistTask moves task to the front, preserving the rest in order", () => {
-  const tags = [{ id: "role" }, { id: "context" }, { id: "task" }, { id: "constraints" }];
-  assert.deepEqual(
-    hoistTask(tags).map((t) => t.id),
-    ["task", "role", "context", "constraints"],
-  );
-});
-
-test("hoistTask is a no-op (copy) when there is no task tag", () => {
-  const tags = [{ id: "role" }, { id: "context" }];
-  const out = hoistTask(tags);
-  assert.deepEqual(out.map((t) => t.id), ["role", "context"]);
-  assert.notEqual(out, tags); // returns a fresh array
-});
-
-test("hoistTask keeps a single task tag first", () => {
-  assert.deepEqual(hoistTask([{ id: "task" }]).map((t) => t.id), ["task"]);
-});
+import { isFirstRunDraft, clampDrawerHeight, orderSections } from "../src/composer-layout";
 
 test("isFirstRunDraft is true only when empty task and no chips", () => {
   assert.equal(isFirstRunDraft("", 0), true);

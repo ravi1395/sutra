@@ -2,13 +2,6 @@
 // cleanly without a browser or Tauri. Behaviour lives here; composer.ts wires
 // these into the DOM.
 
-/** Reorder sections so `task` renders first (the hero), preserving the rest. */
-export function hoistTask<T extends { id: string }>(tags: T[]): T[] {
-  const task = tags.find((t) => t.id === "task");
-  if (!task) return [...tags];
-  return [task, ...tags.filter((t) => t.id !== "task")];
-}
-
 /** Lead tags rendered/emitted first, in this exact order. */
 const LEAD_ORDER = ["role", "context", "task"];
 
