@@ -68,7 +68,66 @@ pub fn scan_agent_assets(root: String) -> Result<Vec<AgentAsset>, String> {
         out.extend(scan_dir(&base.join("agents"), "subagent", None));
         out.extend(scan_dir(&base.join("skills"), "skill", Some("SKILL.md")));
     }
+
+    if let Some(home) = dirs_home() {
+        out.extend(scan_plugins(&home.join(".claude").join("plugins").join("cache")));
+    }
+    // Stable order + drop duplicate names (e.g. same asset from two sources).
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+
     Ok(out)
+}
+
+/// Newest version subdir of a plugin dir (lexical max — best-effort for semver).
+fn latest_version_dir(plugin: &Path) -> Option<std::path::PathBuf> {
+    let mut vers: Vec<std::path::PathBuf> = std::fs::read_dir(plugin)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    vers.sort();
+    vers.pop()
+}
+
+/// Walk ~/.claude/plugins/cache/<market>/<plugin>/<latest>/{skills,commands,agents}.
+/// Asset names are prefixed with `<plugin>:` to match Claude Code convention.
+pub fn scan_plugins(cache: &Path) -> Vec<AgentAsset> {
+    let mut out = Vec::new();
+    let markets = match std::fs::read_dir(cache) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for market in markets.flatten() {
+        let plugins = match std::fs::read_dir(market.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for plugin in plugins.flatten() {
+            let pname = match plugin.file_name().to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let ver = match latest_version_dir(&plugin.path()) {
+                Some(v) => v,
+                None => continue,
+            };
+            let kinds: [(&str, &str, Option<&str>); 3] = [
+                ("commands", "command", None),
+                ("agents", "subagent", None),
+                ("skills", "skill", Some("SKILL.md")),
+            ];
+            for (sub, kind, file) in kinds {
+                for mut a in scan_dir(&ver.join(sub), kind, file) {
+                    a.name = format!("{pname}:{}", a.name);
+                    a.invocation = invocation_for(kind, &a.name);
+                    out.push(a);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Home dir without adding a dependency: $HOME (unix) / %USERPROFILE% (windows).
@@ -120,5 +179,36 @@ mod tests {
     #[test]
     fn scan_dir_missing_is_empty() {
         assert!(scan_dir(std::path::Path::new("/no/such/dir"), "command", None).is_empty());
+    }
+
+    #[test]
+    fn scan_plugins_namespaces_and_picks_latest() {
+        let tmp = std::env::temp_dir().join(format!("sutra-plug-{}", std::process::id()));
+        let plug = tmp.join("market").join("superpowers");
+        let old = plug.join("1.0.0").join("skills").join("brainstorming");
+        let new = plug.join("6.1.0").join("skills").join("brainstorming");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        fs::write(old.join("SKILL.md"), "x").unwrap();
+        fs::write(new.join("SKILL.md"), "x").unwrap();
+        let cmds = plug.join("6.1.0").join("commands");
+        fs::create_dir_all(&cmds).unwrap();
+        fs::write(cmds.join("deploy.md"), "x").unwrap();
+
+        let found = super::scan_plugins(&tmp);
+        let names: Vec<_> = found.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"superpowers:brainstorming"));
+        assert!(names.contains(&"superpowers:deploy"));
+        // only the latest version contributes → exactly one brainstorming entry
+        assert_eq!(names.iter().filter(|n| **n == "superpowers:brainstorming").count(), 1);
+        let deploy = found.iter().find(|a| a.name == "superpowers:deploy").unwrap();
+        assert_eq!(deploy.invocation, "/superpowers:deploy");
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn scan_plugins_missing_cache_is_empty() {
+        assert!(super::scan_plugins(std::path::Path::new("/no/such/cache")).is_empty());
     }
 }
