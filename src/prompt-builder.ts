@@ -2,6 +2,7 @@
 // Pure: no DOM, no Tauri. Empty sections are omitted; <thinking> is a modifier
 // (a prepended instruction), never an emitted tag.
 import { templateTags, type TagConfig } from "./prompt-tags";
+import { orderSections } from "./composer-layout";
 
 export interface FileChip { kind: "file"; path: string }
 export interface SelectionChip {
@@ -78,7 +79,7 @@ function sectionBody(id: string, input: BuildInput, cap: number): string {
 export function buildPrompt(input: BuildInput): string {
   const cap = input.capBytes ?? DEFAULT_CAP;
   const blocks: string[] = [];
-  for (const tag of templateTags(input.config, input.templateName)) {
+  for (const tag of orderSections(templateTags(input.config, input.templateName))) {
     const body = sectionBody(tag.id, input, cap);
     if (body) blocks.push(`<${tag.id}>\n${body}\n</${tag.id}>`);
   }

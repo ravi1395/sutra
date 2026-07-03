@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import { DEFAULT_CONFIG } from "../src/prompt-tags";
+import { orderSections } from "../src/composer-layout";
 import {
   buildPrompt,
   defaultSection,
@@ -79,4 +80,32 @@ test("thinking modifier prepends an instruction, never emits a tag", () => {
   });
   assert.ok(out.startsWith("Think hard before answering."));
   assert.ok(!out.includes("<thinking>"));
+});
+
+test("buildPrompt emits role, context, task, rest in order", () => {
+  const out = buildPrompt({
+    config: DEFAULT_CONFIG,
+    templateName: "Bug fix", // tags: role, context, task, constraints, success_criteria, output
+    text: { role: "R", context: "C", task: "T", constraints: "K" },
+    chips: [],
+    thinking: false,
+  });
+  const order = ["role", "context", "task", "constraints"].map((t) => out.indexOf(`<${t}>`));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.ok(order.every((i) => i >= 0));
+});
+
+test("buildPrompt reorders when template order differs", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "Scrambled", tags: ["task", "output", "role", "context"] }],
+  };
+  const out = buildPrompt({
+    config, templateName: "Scrambled",
+    text: { role: "R", context: "C", task: "T", output: "O" },
+    chips: [], thinking: false,
+  });
+  assert.ok(out.indexOf("<role>") < out.indexOf("<context>"));
+  assert.ok(out.indexOf("<context>") < out.indexOf("<task>"));
+  assert.ok(out.indexOf("<task>") < out.indexOf("<output>"));
 });
