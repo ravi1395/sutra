@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { openRollbackDialog, resolveRollbackChecklist, rollbackChecklist } from "../src/rollback-dialog";
+import { openRollbackDialog, resolveRollbackChecklist, rollbackChecklist, setRollbackEditor } from "../src/rollback-dialog";
 import type { RollbackResult, Turn, TurnFileEntry } from "../src/ipc";
+import type { EditorManager } from "../src/editor";
 
 const f = (path: string, before: string | null, after: string | null, snapshotted: boolean): TurnFileEntry => ({
   path,
@@ -191,6 +192,30 @@ test("openRollbackDialog: Apply stays disabled while rows load, enables once cle
     assert.equal(applyBtn.disabled, false);
     assert.notEqual(list.textContent, "Checking file status…");
   } finally {
+    restore();
+  }
+});
+
+test("openRollbackDialog: dirty editor buffer blocks Apply (tab paths are absolute, row paths root-relative)", async () => {
+  const { body, restore } = setupDom();
+  try {
+    // Editor tabs carry absolute paths (list_dir); checklist rows are root-relative.
+    setRollbackEditor({
+      getOpenTabs: () => [{ path: "/r/a.ts", name: "a.ts", active: true, dirty: true }],
+    } as unknown as EditorManager);
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "h2" }); // clean → checked by default
+    const onApply = async (paths: string[]): Promise<RollbackResult> => ({ restored: paths, failed: [] });
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    const banner = findByClass(overlay, "rollback-dirty-banner")!;
+    assert.equal(applyBtn.disabled, true, "Apply must stay disabled while a checked path has unsaved edits");
+    assert.equal(banner.style.display, "", "dirty banner must be visible");
+  } finally {
+    setRollbackEditor({ getOpenTabs: () => [] } as unknown as EditorManager);
     restore();
   }
 });
