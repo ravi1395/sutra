@@ -154,7 +154,7 @@ fn prune_dir(dir: &Path, keep: usize) {
 /// Shared, Tauri-managed MCP state: bound port, workspace root, and UI replies.
 #[derive(Default)]
 pub struct McpState {
-    pub port: Mutex<Option<u16>>,
+    pub port: Arc<Mutex<Option<u16>>>,
     pub root: Arc<Mutex<Option<PathBuf>>>,
     pub pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     pub next_id: Arc<AtomicU64>,
@@ -754,14 +754,6 @@ impl SutraMcp {
         Ok(Self::ok_json(value))
     }
 
-    /// Active workspace root as a string, for tools that accept an optional
-    /// `root` override (falls back to Sutra's active workspace root).
-    fn workspace_root(&self) -> String {
-        self.active_root()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-
     #[tool(
         description = "Get current typecheck/lint diagnostics for the workspace (or a given root). \
                        Empty list means clean or diagnostics disabled."
@@ -770,7 +762,10 @@ impl SutraMcp {
         &self,
         Parameters(p): Parameters<RootParam>,
     ) -> Result<CallToolResult, McpError> {
-        let root = p.root.unwrap_or_else(|| self.workspace_root());
+        let root = match p.root {
+            Some(r) => r,
+            None => self.active_root()?.to_string_lossy().into_owned(),
+        };
         let diags = crate::runner::latest_diagnostics(&root);
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({ "root": root, "count": diags.len(), "diagnostics": diags })
@@ -786,7 +781,10 @@ impl SutraMcp {
         &self,
         Parameters(p): Parameters<RootParam>,
     ) -> Result<CallToolResult, McpError> {
-        let root = p.root.unwrap_or_else(|| self.workspace_root());
+        let root = match p.root {
+            Some(r) => r,
+            None => self.active_root()?.to_string_lossy().into_owned(),
+        };
         let body = match crate::turns::latest_test_status(&root) {
             Some((turn_id, status)) => {
                 serde_json::json!({ "root": root, "turnId": turn_id, "status": status })
@@ -815,12 +813,17 @@ impl ServerHandler for SutraMcp {
 }
 
 /// Bind the MCP server on an ephemeral port and serve it on a dedicated thread.
-/// Returns the bound port. Mirrors `preview_server`'s threaded model.
+/// Returns the bound port. `port_slot` is the shared advertised-port cell
+/// (`McpState.port`): it is set once the socket is bound and cleared the instant
+/// the serve thread exits — runtime-build failure, listener-adoption failure, or
+/// the serve loop returning — so `mcp_server_url` can never hand out a URL that
+/// no longer serves. Mirrors `preview_server`'s threaded model.
 pub fn start(
     app: AppHandle,
     root: Arc<Mutex<Option<PathBuf>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     next_id: Arc<AtomicU64>,
+    port_slot: Arc<Mutex<Option<u16>>>,
     auth_token: String,
 ) -> Result<u16, String> {
     let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
@@ -829,20 +832,45 @@ pub fn start(
         .set_nonblocking(true)
         .map_err(|e| e.to_string())?;
 
-    std::thread::Builder::new()
+    // Advertise the port now that the socket is bound; the guard below clears it
+    // on any thread exit, so the advertised port always reflects a live server.
+    if let Ok(mut slot) = port_slot.lock() {
+        *slot = Some(port);
+    }
+
+    let guard_slot = port_slot.clone();
+    let spawn_result = std::thread::Builder::new()
         .name("sutra-mcp-server".to_string())
         .spawn(move || {
+            // Clears the advertised port on every thread-exit path (early return
+            // or panic), so a dead server cannot keep advertising its URL.
+            struct PortGuard(Arc<Mutex<Option<u16>>>);
+            impl Drop for PortGuard {
+                fn drop(&mut self) {
+                    if let Ok(mut slot) = self.0.lock() {
+                        *slot = None;
+                    }
+                }
+            }
+            let _port_guard = PortGuard(guard_slot);
+
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
                 Ok(rt) => rt,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[mcp] tokio runtime build failed: {e}");
+                    return;
+                }
             };
             rt.block_on(async move {
                 let listener = match tokio::net::TcpListener::from_std(std_listener) {
                     Ok(l) => l,
-                    Err(_) => return,
+                    Err(e) => {
+                        eprintln!("[mcp] listener adoption failed: {e}");
+                        return;
+                    }
                 };
                 let ingest_ctx = IngestCtx {
                     app: app.clone(),
@@ -863,10 +891,19 @@ pub fn start(
                         require_auth_token,
                     ))
                     .with_state(ingest_ctx);
-                let _ = axum::serve(listener, router).await;
+                if let Err(e) = axum::serve(listener, router).await {
+                    eprintln!("[mcp] serve loop exited: {e}");
+                }
             });
-        })
-        .map_err(|e| e.to_string())?;
+        });
+    if let Err(e) = spawn_result {
+        // The serve thread never started, so its Drop guard can't clear the
+        // port we optimistically advertised above — clear it here.
+        if let Ok(mut slot) = port_slot.lock() {
+            *slot = None;
+        }
+        return Err(e.to_string());
+    }
     Ok(port)
 }
 

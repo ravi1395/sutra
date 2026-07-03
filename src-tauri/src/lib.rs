@@ -59,15 +59,19 @@ pub fn run() {
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             let state = app.state::<mcp::McpState>();
             let token = app.state::<mcp::LocalAuthToken>().value().to_string();
-            let port = mcp::start(
+            // Best-effort: a failed MCP bind must not abort editor launch. The
+            // port cell stays None, so `mcp_server_url` cleanly reports the
+            // server is not started rather than the app failing to open.
+            if let Err(e) = mcp::start(
                 app.handle().clone(),
                 state.root.clone(),
                 state.pending.clone(),
                 state.next_id.clone(),
+                state.port.clone(),
                 token,
-            )
-            .map_err(|e| e.to_string())?;
-            *state.port.lock().unwrap() = Some(port);
+            ) {
+                eprintln!("[mcp] server failed to start: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
