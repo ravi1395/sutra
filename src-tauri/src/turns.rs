@@ -307,6 +307,7 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
         let mut last_after_leq_n: Option<Option<String>> = None;
         let mut earliest_before: Option<Option<String>> = None;
         let mut earliest_unsafe = false;
+        let mut earliest_snapshotted = true;
         let mut earliest_id = u64::MAX;
         for turn in turns {
             if turn.rolled_back {
@@ -325,15 +326,17 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                     earliest_id = turn.id;
                     earliest_before = Some(file.before_hash.clone());
                     earliest_unsafe = file.unsafe_before;
+                    earliest_snapshotted = file.snapshotted;
                 }
             }
         }
         let restore_to = last_after_leq_n.unwrap_or_else(|| earliest_before.unwrap_or(None));
-        // Never plan a delete for a file whose pre-edit content was unrecoverable:
-        // the user still has that file and we never captured its original, so
-        // deleting it would be silent data loss. Exclude it from rollback entirely
-        // (the frontend surfaces it via TurnFile.unsafe_before).
-        if restore_to.is_none() && earliest_unsafe {
+        // Never plan a delete for a file whose pre-edit content was unrecoverable
+        // (unsafe_before) or never snapshotted (>10MB cap): before_hash=None there
+        // means "original unknown", not "didn't exist", so deleting would be silent
+        // data loss. Exclude such files from rollback entirely (the frontend
+        // surfaces them via TurnFile.unsafe_before / !snapshotted).
+        if restore_to.is_none() && (earliest_unsafe || !earliest_snapshotted) {
             continue;
         }
         plan.insert(path, restore_to);
@@ -1062,6 +1065,17 @@ mod tests {
         let plan = resolve_restore(&turns, 0);
         assert!(!plan.contains_key("unsafe.rs")); // excluded from rollback
         assert_eq!(plan.get("created.rs"), Some(&None)); // created → delete
+    }
+
+    // An oversized (>10MB cap) pre-existing file records before_hash=None with
+    // snapshotted=false — resolve_restore must exclude it from delete-on-rollback
+    // rather than treat it like a created file.
+    #[test]
+    fn unsnapshotted_oversized_file_excluded_from_delete() {
+        let mut t = turn_fixture(1, vec![("big.bin", None, Some("hafter"))]);
+        t.files[0].snapshotted = false;
+        let plan = resolve_restore(&[t], 0);
+        assert!(!plan.contains_key("big.bin"));
     }
 
     // I1: after a rollback writes a synthetic pre-rollback turn, the engine's
