@@ -175,10 +175,21 @@ impl TurnEngine {
         self.close_open(now_ms, "hook")
     }
 
-    /// Advance the quiet-window heuristic. Only closes a turn when no hook is
-    /// installed for its agent kind (`hook_installed = false` on this engine).
+    /// Advance the quiet-window heuristic. Suppressed only when the open
+    /// turn's agent kind is covered by an installed Stop hook — today that is
+    /// Claude only (an empty kind also counts: any signal closes it, see
+    /// `observe_signal`). A codex/unknown turn has no hook that will ever
+    /// close it, so it must keep the quiet-window fallback even with the
+    /// Claude hook installed, else it stays open forever and blocks rollback
+    /// for the whole root.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Turn> {
-        if self.hook_installed {
+        let hook_covers_open_turn = self.hook_installed
+            && self
+                .open
+                .as_ref()
+                .map(|turn| turn.agent_kind == "claude" || turn.agent_kind.is_empty())
+                .unwrap_or(true);
+        if hook_covers_open_turn {
             return vec![];
         }
         let Some(last_change) = self.last_change_at else {
@@ -977,6 +988,19 @@ mod tests {
         let mut h = TurnEngine::new(10_000, true); // hook installed → heuristic suppressed
         h.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
         assert!(h.tick(60_000).is_empty());
+    }
+
+    // A codex/unknown-kind turn has no Stop hook to close it — the quiet
+    // window must still apply even when the Claude hook is installed, else
+    // the turn stays open forever and blocks rollback for the whole root.
+    #[test]
+    fn quiet_window_closes_codex_turn_despite_claude_hook() {
+        let mut e = TurnEngine::new(10_000, true); // Claude hook installed
+        e.observe_changes(0, &[("a.rs".into(), None, false)], "codex");
+        assert!(e.tick(9_999).is_empty());
+        let closed = e.tick(10_001);
+        assert_eq!(closed[0].boundary_source, "quiet");
+        assert_eq!(closed[0].agent_kind, "codex");
     }
 
     #[test]
