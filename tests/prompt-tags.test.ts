@@ -50,3 +50,9 @@ test("templateTags returns tags in template order, skipping unknown ids", () => 
   const tags = templateTags(DEFAULT_CONFIG, "Review");
   assert.deepEqual(tags.map((t) => t.id), ["role", "context", "task", "output"]);
 });
+
+test("DEFAULT_CONFIG ships no prefilled values", () => {
+  for (const t of DEFAULT_CONFIG.tags) assert.equal(t.default, "", `${t.id} has a default`);
+  const role = DEFAULT_CONFIG.tags.find((t) => t.id === "role")!;
+  assert.equal(role.placeholder, "You are a senior engineer working in this repo.");
+});
