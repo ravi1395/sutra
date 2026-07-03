@@ -73,7 +73,12 @@ struct TrackingSession {
 #[derive(Default)]
 struct Tracker {
     shells: HashMap<u32, PathBuf>,
-    session: Option<TrackingSession>,
+    // One session per workspace root. Keyed by root so concurrent polls of
+    // different roots (the multi-root sessions panel, terminals opened in
+    // worktrees) never clobber each other — a single shared session would be
+    // reset on every cross-root poll, wiping pending changes and dropping agent
+    // edit reports before they surface.
+    sessions: HashMap<PathBuf, TrackingSession>,
 }
 
 // Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
@@ -109,30 +114,35 @@ impl Tracker {
         let head = match git_head_id(root) {
             Some(head) => head,
             None => {
-                self.session = None;
+                self.sessions.remove(root);
                 return Ok(disabled_status());
             }
         };
+        // A session is keyed by root, so the root always matches; only a moved
+        // HEAD (branch switch, commit) invalidates the captured baseline.
         let reset = self
-            .session
-            .as_ref()
-            .map(|session| session.root != root || session.head != head)
+            .sessions
+            .get(root)
+            .map(|session| session.head != head)
             .unwrap_or(true);
         if reset {
             let baseline = scan_workspace(root, None)?;
-            self.session = Some(TrackingSession {
-                root: root.to_path_buf(),
-                head,
-                last_scan: baseline.clone(),
-                baseline,
-                pending: BTreeMap::new(),
-                agent_active: false,
-                settle_polls: 0,
-                report_mode: false,
-            });
+            self.sessions.insert(
+                root.to_path_buf(),
+                TrackingSession {
+                    root: root.to_path_buf(),
+                    head,
+                    last_scan: baseline.clone(),
+                    baseline,
+                    pending: BTreeMap::new(),
+                    agent_active: false,
+                    settle_polls: 0,
+                    report_mode: false,
+                },
+            );
         }
 
-        let session = self.session.as_mut().expect("session initialized");
+        let session = self.sessions.get_mut(root).expect("session initialized");
         // A session touched by a report-capable agent (Claude) stays in report
         // mode until it resets, so a later heuristic poll never blind-discovers
         // the user's own mid-session edits.
@@ -170,25 +180,23 @@ impl Tracker {
         };
         if effective_discover {
             if should_scan {
-                self.reconcile_session()?;
+                self.reconcile_session(root)?;
             }
         } else {
-            self.refresh_pending();
+            self.refresh_pending(root);
         }
         Ok(session_status(
-            self.session.as_ref().expect("session initialized"),
+            self.sessions.get(root).expect("session initialized"),
         ))
     }
 
-    /// Read-only status for `root` that never creates or resets the shared
-    /// single session. The multi-root sessions panel polls every worktree; if it
-    /// used `poll` (which resets the one session whenever the root differs) it
-    /// would continuously wipe the active workspace's pending changes and drop
-    /// every agent report. `peek` reports live agent detection for `root` and,
-    /// only when the active session already belongs to `root`, its pending count.
+    /// Read-only status for `root`: never creates a session or scans the
+    /// workspace. The multi-root sessions panel polls every worktree every few
+    /// seconds; `peek` gives it live agent detection plus any existing pending
+    /// count without the cost (a full baseline scan) or side effects of `poll`.
     fn peek(&self, root: &Path) -> AgentTrackingStatus {
         let agent_active = self.agent_kind_for_root(root).is_some();
-        match self.session.as_ref().filter(|session| session.root == root) {
+        match self.sessions.get(root) {
             Some(session) => {
                 let mut status = session_status(session);
                 status.agent_active = agent_active;
@@ -203,7 +211,7 @@ impl Tracker {
     }
 
     fn accept(&mut self, root: &Path) -> Result<AgentTrackingStatus, String> {
-        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+        let Some(session) = self.sessions.get_mut(root) else {
             return Ok(disabled_status());
         };
         let baseline = scan_workspace(root, Some(&session.last_scan))?;
@@ -216,7 +224,7 @@ impl Tracker {
     /// Pre-agent content for a pending path: the base the agent edited from.
     /// `Bytes` → original text; `Delete` (agent-created) → empty; `Unsafe`/absent → None.
     fn base_content(&self, root: &Path, path: &Path) -> Option<String> {
-        let session = self.session.as_ref().filter(|session| session.root == root)?;
+        let session = self.sessions.get(root)?;
         match &session.pending.get(path)?.restore {
             RestoreSource::Bytes(bytes) => String::from_utf8(bytes.clone()).ok(),
             RestoreSource::Delete => Some(String::new()),
@@ -227,7 +235,7 @@ impl Tracker {
     /// Accept all AI changes in one file: fold current content into the baseline
     /// and drop it from pending (the per-file rebase).
     fn accept_path(&mut self, root: &Path, path: &Path) -> Result<AgentTrackingStatus, String> {
-        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+        let Some(session) = self.sessions.get_mut(root) else {
             return Ok(disabled_status());
         };
         match fs::read(path).ok() {
@@ -263,7 +271,7 @@ impl Tracker {
         if total > MAX_HUNK_BYTES {
             return Err("hunk text too large".into());
         }
-        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+        let Some(session) = self.sessions.get_mut(root) else {
             return Ok(disabled_status());
         };
         let Some(change) = session.pending.get(path) else {
@@ -310,15 +318,15 @@ impl Tracker {
     }
 
     fn revert(&mut self, root: &Path) -> Result<AgentRevertResult, String> {
-        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+        let Some(session) = self.sessions.get_mut(root) else {
             return Ok(AgentRevertResult::default());
         };
         let result = revert_safe_changes(&mut session.pending);
         Ok(result)
     }
 
-    fn reconcile_session(&mut self) -> Result<(), String> {
-        let Some(session) = self.session.as_mut() else {
+    fn reconcile_session(&mut self, root: &Path) -> Result<(), String> {
+        let Some(session) = self.sessions.get_mut(root) else {
             return Ok(());
         };
         let current = scan_workspace(&session.root, Some(&session.last_scan))?;
@@ -331,7 +339,7 @@ impl Tracker {
     /// Record a path an agent reported editing as an AI change. Drops it if the
     /// file is back at the baseline.
     fn record_agent_report(&mut self, root: &Path, path: PathBuf) {
-        let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
+        let Some(session) = self.sessions.get_mut(root) else {
             return;
         };
         session.report_mode = true;
@@ -388,8 +396,8 @@ impl Tracker {
 
     /// Recompute status of already-known pending paths and drop any back at
     /// baseline. Does NOT discover new paths (report mode).
-    fn refresh_pending(&mut self) {
-        let Some(session) = self.session.as_mut() else {
+    fn refresh_pending(&mut self, root: &Path) {
+        let Some(session) = self.sessions.get_mut(root) else {
             return;
         };
         for path in session.pending.keys().cloned().collect::<Vec<_>>() {
@@ -454,14 +462,22 @@ impl Tracker {
         )
     }
 
+    /// Root of the session that owns `path`: the longest tracked root that is an
+    /// ancestor of the path. Worktrees nest under the primary root, so the most
+    /// specific (longest) match wins.
+    fn owning_root(&self, path: &Path) -> Option<PathBuf> {
+        self.sessions
+            .keys()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
+            .cloned()
+    }
+
     fn record_sutra_mutation(
         &mut self,
         before: BTreeMap<PathBuf, Option<Vec<u8>>>,
         after_roots: &[PathBuf],
     ) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
         let after = capture_paths(after_roots);
         let paths = before
             .keys()
@@ -469,6 +485,12 @@ impl Tracker {
             .cloned()
             .collect::<BTreeSet<_>>();
         for path in paths {
+            // Apply each mutated path to the session that owns it; a path under
+            // no tracked root is ignored.
+            let Some(owner) = self.owning_root(&path) else {
+                continue;
+            };
+            let session = self.sessions.get_mut(&owner).expect("owner session exists");
             let after_bytes = after.get(&path).and_then(|value| value.as_ref());
             let baseline_signature = session.baseline.get(&path);
             let before_matches_baseline = bytes_option_matches_signature(
@@ -587,7 +609,7 @@ impl AgentTrackerState {
 pub fn pending_snapshot(root: &str) -> Vec<(String, Option<Vec<u8>>, bool)> {
     let root = Path::new(root);
     let tracker = TRACKER.lock().unwrap();
-    let Some(session) = tracker.session.as_ref().filter(|session| session.root == root) else {
+    let Some(session) = tracker.sessions.get(root) else {
         return vec![];
     };
     session
@@ -620,7 +642,7 @@ pub fn reconcile_restored(root: &str, path: &str, bytes: Option<Vec<u8>>) {
     let root = Path::new(root);
     let path = Path::new(path);
     let mut tracker = TRACKER.lock().unwrap();
-    let Some(session) = tracker.session.as_mut().filter(|session| session.root == root) else {
+    let Some(session) = tracker.sessions.get_mut(root) else {
         return;
     };
     match bytes {
@@ -1119,6 +1141,24 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
+    /// Build a tracker holding a single session, keyed by its own root.
+    fn tracker_with(session: TrackingSession) -> Tracker {
+        let mut sessions = HashMap::new();
+        sessions.insert(session.root.clone(), session);
+        Tracker {
+            sessions,
+            ..Tracker::default()
+        }
+    }
+
+    impl Tracker {
+        /// The one session in a single-session test; panics otherwise.
+        fn only_session(&self) -> &TrackingSession {
+            assert_eq!(self.sessions.len(), 1, "expected exactly one session");
+            self.sessions.values().next().unwrap()
+        }
+    }
+
     fn snapshot(entries: &[(&str, &[u8])]) -> Snapshot {
         entries
             .iter()
@@ -1328,8 +1368,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file.txt");
         fs::write(&path, "base").unwrap();
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head: "head".into(),
                 baseline: scan_workspace(dir.path(), None).unwrap(),
@@ -1338,23 +1377,21 @@ mod tests {
                 agent_active: true,
                 settle_polls: 2,
                 report_mode: false,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         let human_before = capture_paths(&[path.clone()]);
         fs::write(&path, "human").unwrap();
         tracker.record_sutra_mutation(human_before, &[path.clone()]);
-        assert!(tracker.session.as_ref().unwrap().pending.is_empty());
+        assert!(tracker.only_session().pending.is_empty());
 
         fs::write(&path, "agent").unwrap();
-        tracker.reconcile_session().unwrap();
-        assert!(!tracker.session.as_ref().unwrap().pending[&path].human_touched);
+        tracker.reconcile_session(dir.path()).unwrap();
+        assert!(!tracker.only_session().pending[&path].human_touched);
 
         let after_agent = capture_paths(&[path.clone()]);
         fs::write(&path, "human-after-agent").unwrap();
         tracker.record_sutra_mutation(after_agent, &[path.clone()]);
-        assert!(tracker.session.as_ref().unwrap().pending[&path].human_touched);
+        assert!(tracker.only_session().pending[&path].human_touched);
     }
 
     #[test]
@@ -1364,8 +1401,7 @@ mod tests {
         fs::write(&path, "initial").unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "initial");
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
                 baseline: scan_workspace(dir.path(), None).unwrap(),
@@ -1374,17 +1410,15 @@ mod tests {
                 agent_active: false,
                 settle_polls: 0,
                 report_mode: false,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         fs::write(&path, "outside-agent").unwrap();
         tracker.poll(dir.path(), true, true).unwrap();
 
-        assert!(tracker.session.as_ref().unwrap().pending.is_empty());
+        assert!(tracker.only_session().pending.is_empty());
         assert!(bytes_match_signature(
             b"outside-agent",
-            &tracker.session.as_ref().unwrap().baseline[&path],
+            &tracker.only_session().baseline[&path],
         ));
     }
 
@@ -1394,8 +1428,7 @@ mod tests {
         let path = dir.path().join("f.txt");
         fs::write(&path, "base").unwrap();
         let baseline = scan_workspace(dir.path(), None).unwrap();
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head: "head".into(),
                 last_scan: baseline.clone(),
@@ -1404,19 +1437,17 @@ mod tests {
                 agent_active: true,
                 settle_polls: 0,
                 report_mode: false,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         fs::write(&path, "agent").unwrap();
         tracker.record_agent_report(dir.path(), path.clone());
-        let change = &tracker.session.as_ref().unwrap().pending[&path];
+        let change = &tracker.only_session().pending[&path];
         assert_eq!(change.status, "M");
         assert!(!change.human_touched);
 
         fs::write(&path, "base").unwrap();
         tracker.record_agent_report(dir.path(), path.clone());
-        assert!(tracker.session.as_ref().unwrap().pending.is_empty());
+        assert!(tracker.only_session().pending.is_empty());
     }
 
     #[test]
@@ -1429,8 +1460,7 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "initial");
         let baseline = scan_workspace(dir.path(), None).unwrap();
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
                 last_scan: baseline.clone(),
@@ -1439,16 +1469,14 @@ mod tests {
                 agent_active: true,
                 settle_polls: 0,
                 report_mode: true,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         fs::write(&reported, "agent").unwrap();
         tracker.record_agent_report(dir.path(), reported.clone());
         fs::write(&manual, "human-edit").unwrap();
 
         tracker.poll(dir.path(), true, false).unwrap();
-        let pending = &tracker.session.as_ref().unwrap().pending;
+        let pending = &tracker.only_session().pending;
         assert!(pending.contains_key(&reported));
         assert!(!pending.contains_key(&manual));
     }
@@ -1461,8 +1489,7 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "initial");
         let baseline = scan_workspace(dir.path(), None).unwrap();
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
                 last_scan: baseline.clone(),
@@ -1471,9 +1498,7 @@ mod tests {
                 agent_active: true,
                 settle_polls: 0,
                 report_mode: false,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         // Claude active (report mode) engages stickiness.
         tracker.poll(dir.path(), true, false).unwrap();
@@ -1484,10 +1509,7 @@ mod tests {
         tracker.poll(dir.path(), false, true).unwrap();
         tracker.poll(dir.path(), false, true).unwrap();
 
-        assert!(!tracker
-            .session
-            .as_ref()
-            .unwrap()
+        assert!(!tracker.only_session()
             .pending
             .contains_key(&manual));
     }
@@ -1497,7 +1519,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut tracker = Tracker::default();
         tracker.record_agent_report(dir.path(), dir.path().join("x.txt"));
-        assert!(tracker.session.is_none());
+        assert!(tracker.sessions.is_empty());
     }
 
     #[test]
@@ -1554,8 +1576,7 @@ mod tests {
                 restore: RestoreSource::Bytes(b"base".to_vec()),
             },
         );
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head: "h".into(),
                 baseline: scan_workspace(dir.path(), None).unwrap(),
@@ -1564,12 +1585,10 @@ mod tests {
                 agent_active: false,
                 settle_polls: 0,
                 report_mode: true,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         tracker.accept_path(dir.path(), &path).unwrap();
-        let session = tracker.session.as_ref().unwrap();
+        let session = tracker.only_session();
         assert!(!session.pending.contains_key(&path));
         assert!(bytes_match_signature(b"agent-final", &session.baseline[&path]));
     }
@@ -1611,8 +1630,7 @@ mod tests {
             },
         );
 
-        let tracker = Tracker {
-            session: Some(TrackingSession {
+        let tracker = tracker_with(TrackingSession {
                 root: root.clone(),
                 head: "h".into(),
                 baseline: BTreeMap::new(),
@@ -1621,9 +1639,7 @@ mod tests {
                 agent_active: false,
                 settle_polls: 0,
                 report_mode: true,
-            }),
-            ..Tracker::default()
-        };
+        });
 
         assert_eq!(tracker.base_content(&root, &modified), Some("old".to_string()));
         assert_eq!(tracker.base_content(&root, &created), Some(String::new()));
@@ -1640,8 +1656,7 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let head = commit_all(&repo, "init");
         let baseline = scan_workspace(dir.path(), None).unwrap();
-        let mut tracker = Tracker {
-            session: Some(TrackingSession {
+        let mut tracker = tracker_with(TrackingSession {
                 root: dir.path().to_path_buf(),
                 head,
                 last_scan: baseline.clone(),
@@ -1650,30 +1665,30 @@ mod tests {
                 agent_active: true,
                 settle_polls: 0,
                 report_mode: true,
-            }),
-            ..Tracker::default()
-        };
+        });
         fs::write(&path, "agent").unwrap();
         tracker.record_agent_report(dir.path(), path.clone());
-        assert!(tracker.session.as_ref().unwrap().pending.contains_key(&path));
+        assert!(tracker.only_session().pending.contains_key(&path));
         (dir, tracker, path)
     }
 
     #[test]
-    fn polling_another_root_wipes_the_active_sessions_pending() {
-        // Documents the root cause: the tracker holds ONE session, so polling a
-        // different root (as the multi-root sessions panel did) resets it and
-        // drops the active workspace's reported AI changes.
-        let (_dir, mut tracker, path) = active_session_with_reported_change();
+    fn polling_another_root_keeps_the_active_sessions_pending() {
+        // Durable fix: sessions are keyed per root, so polling a different root
+        // (a worktree, as the multi-root sessions panel does) spins up its own
+        // session and leaves the active workspace's reported AI change intact.
+        // Under the old single-session tracker this poll reset and dropped it.
+        let (dir, mut tracker, path) = active_session_with_reported_change();
         let other = tempdir().unwrap();
         let repo = git2::Repository::init(other.path()).unwrap();
         commit_all(&repo, "other");
 
         tracker.poll(other.path(), false, true).unwrap();
 
-        let session = tracker.session.as_ref().unwrap();
-        assert_eq!(session.root, other.path());
-        assert!(!session.pending.contains_key(&path)); // change lost
+        // Two independent sessions coexist; the active one is untouched.
+        assert_eq!(tracker.sessions.len(), 2);
+        assert!(tracker.sessions.contains_key(other.path()));
+        assert!(tracker.sessions[dir.path()].pending.contains_key(&path));
     }
 
     #[test]
@@ -1688,11 +1703,8 @@ mod tests {
         assert!(!status.enabled); // no session for the peeked root
         assert!(status.changes.is_empty());
         // Active session untouched: pending change still present.
-        assert_eq!(tracker.session.as_ref().unwrap().root, _dir.path());
-        assert!(tracker
-            .session
-            .as_ref()
-            .unwrap()
+        assert_eq!(tracker.only_session().root, _dir.path());
+        assert!(tracker.only_session()
             .pending
             .contains_key(&path));
     }
@@ -1708,7 +1720,7 @@ mod tests {
         assert_eq!(status.changes[0].path, path.to_string_lossy());
         assert!(!status.changes[0].human_touched);
         // Still present after peek (no mutation).
-        assert!(tracker.session.as_ref().unwrap().pending.contains_key(&path));
+        assert!(tracker.only_session().pending.contains_key(&path));
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
