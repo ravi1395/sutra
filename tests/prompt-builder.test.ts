@@ -108,3 +108,37 @@ test("buildPrompt reorders when template order differs", () => {
   assert.ok(out.indexOf("<context>") < out.indexOf("<task>"));
   assert.ok(out.indexOf("<task>") < out.indexOf("<output>"));
 });
+
+test("chip routed to a section absent from the template folds into Task, not dropped", () => {
+  // Selection chips default to section "context"; a task-only template has none.
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "TaskOnly", tags: ["task", "output"] }],
+  };
+  const chip: RoutedChip = { chip: { kind: "file", path: "src/a.ts" }, section: "context" };
+  const out = buildPrompt({
+    config, templateName: "TaskOnly",
+    text: { task: "Do it." },
+    chips: [chip], thinking: false,
+  });
+  assert.ok(out.includes("@src/a.ts"), "orphan chip must survive");
+  assert.ok(!out.includes("<context>"), "no context tag is emitted");
+  // it lands inside the Task block (the fallback), after the task text
+  assert.ok(out.indexOf("@src/a.ts") > out.indexOf("<task>"));
+  assert.ok(out.indexOf("@src/a.ts") < out.indexOf("</task>"));
+});
+
+test("orphan chip folds into first section when template has no Task", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "OutOnly", tags: ["output"] }],
+  };
+  const chip: RoutedChip = { chip: { kind: "file", path: "src/b.ts" }, section: "context" };
+  const out = buildPrompt({
+    config, templateName: "OutOnly",
+    text: { output: "Result." },
+    chips: [chip], thinking: false,
+  });
+  assert.ok(out.includes("@src/b.ts"));
+  assert.ok(out.indexOf("@src/b.ts") < out.indexOf("</output>"));
+});

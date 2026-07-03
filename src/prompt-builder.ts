@@ -65,22 +65,32 @@ export interface BuildInput {
   capBytes?: number;
 }
 
-/** Merge a section's free text + routed chips into one trimmed body. */
-function sectionBody(id: string, input: BuildInput, cap: number): string {
+/** Merge a section's free text + routed chips into one trimmed body.
+ * A chip whose routed section is absent from the template lands in `fallbackId`
+ * instead of being silently dropped (e.g. a selection chip routed to "context"
+ * in a template that has no context tag). */
+function sectionBody(
+  id: string, input: BuildInput, cap: number, ids: Set<string>, fallbackId: string | undefined,
+): string {
   const parts: string[] = [];
   const t = (input.text[id] ?? "").trim();
   if (t) parts.push(t);
   for (const r of input.chips) {
-    if (r.section === id) parts.push(renderChip(r.chip, cap));
+    const home = ids.has(r.section) ? r.section : fallbackId;
+    if (home === id) parts.push(renderChip(r.chip, cap));
   }
   return parts.join("\n").trim();
 }
 
 export function buildPrompt(input: BuildInput): string {
   const cap = input.capBytes ?? DEFAULT_CAP;
+  const tags = orderSections(templateTags(input.config, input.templateName));
+  const ids = new Set(tags.map((t) => t.id));
+  // Orphan chips fold into Task if the template has one, else the first section.
+  const fallbackId = ids.has("task") ? "task" : tags[0]?.id;
   const blocks: string[] = [];
-  for (const tag of orderSections(templateTags(input.config, input.templateName))) {
-    const body = sectionBody(tag.id, input, cap);
+  for (const tag of tags) {
+    const body = sectionBody(tag.id, input, cap, ids, fallbackId);
     if (body) blocks.push(`<${tag.id}>\n${body}\n</${tag.id}>`);
   }
   if (blocks.length === 0) return "";

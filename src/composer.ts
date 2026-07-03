@@ -78,7 +78,8 @@ export function mountComposer(opts: ComposerOptions): {
   let submit = false;
   let visible = false;
   let pollTimer: number | undefined;
-  let ctxArea: HTMLTextAreaElement | null = null;   // context hero (owns @ / / completion)
+  let completeArea: HTMLTextAreaElement | null = null;  // section owning @ / / completion (context, else task)
+  let completeId = "context";                           // tag id a picked suggestion inserts into
   let ctxCount: HTMLElement | null = null;
   let suggestItems: string[] = [];
   let suggestActive = 0;
@@ -277,8 +278,12 @@ export function mountComposer(opts: ComposerOptions): {
       inp.value = text[tag.id] ?? tag.default ?? "";
       inp.oninput = () => { text[tag.id] = inp.value; renderPreview(); autosave(); };
       wrap.appendChild(inp);
+      sectionsEl.appendChild(wrap);
       return;
     }
+
+    // Whichever hero backs completion this render (Context if present, else Task).
+    const ownsCompletion = isHero && tag.id === completeId;
 
     const ta = mk("textarea", "cmp-section-input");
     ta.placeholder = tag.placeholder || tag.label;
@@ -288,14 +293,14 @@ export function mountComposer(opts: ComposerOptions): {
       text[tag.id] = ta.value;
       renderPreview();
       autosave();
-      if (isCtx) { handleCompletion(ta); }
+      if (ownsCompletion) { handleCompletion(ta); }
       if (isHero) { updateHeroCounts(); updateOnboard(); }
     };
-    ta.onkeydown = (e) => { if (isCtx) onCtxKeydown(e, ta); else onHeroKeydown(e); };
+    ta.onkeydown = (e) => { if (ownsCompletion) onCompleteKeydown(e); else onHeroKeydown(e); };
     wrap.appendChild(ta);
+    if (ownsCompletion) completeArea = ta;
 
     if (isCtx) {
-      ctxArea = ta;
       // hint row: @ file · / skill · + selection
       const hint = mk("div", "cmp-complete-hint");
       hint.innerHTML = `@ file &middot; / skill &middot; `;
@@ -306,7 +311,10 @@ export function mountComposer(opts: ComposerOptions): {
       wrap.appendChild(hint);
     } else if (isTask) {
       const hint = mk("div", "cmp-complete-hint");
-      hint.textContent = "plain prose — describe the outcome you want";
+      // Task backs completion only when the template omits a Context section.
+      hint.textContent = ownsCompletion
+        ? "@ file · / skill · plain prose"
+        : "plain prose — describe the outcome you want";
       wrap.appendChild(hint);
     }
     sectionsEl.appendChild(wrap);
@@ -319,14 +327,15 @@ export function mountComposer(opts: ComposerOptions): {
   function updateHeroCounts(): void {
     if (taskCount) taskCount.textContent = `${(text["task"] ?? "").length} chars`;
     if (ctxCount) {
-      const n = chips.length;
+      // Only chips routed to Context count here — some route to Task.
+      const n = chips.filter((c) => c.section === "context").length;
       ctxCount.textContent = n ? `${n} attached` : "";
     }
   }
 
   function renderSections(): void {
     sectionsEl.innerHTML = "";
-    ctxArea = null; taskCount = null; ctxCount = null;
+    completeArea = null; taskCount = null; ctxCount = null;
     sectionsEl.appendChild(onboardEl);
     // chipRail persists across renders (only its .cmp-chip pills are re-rendered
     // elsewhere) — drop any fallback "+ selection" button from a prior render
@@ -334,6 +343,9 @@ export function mountComposer(opts: ComposerOptions): {
     // repeated template switches.
     chipRail.querySelectorAll(".cmp-add-sel").forEach((e) => e.remove());
     const ordered = orderSections(templateTags(config, templateName));
+    // Context owns completion when present; else Task backs it so @ / / still
+    // work in context-less templates.
+    completeId = ordered.some((t) => t.id === "context") ? "context" : "task";
     let placed = false;
     for (const tag of ordered) {
       renderSection(tag);
@@ -555,21 +567,21 @@ export function mountComposer(opts: ComposerOptions): {
   }
 
   function pickSuggestion(token: string): void {
-    if (!ctxArea) return;
-    const pos = ctxArea.selectionStart;
-    const before = ctxArea.value.slice(0, suggestStart);
-    const after = ctxArea.value.slice(pos);
-    ctxArea.value = before + token + " " + after;
+    if (!completeArea) return;
+    const pos = completeArea.selectionStart;
+    const before = completeArea.value.slice(0, suggestStart);
+    const after = completeArea.value.slice(pos);
+    completeArea.value = before + token + " " + after;
     const newPos = before.length + token.length + 1;
-    ctxArea.setSelectionRange(newPos, newPos);
-    text["context"] = ctxArea.value;
+    completeArea.setSelectionRange(newPos, newPos);
+    text[completeId] = completeArea.value;
     hideSuggest();
     updateHeroCounts();
     renderPreview();
     autosave();
   }
 
-  function onCtxKeydown(e: KeyboardEvent, _ta: HTMLTextAreaElement): void {
+  function onCompleteKeydown(e: KeyboardEvent): void {
     if (!suggestEl.classList.contains("hidden")) {
       const items = suggestEl.querySelectorAll<HTMLElement>(".cmp-suggest-item");
       if (e.key === "ArrowDown") { e.preventDefault(); suggestActive = Math.min(suggestActive + 1, items.length - 1); items.forEach((it, i) => it.classList.toggle("active", i === suggestActive)); return; }
