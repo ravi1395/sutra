@@ -80,3 +80,65 @@ test("thinking modifier prepends an instruction, never emits a tag", () => {
   assert.ok(out.startsWith("Think hard before answering."));
   assert.ok(!out.includes("<thinking>"));
 });
+
+test("buildPrompt emits role, context, task, rest in order", () => {
+  const out = buildPrompt({
+    config: DEFAULT_CONFIG,
+    templateName: "Bug fix", // tags: role, context, task, constraints, success_criteria, output
+    text: { role: "R", context: "C", task: "T", constraints: "K" },
+    chips: [],
+    thinking: false,
+  });
+  const order = ["role", "context", "task", "constraints"].map((t) => out.indexOf(`<${t}>`));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.ok(order.every((i) => i >= 0));
+});
+
+test("buildPrompt reorders when template order differs", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "Scrambled", tags: ["task", "output", "role", "context"] }],
+  };
+  const out = buildPrompt({
+    config, templateName: "Scrambled",
+    text: { role: "R", context: "C", task: "T", output: "O" },
+    chips: [], thinking: false,
+  });
+  assert.ok(out.indexOf("<role>") < out.indexOf("<context>"));
+  assert.ok(out.indexOf("<context>") < out.indexOf("<task>"));
+  assert.ok(out.indexOf("<task>") < out.indexOf("<output>"));
+});
+
+test("chip routed to a section absent from the template folds into Task, not dropped", () => {
+  // Selection chips default to section "context"; a task-only template has none.
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "TaskOnly", tags: ["task", "output"] }],
+  };
+  const chip: RoutedChip = { chip: { kind: "file", path: "src/a.ts" }, section: "context" };
+  const out = buildPrompt({
+    config, templateName: "TaskOnly",
+    text: { task: "Do it." },
+    chips: [chip], thinking: false,
+  });
+  assert.ok(out.includes("@src/a.ts"), "orphan chip must survive");
+  assert.ok(!out.includes("<context>"), "no context tag is emitted");
+  // it lands inside the Task block (the fallback), after the task text
+  assert.ok(out.indexOf("@src/a.ts") > out.indexOf("<task>"));
+  assert.ok(out.indexOf("@src/a.ts") < out.indexOf("</task>"));
+});
+
+test("orphan chip folds into first section when template has no Task", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    templates: [{ name: "OutOnly", tags: ["output"] }],
+  };
+  const chip: RoutedChip = { chip: { kind: "file", path: "src/b.ts" }, section: "context" };
+  const out = buildPrompt({
+    config, templateName: "OutOnly",
+    text: { output: "Result." },
+    chips: [chip], thinking: false,
+  });
+  assert.ok(out.includes("@src/b.ts"));
+  assert.ok(out.indexOf("@src/b.ts") < out.indexOf("</output>"));
+});

@@ -2706,7 +2706,7 @@ button:hover {
   padding: 6px 8px;
 }
 .cmp-section { margin-bottom: 8px; }
-/* task hero — the field you actually write in, hoisted to the top */
+/* shared hero style for the Context and Task sections — the fields you write in */
 .cmp-hero {
   position: relative;
   background: linear-gradient(180deg, var(--bg-3), var(--bg-1));

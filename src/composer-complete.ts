@@ -37,3 +37,20 @@ export function fileToken(path: string): string {
 export function assetToken(a: AssetOption): string {
   return a.invocation;
 }
+
+/** Trigger + query for the whitespace-delimited token under the cursor.
+ * Resolves by token START so an @path containing "/" stays a file query
+ * (fixes the "/"-mistaken-as-skill collision). "/" fires skills only when it
+ * begins the token. */
+export function completionContext(
+  value: string,
+  pos: number,
+): { trigger: "@" | "/"; query: string; start: number } | null {
+  const before = value.slice(0, pos);
+  let start = pos;
+  while (start > 0 && !/\s/.test(before[start - 1])) start--;
+  const token = before.slice(start);
+  if (token.startsWith("@")) return { trigger: "@", query: token.slice(1), start };
+  if (token.startsWith("/")) return { trigger: "/", query: token.slice(1), start };
+  return null;
+}

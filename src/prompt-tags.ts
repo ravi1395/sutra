@@ -43,7 +43,7 @@ const tag = (
 export const DEFAULT_CONFIG: TagConfig = {
   version: 1,
   tags: [
-    tag("role", "text", true, "persona / expertise", "You are a senior engineer working in this repo."),
+    tag("role", "text", true, "You are a senior engineer working in this repo."),
     tag("context", "chips+text", true, "background + files"),
     tag("task", "textarea", true, "the actual ask"),
     tag("constraints", "bullet", true, "rules, do/don't, scope"),

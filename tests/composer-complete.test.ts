@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   assetToken,
+  completionContext,
   fileToken,
   matchAssets,
   matchFiles,
@@ -30,4 +31,29 @@ test("tokens insert the routed text", () => {
     assetToken({ kind: "subagent", name: "x", invocation: "use the x subagent to " }),
     "use the x subagent to ",
   );
+});
+
+test("completionContext treats @path with slashes as file query", () => {
+  const v = "fix @src/pty.rs";
+  assert.deepEqual(completionContext(v, v.length), { trigger: "@", query: "src/pty.rs", start: 4 });
+});
+
+test("completionContext fires skill only when / starts the token", () => {
+  const v = "then /review";
+  assert.deepEqual(completionContext(v, v.length), { trigger: "/", query: "review", start: 5 });
+});
+
+test("completionContext ignores bare slash paths without @", () => {
+  const v = "see a/b/c";
+  assert.equal(completionContext(v, v.length), null);
+});
+
+test("completionContext null on plain word / empty", () => {
+  assert.equal(completionContext("plain", 5), null);
+  assert.equal(completionContext("", 0), null);
+});
+
+test("completionContext uses current token at cursor", () => {
+  const v = "@a.ts /bui";
+  assert.deepEqual(completionContext(v, v.length), { trigger: "/", query: "bui", start: 6 });
 });

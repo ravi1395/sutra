@@ -1,12 +1,14 @@
-// Docked prompt-composer panel: template picker, section inputs with @ / /
-// completion, chip rail, agent target selector, draft persistence, send flow.
-// "Focus" layout: task hero on top, other sections full-size below, and
-// Preview / History as slide-up drawers that overlay the scroll area (so they
-// can't be squeezed off when the terminal drawer steals panel height).
+// Docked prompt-composer panel: template picker, section inputs, chip rail,
+// agent target selector, draft persistence, send flow.
+// "Focus" layout: two heroes — Context (owns @file / /skill / +selection
+// completion and the chip rail) and Task — render first, in role→context→
+// task→rest order (task is not hoisted ahead of context); Preview / History
+// are slide-up drawers that overlay the scroll area (so they can't be
+// squeezed off when the terminal drawer steals panel height).
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
-import { hoistTask, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
-import { matchFiles, matchAssets, assetToken, type AssetOption } from "./composer-complete";
+import { orderSections, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
+import { matchFiles, matchAssets, assetToken, completionContext, type AssetOption } from "./composer-complete";
 import {
   saveDraft, loadDraft, clearDraft, loadHistory, saveHistory, pushHistory,
   type Draft, type HistoryEntry,
@@ -76,8 +78,9 @@ export function mountComposer(opts: ComposerOptions): {
   let submit = false;
   let visible = false;
   let pollTimer: number | undefined;
-  let taskArea: HTMLTextAreaElement | null = null;
-  let taskCount: HTMLElement | null = null;
+  let completeArea: HTMLTextAreaElement | null = null;  // section owning @ / / completion (context, else task)
+  let completeId = "context";                           // tag id a picked suggestion inserts into
+  let ctxCount: HTMLElement | null = null;
   let suggestItems: string[] = [];
   let suggestActive = 0;
   let suggestStart = 0;
@@ -110,20 +113,17 @@ export function mountComposer(opts: ComposerOptions): {
   // Main area: scrollable sections + overlay drawers (position anchor)
   const mainWrap = mk("div", "cmp-main");
   const sectionsEl = mk("div", "cmp-sections");
-  // Suggestion dropdown (moved under the task hero during render)
+  // Suggestion dropdown (moved under the Context hero during render)
   const suggestEl = mk("div", "cmp-suggest hidden");
-  // Chip rail (rendered directly under the task hero)
+  // Chip rail (rendered directly under the context hero)
   const chipRail = mk("div", "cmp-chip-rail");
-  const addSelBtn = mkBtn("cmp-add-sel sbtn", `${icon("pencil", 12)} Add selection`);
-  addSelBtn.title = "Insert current editor selection as a context chip";
-  chipRail.appendChild(addSelBtn);
 
   // Onboarding whisper — shown only on a fresh, empty draft.
   const onboardEl = mk("div", "cmp-onboard hidden");
   const chord = IS_MAC ? "⌘↵" : "Ctrl+↵";
   onboardEl.innerHTML =
     '<div class="cmp-onboard-row"><span class="cmp-onboard-n">1</span><span>Pick a <b>template</b> — it sets which sections show.</span></div>' +
-    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">2</span><span>Write <b>the ask</b>. Type <b>@</b> for a file, <b>/</b> for a skill.</span></div>' +
+    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">2</span><span>Attach files/skills in <b>Context</b> (<b>@</b> file, <b>/</b> skill, <b>+ selection</b>). Write the ask in <b>Task</b>.</span></div>' +
     `<div class="cmp-onboard-row"><span class="cmp-onboard-n">3</span><span>Choose an <b>agent terminal</b> above, then <b>${chord}</b> to send.</span></div>`;
 
   // Preview drawer
@@ -238,10 +238,12 @@ export function mountComposer(opts: ComposerOptions): {
 
   // Build one section wrapper and append it to sectionsEl.
   function renderSection(tag: { id: string; label: string; input: string; default: string; placeholder: string }): void {
+    const isCtx = tag.id === "context";
     const isTask = tag.id === "task";
-    const wrap = mk("div", `cmp-section${isTask ? " cmp-hero" : ""}`);
-    // Drop target: dragging a chip here re-routes it to this section, overriding auto-route.
+    const isHero = isCtx || isTask;
+    const wrap = mk("div", `cmp-section${isHero ? " cmp-hero" : ""}`);
     wrap.dataset.section = tag.id;
+    // Chip drop target (re-route on drop) — unchanged behaviour.
     wrap.addEventListener("dragover", (e) => {
       if (draggingChip === null) return;
       e.preventDefault();
@@ -261,73 +263,118 @@ export function mountComposer(opts: ComposerOptions): {
     });
 
     const lbl = mk("div", "cmp-section-lbl");
-    lbl.textContent = isTask ? "The ask" : tag.label;
-    if (isTask) {
-      taskCount = mk("span", "cmp-hero-count");
-      lbl.appendChild(taskCount);
+    lbl.textContent = isCtx ? "Context" : isTask ? "Task" : tag.label;
+    if (isHero) {
+      const count = mk("span", "cmp-hero-count");
+      lbl.appendChild(count);
+      if (isCtx) ctxCount = count; else taskCountEl(count);
     }
     wrap.appendChild(lbl);
 
-    if (tag.input === "text") {
+    if (tag.input === "text" && !isHero) {
       const inp = mk("input", "cmp-section-input cmp-section-text");
       inp.type = "text";
       inp.placeholder = tag.placeholder ?? "";
       inp.value = text[tag.id] ?? tag.default ?? "";
       inp.oninput = () => { text[tag.id] = inp.value; renderPreview(); autosave(); };
       wrap.appendChild(inp);
-    } else {
-      const ta = mk("textarea", "cmp-section-input");
-      ta.placeholder = tag.placeholder || tag.label;
-      ta.value = text[tag.id] ?? tag.default ?? "";
-      ta.rows = isTask ? 5 : 3;
-      ta.oninput = () => {
-        text[tag.id] = ta.value;
-        renderPreview();
-        autosave();
-        if (isTask) { updateTaskCount(); updateOnboard(); handleCompletion(ta); }
-      };
-      ta.onkeydown = (e) => { if (isTask) onTaskKeydown(e, ta); };
-      if (isTask) {
-        taskArea = ta;
-        wrap.appendChild(ta);
-        const hint = mk("div", "cmp-complete-hint");
-        hint.textContent = "@ file  / skill";
-        wrap.appendChild(hint);
-      } else {
-        wrap.appendChild(ta);
-      }
+      sectionsEl.appendChild(wrap);
+      return;
+    }
+
+    // Whichever hero backs completion this render (Context if present, else Task).
+    const ownsCompletion = isHero && tag.id === completeId;
+
+    const ta = mk("textarea", "cmp-section-input");
+    ta.placeholder = tag.placeholder || tag.label;
+    ta.value = text[tag.id] ?? tag.default ?? "";
+    ta.rows = isHero ? 5 : 3;
+    ta.oninput = () => {
+      text[tag.id] = ta.value;
+      renderPreview();
+      autosave();
+      if (ownsCompletion) { handleCompletion(ta); }
+      if (isHero) { updateHeroCounts(); updateOnboard(); }
+    };
+    ta.onkeydown = (e) => { if (ownsCompletion) onCompleteKeydown(e); else onHeroKeydown(e); };
+    wrap.appendChild(ta);
+    if (ownsCompletion) completeArea = ta;
+
+    if (isCtx) {
+      // hint row: @ file · / skill · + selection
+      const hint = mk("div", "cmp-complete-hint");
+      hint.innerHTML = `@ file &middot; / skill &middot; `;
+      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
+      selBtn.title = "Insert current editor selection as a context chip";
+      selBtn.onclick = addSelectionChip;
+      hint.appendChild(selBtn);
+      wrap.appendChild(hint);
+    } else if (isTask) {
+      const hint = mk("div", "cmp-complete-hint");
+      // Task backs completion only when the template omits a Context section.
+      hint.textContent = ownsCompletion
+        ? "@ file · / skill · plain prose"
+        : "plain prose — describe the outcome you want";
+      wrap.appendChild(hint);
     }
     sectionsEl.appendChild(wrap);
   }
 
+  // Late-bound so renderSection can assign either hero's count element.
+  let taskCount: HTMLElement | null = null;
+  function taskCountEl(el: HTMLElement): void { taskCount = el; }
+
+  function updateHeroCounts(): void {
+    if (taskCount) taskCount.textContent = `${(text["task"] ?? "").length} chars`;
+    if (ctxCount) {
+      // Only chips routed to Context count here — some route to Task.
+      const n = chips.filter((c) => c.section === "context").length;
+      ctxCount.textContent = n ? `${n} attached` : "";
+    }
+  }
+
   function renderSections(): void {
     sectionsEl.innerHTML = "";
-    taskArea = null;
-    taskCount = null;
+    completeArea = null; taskCount = null; ctxCount = null;
     sectionsEl.appendChild(onboardEl);
-    // Task is hoisted to the top as the hero, regardless of template order.
-    const ordered = hoistTask(templateTags(config, templateName));
-    const hasTask = ordered[0]?.id === "task";
-    ordered.forEach((tag, i) => {
+    // chipRail persists across renders (only its .cmp-chip pills are re-rendered
+    // elsewhere) — drop any fallback "+ selection" button from a prior render
+    // before deciding whether to re-add one below, to avoid duplicates on
+    // repeated template switches.
+    chipRail.querySelectorAll(".cmp-add-sel").forEach((e) => e.remove());
+    const ordered = orderSections(templateTags(config, templateName));
+    // Context owns completion when present; else Task backs it so @ / / still
+    // work in context-less templates.
+    completeId = ordered.some((t) => t.id === "context") ? "context" : "task";
+    let placed = false;
+    for (const tag of ordered) {
       renderSection(tag);
-      // Suggestion dropdown + chip rail sit directly under the task hero.
-      if (i === 0 && hasTask) {
-        updateTaskCount();
+      // Suggestion dropdown + chip rail sit directly under the Context hero.
+      if (tag.id === "context") {
         sectionsEl.appendChild(suggestEl);
         sectionsEl.appendChild(chipRail);
+        placed = true;
       }
-    });
-    if (!hasTask) {
-      // No task section in this template — keep completion + chips reachable.
+    }
+    if (!placed) {
+      // No context section — keep completion + chips reachable at the end,
+      // and preserve the "+ selection" affordance the Context hero would
+      // otherwise provide, so selection chips stay reachable.
+      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
+      selBtn.title = "Insert current editor selection as a context chip";
+      selBtn.onclick = addSelectionChip;
+      chipRail.appendChild(selBtn);
       sectionsEl.appendChild(suggestEl);
       sectionsEl.appendChild(chipRail);
     }
+    updateHeroCounts();
     updateOnboard();
   }
 
   // First run: nothing written and no chips attached yet.
   function isFirstRun(): boolean {
-    return isFirstRunDraft(text["task"] ?? "", chips.length);
+    const written = (text["task"] ?? "").trim() + (text["context"] ?? "").trim();
+    return isFirstRunDraft(written, chips.length);
   }
 
   function updateOnboard(): void {
@@ -338,10 +385,6 @@ export function mountComposer(opts: ComposerOptions): {
   function updateSendState(): void {
     sendBtn.disabled = !targetId;
     sendBtn.title = targetId ? "" : "No agent terminal — open one to send.";
-  }
-
-  function updateTaskCount(): void {
-    if (taskCount) taskCount.textContent = `${(text["task"] ?? "").length} chars`;
   }
 
   function renderChips(): void {
@@ -359,9 +402,9 @@ export function mountComposer(opts: ComposerOptions): {
       const x = mkBtn("cmp-chip-x", "×");
       x.onclick = () => { chips.splice(i, 1); renderChips(); renderPreview(); autosave(); };
       pill.appendChild(x);
-      // Keep chips before the "Add selection" button.
-      chipRail.insertBefore(pill, addSelBtn);
+      chipRail.appendChild(pill);
     });
+    updateHeroCounts();
     updateOnboard();
   }
 
@@ -488,42 +531,21 @@ export function mountComposer(opts: ComposerOptions): {
 
   // ── @ / / completion ──────────────────────────────────────────────────────────
   function handleCompletion(ta: HTMLTextAreaElement): void {
-    const ctx = completionContext(ta);
+    const ctx = completionContext(ta.value, ta.selectionStart);
     if (!ctx) { hideSuggest(); return; }
     suggestStart = ctx.start;
     if (ctx.trigger === "@") {
       void getFiles()
         .then((files) => {
           const matches = matchFiles(ctx.query, files);
-          showSuggest(
-            matches.map((f) => basename(f)),
-            matches.map((f) => `@${f}`),
-          );
+          showSuggest(matches.map((f) => basename(f)), matches.map((f) => `@${f}`));
         })
         .catch(() => hideSuggest());
     } else {
       const aopts: AssetOption[] = assets.map((a) => ({ kind: a.kind, name: a.name, invocation: a.invocation }));
       const matches = matchAssets(ctx.query, aopts);
-      showSuggest(
-        matches.map((a) => `${a.name} (${a.kind})`),
-        matches.map((a) => assetToken(a)),
-      );
+      showSuggest(matches.map((a) => `${a.name} (${a.kind})`), matches.map((a) => assetToken(a)));
     }
-  }
-
-  function completionContext(ta: HTMLTextAreaElement): { trigger: "@" | "/"; query: string; start: number } | null {
-    const pos = ta.selectionStart;
-    const before = ta.value.slice(0, pos);
-    for (let i = pos - 1; i >= 0; i--) {
-      const ch = before[i];
-      if (ch === "@" || ch === "/") {
-        const query = before.slice(i + 1);
-        if (!/\s/.test(query)) return { trigger: ch as "@" | "/", query, start: i };
-        break;
-      }
-      if (/\s/.test(ch)) break;
-    }
-    return null;
   }
 
   function showSuggest(labels: string[], tokens: string[]): void {
@@ -545,45 +567,33 @@ export function mountComposer(opts: ComposerOptions): {
   }
 
   function pickSuggestion(token: string): void {
-    if (!taskArea) return;
-    const pos = taskArea.selectionStart;
-    const before = taskArea.value.slice(0, suggestStart);
-    const after = taskArea.value.slice(pos);
-    taskArea.value = before + token + " " + after;
+    if (!completeArea) return;
+    const pos = completeArea.selectionStart;
+    const before = completeArea.value.slice(0, suggestStart);
+    const after = completeArea.value.slice(pos);
+    completeArea.value = before + token + " " + after;
     const newPos = before.length + token.length + 1;
-    taskArea.setSelectionRange(newPos, newPos);
-    text["task"] = taskArea.value;
+    completeArea.setSelectionRange(newPos, newPos);
+    text[completeId] = completeArea.value;
     hideSuggest();
-    updateTaskCount();
+    updateHeroCounts();
     renderPreview();
     autosave();
   }
 
-  function onTaskKeydown(e: KeyboardEvent, _ta: HTMLTextAreaElement): void {
+  function onCompleteKeydown(e: KeyboardEvent): void {
     if (!suggestEl.classList.contains("hidden")) {
       const items = suggestEl.querySelectorAll<HTMLElement>(".cmp-suggest-item");
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        suggestActive = Math.min(suggestActive + 1, items.length - 1);
-        items.forEach((it, i) => it.classList.toggle("active", i === suggestActive));
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        suggestActive = Math.max(suggestActive - 1, 0);
-        items.forEach((it, i) => it.classList.toggle("active", i === suggestActive));
-        return;
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        const token = suggestItems[suggestActive];
-        if (token !== undefined) { e.preventDefault(); pickSuggestion(token); return; }
-      }
+      if (e.key === "ArrowDown") { e.preventDefault(); suggestActive = Math.min(suggestActive + 1, items.length - 1); items.forEach((it, i) => it.classList.toggle("active", i === suggestActive)); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); suggestActive = Math.max(suggestActive - 1, 0); items.forEach((it, i) => it.classList.toggle("active", i === suggestActive)); return; }
+      if (e.key === "Enter" || e.key === "Tab") { const token = suggestItems[suggestActive]; if (token !== undefined) { e.preventDefault(); pickSuggestion(token); return; } }
       if (e.key === "Escape") { hideSuggest(); return; }
     }
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void onSend();
-    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void onSend(); }
+  }
+
+  function onHeroKeydown(e: KeyboardEvent): void {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void onSend(); }
   }
 
   // ── send ──────────────────────────────────────────────────────────────────────
@@ -662,25 +672,22 @@ export function mountComposer(opts: ComposerOptions): {
     autosave();
   };
 
-  addSelBtn.onclick = () => {
+  // Insert the current editor selection as a context chip — invoked from the
+  // "+ selection" affordance rendered inside the context hero (see renderSection).
+  function addSelectionChip(): void {
     const sel = getSelection();
     if (!sel.text.trim()) { showStatus("No text selected in editor."); return; }
     clearStatus();
-    chips.push({
-      chip: {
-        kind: "selection",
-        path: sel.path ?? "",
-        lang: sel.lang,
-        startLine: sel.line,
-        endLine: sel.endLine,
-        text: sel.text,
-      },
-      section: defaultSection({ kind: "selection", path: sel.path ?? "", lang: sel.lang, startLine: sel.line, endLine: sel.endLine, text: sel.text }),
-    });
+    const chip = {
+      kind: "selection" as const,
+      path: sel.path ?? "", lang: sel.lang,
+      startLine: sel.line, endLine: sel.endLine, text: sel.text,
+    };
+    chips.push({ chip, section: defaultSection(chip) });
     renderChips();
     renderPreview();
     autosave();
-  };
+  }
 
   sendBtn.onclick = () => void onSend();
   stageInp.onchange = () => { submit = false; };
