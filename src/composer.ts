@@ -1,7 +1,11 @@
 // Docked prompt-composer panel: template picker, section inputs with @ / /
 // completion, chip rail, agent target selector, draft persistence, send flow.
+// "Focus" layout: task hero on top, other sections full-size below, and
+// Preview / History as slide-up drawers that overlay the scroll area (so they
+// can't be squeezed off when the terminal drawer steals panel height).
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
+import { hoistTask, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
 import { matchFiles, matchAssets, assetToken, type AssetOption } from "./composer-complete";
 import {
   saveDraft, loadDraft, clearDraft, loadHistory, saveHistory, pushHistory,
@@ -17,6 +21,10 @@ import { IS_MAC } from "./shortcuts";
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
+// Drawer height is a UI preference shared across roots/panels.
+const DRAWER_H_KEY = "composer-drawer-h";
+const DRAWER_H_DEFAULT = 220;
+const DRAWER_H_MIN = 120;
 
 export interface ComposerOptions {
   root: string;
@@ -69,21 +77,25 @@ export function mountComposer(opts: ComposerOptions): {
   let visible = false;
   let pollTimer: number | undefined;
   let taskArea: HTMLTextAreaElement | null = null;
+  let taskCount: HTMLElement | null = null;
   let suggestItems: string[] = [];
   let suggestActive = 0;
   let suggestStart = 0;
+  let prevOpen = false;
+  let histOpen = false;
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   container.innerHTML = "";
 
-
-  // Toolbar
+  // Header (target picker + history + tag-manager)
   const toolbar = mk("div", "cmp-toolbar");
   const targetSel = mk("select", "cmp-target");
   const stateDot = mk("span", "cmp-state-dot");
+  const histToggleBtn = mkBtn("cmp-icon-btn sbtn", icon("list", 13));
+  histToggleBtn.title = "History";
   const gearBtn = mkBtn("cmp-gear sbtn", icon("settings", 13));
   gearBtn.title = "Tag manager";
-  toolbar.append(targetSel, stateDot, gearBtn);
+  toolbar.append(targetSel, stateDot, histToggleBtn, gearBtn);
 
   // Trust banner
   const trustBanner = mk("div", "cmp-trust-banner hidden");
@@ -95,20 +107,56 @@ export function mountComposer(opts: ComposerOptions): {
   // Template bar
   const tmplBar = mk("div", "cmp-template-bar");
 
-  // Per-tag sections
+  // Main area: scrollable sections + overlay drawers (position anchor)
+  const mainWrap = mk("div", "cmp-main");
   const sectionsEl = mk("div", "cmp-sections");
-
-  // Suggestion dropdown (inline, below sections)
+  // Suggestion dropdown (moved under the task hero during render)
   const suggestEl = mk("div", "cmp-suggest hidden");
-
-  // Chip rail
+  // Chip rail (rendered directly under the task hero)
   const chipRail = mk("div", "cmp-chip-rail");
   const addSelBtn = mkBtn("cmp-add-sel sbtn", `${icon("pencil", 12)} Add selection`);
   addSelBtn.title = "Insert current editor selection as a context chip";
   chipRail.appendChild(addSelBtn);
 
-  // Action bar
+  // Onboarding whisper — shown only on a fresh, empty draft.
+  const onboardEl = mk("div", "cmp-onboard hidden");
+  const chord = IS_MAC ? "⌘↵" : "Ctrl+↵";
+  onboardEl.innerHTML =
+    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">1</span><span>Pick a <b>template</b> — it sets which sections show.</span></div>' +
+    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">2</span><span>Write <b>the ask</b>. Type <b>@</b> for a file, <b>/</b> for a skill.</span></div>' +
+    `<div class="cmp-onboard-row"><span class="cmp-onboard-n">3</span><span>Choose an <b>agent terminal</b> above, then <b>${chord}</b> to send.</span></div>`;
+
+  // Preview drawer
+  const prevPeek = mk("div", "cmp-peek");
+  const prevGrab = mk("div", "cmp-peek-grab");
+  prevGrab.dataset.drag = "prev";
+  prevGrab.appendChild(mk("div", "cmp-peek-grabbar"));
+  const prevHead = mk("div", "cmp-peek-h");
+  const prevTitle = mk("span", "cmp-peek-title");
+  prevTitle.textContent = "Preview";
+  const prevClose = mkBtn("cmp-peek-close", "×");
+  prevHead.append(prevTitle, prevClose);
+  const previewPre = mk("pre", "cmp-peek-body cmp-preview-pre");
+  prevPeek.append(prevGrab, prevHead, previewPre);
+
+  // History drawer
+  const histPeek = mk("div", "cmp-peek");
+  const histGrab = mk("div", "cmp-peek-grab");
+  histGrab.dataset.drag = "hist";
+  histGrab.appendChild(mk("div", "cmp-peek-grabbar"));
+  const histHead = mk("div", "cmp-peek-h");
+  const histTitle = mk("span", "cmp-peek-title");
+  histTitle.textContent = "History";
+  const histClose = mkBtn("cmp-peek-close", "×");
+  histHead.append(histTitle, histClose);
+  const histList = mk("div", "cmp-peek-body cmp-hist-list");
+  histPeek.append(histGrab, histHead, histList);
+
+  mainWrap.append(sectionsEl, prevPeek, histPeek);
+
+  // Action bar (pinned footer): Preview toggle + send mode + Send
   const actionBar = mk("div", "cmp-action-bar");
+  const prevBtn = mkBtn("cmp-preview-btn", `${icon("chevronDown", 12)} Preview`);
   const modeGrp = mk("div", "cmp-mode-grp");
   const stageLbl = mk("label", "cmp-radio-lbl");
   const stageInp = mk("input", "");
@@ -124,33 +172,18 @@ export function mountComposer(opts: ComposerOptions): {
   thinkLbl.append(thinkInp, " Think");
   modeGrp.append(stageLbl, submitLbl, thinkLbl);
   const sendBtn = mkBtn("cmp-send", `Send ${IS_MAC ? "⌘" : "Ctrl+"}↵`);
-  actionBar.append(modeGrp, sendBtn);
-
-  // Preview (collapsible)
-  const previewWrap = mk("details", "cmp-preview-wrap");
-  const previewSummary = document.createElement("summary");
-  previewSummary.textContent = "Preview";
-  const previewPre = mk("pre", "cmp-preview-pre");
-  previewWrap.append(previewSummary, previewPre);
-
-  // History
-  const histWrap = mk("div", "cmp-hist-wrap");
-  const histBtn = mkBtn("cmp-hist-btn", `History ${icon("chevronDown", 12)}`);
-  const histList = mk("div", "cmp-hist-list hidden");
-  histWrap.append(histBtn, histList);
+  actionBar.append(prevBtn, modeGrp, sendBtn);
 
   // Status / error
   const statusBar = mk("div", "cmp-status hidden");
 
-  container.append(
-    toolbar, trustBanner, tmplBar, sectionsEl, suggestEl,
-    chipRail, actionBar, previewWrap, histWrap, statusBar,
-  );
+  container.append(toolbar, trustBanner, tmplBar, mainWrap, actionBar, statusBar);
 
   // ── init ─────────────────────────────────────────────────────────────────────
   void init();
 
   async function init(): Promise<void> {
+    applyDrawerHeight();
     await Promise.all([reloadConfig(), refreshAgents(), refreshAssets()]);
     const saved = loadDraft(root);
     if (saved) applyDraft(saved);
@@ -195,6 +228,7 @@ export function mountComposer(opts: ComposerOptions): {
         templateName = t.name;
         renderTemplateBar();
         renderSections();
+        renderChips();
         renderPreview();
         autosave();
       };
@@ -202,64 +236,112 @@ export function mountComposer(opts: ComposerOptions): {
     }
   }
 
+  // Build one section wrapper and append it to sectionsEl.
+  function renderSection(tag: { id: string; label: string; input: string; default: string; placeholder: string }): void {
+    const isTask = tag.id === "task";
+    const wrap = mk("div", `cmp-section${isTask ? " cmp-hero" : ""}`);
+    // Drop target: dragging a chip here re-routes it to this section, overriding auto-route.
+    wrap.dataset.section = tag.id;
+    wrap.addEventListener("dragover", (e) => {
+      if (draggingChip === null) return;
+      e.preventDefault();
+      wrap.classList.add("cmp-drop-over");
+    });
+    wrap.addEventListener("dragleave", () => wrap.classList.remove("cmp-drop-over"));
+    wrap.addEventListener("drop", (e) => {
+      e.preventDefault();
+      wrap.classList.remove("cmp-drop-over");
+      if (draggingChip !== null && chips[draggingChip]) {
+        chips[draggingChip].section = tag.id;
+        draggingChip = null;
+        renderChips();
+        renderPreview();
+        autosave();
+      }
+    });
+
+    const lbl = mk("div", "cmp-section-lbl");
+    lbl.textContent = isTask ? "The ask" : tag.label;
+    if (isTask) {
+      taskCount = mk("span", "cmp-hero-count");
+      lbl.appendChild(taskCount);
+    }
+    wrap.appendChild(lbl);
+
+    if (tag.input === "text") {
+      const inp = mk("input", "cmp-section-input cmp-section-text");
+      inp.type = "text";
+      inp.placeholder = tag.placeholder ?? "";
+      inp.value = text[tag.id] ?? tag.default ?? "";
+      inp.oninput = () => { text[tag.id] = inp.value; renderPreview(); autosave(); };
+      wrap.appendChild(inp);
+    } else {
+      const ta = mk("textarea", "cmp-section-input");
+      ta.placeholder = tag.placeholder || tag.label;
+      ta.value = text[tag.id] ?? tag.default ?? "";
+      ta.rows = isTask ? 5 : 3;
+      ta.oninput = () => {
+        text[tag.id] = ta.value;
+        renderPreview();
+        autosave();
+        if (isTask) { updateTaskCount(); updateOnboard(); handleCompletion(ta); }
+      };
+      ta.onkeydown = (e) => { if (isTask) onTaskKeydown(e, ta); };
+      if (isTask) {
+        taskArea = ta;
+        wrap.appendChild(ta);
+        const hint = mk("div", "cmp-complete-hint");
+        hint.textContent = "@ file  / skill";
+        wrap.appendChild(hint);
+      } else {
+        wrap.appendChild(ta);
+      }
+    }
+    sectionsEl.appendChild(wrap);
+  }
+
   function renderSections(): void {
     sectionsEl.innerHTML = "";
     taskArea = null;
-    for (const tag of templateTags(config, templateName)) {
-      const wrap = mk("div", "cmp-section");
-      // Drop target: dragging a chip here re-routes it to this section, overriding auto-route.
-      wrap.dataset.section = tag.id;
-      wrap.addEventListener("dragover", (e) => {
-        if (draggingChip === null) return;
-        e.preventDefault();
-        wrap.classList.add("cmp-drop-over");
-      });
-      wrap.addEventListener("dragleave", () => wrap.classList.remove("cmp-drop-over"));
-      wrap.addEventListener("drop", (e) => {
-        e.preventDefault();
-        wrap.classList.remove("cmp-drop-over");
-        if (draggingChip !== null && chips[draggingChip]) {
-          chips[draggingChip].section = tag.id;
-          draggingChip = null;
-          renderChips();
-          renderPreview();
-          autosave();
-        }
-      });
-      const lbl = mk("div", "cmp-section-lbl");
-      lbl.textContent = tag.label;
-      wrap.appendChild(lbl);
-
-      if (tag.input === "text") {
-        const inp = mk("input", "cmp-section-input cmp-section-text");
-        inp.type = "text";
-        inp.placeholder = tag.placeholder ?? "";
-        inp.value = text[tag.id] ?? tag.default ?? "";
-        inp.oninput = () => { text[tag.id] = inp.value; renderPreview(); autosave(); };
-        wrap.appendChild(inp);
-      } else {
-        const ta = mk("textarea", "cmp-section-input");
-        ta.placeholder = tag.placeholder || tag.label;
-        ta.value = text[tag.id] ?? tag.default ?? "";
-        ta.rows = tag.id === "task" ? 5 : 3;
-        ta.oninput = () => {
-          text[tag.id] = ta.value;
-          renderPreview();
-          autosave();
-          if (tag.id === "task") handleCompletion(ta);
-        };
-        ta.onkeydown = (e) => { if (tag.id === "task") onTaskKeydown(e, ta); };
-        if (tag.id === "task") {
-          taskArea = ta;
-          const hint = mk("div", "cmp-complete-hint");
-          hint.textContent = "@ file  / skill";
-          wrap.append(ta, hint);
-        } else {
-          wrap.appendChild(ta);
-        }
+    taskCount = null;
+    sectionsEl.appendChild(onboardEl);
+    // Task is hoisted to the top as the hero, regardless of template order.
+    const ordered = hoistTask(templateTags(config, templateName));
+    const hasTask = ordered[0]?.id === "task";
+    ordered.forEach((tag, i) => {
+      renderSection(tag);
+      // Suggestion dropdown + chip rail sit directly under the task hero.
+      if (i === 0 && hasTask) {
+        updateTaskCount();
+        sectionsEl.appendChild(suggestEl);
+        sectionsEl.appendChild(chipRail);
       }
-      sectionsEl.appendChild(wrap);
+    });
+    if (!hasTask) {
+      // No task section in this template — keep completion + chips reachable.
+      sectionsEl.appendChild(suggestEl);
+      sectionsEl.appendChild(chipRail);
     }
+    updateOnboard();
+  }
+
+  // First run: nothing written and no chips attached yet.
+  function isFirstRun(): boolean {
+    return isFirstRunDraft(text["task"] ?? "", chips.length);
+  }
+
+  function updateOnboard(): void {
+    onboardEl.classList.toggle("hidden", !isFirstRun());
+  }
+
+  // Send needs a target terminal; reflect that on the button.
+  function updateSendState(): void {
+    sendBtn.disabled = !targetId;
+    sendBtn.title = targetId ? "" : "No agent terminal — open one to send.";
+  }
+
+  function updateTaskCount(): void {
+    if (taskCount) taskCount.textContent = `${(text["task"] ?? "").length} chars`;
   }
 
   function renderChips(): void {
@@ -277,8 +359,10 @@ export function mountComposer(opts: ComposerOptions): {
       const x = mkBtn("cmp-chip-x", "×");
       x.onclick = () => { chips.splice(i, 1); renderChips(); renderPreview(); autosave(); };
       pill.appendChild(x);
-      chipRail.appendChild(pill);
+      // Keep chips before the "Add selection" button.
+      chipRail.insertBefore(pill, addSelBtn);
     });
+    updateOnboard();
   }
 
   function renderTargetPicker(): void {
@@ -300,6 +384,7 @@ export function mountComposer(opts: ComposerOptions): {
       targetId = targetSel.value || null;
     }
     updateStateDot();
+    updateSendState();
   }
 
   function updateStateDot(): void {
@@ -308,10 +393,37 @@ export function mountComposer(opts: ComposerOptions): {
     stateDot.title = st;
   }
 
+  // ── drawers (preview / history) ────────────────────────────────────────────────
+  function drawerHeight(): number {
+    const v = parseInt(localStorage.getItem(DRAWER_H_KEY) ?? "", 10);
+    return Number.isFinite(v) ? v : DRAWER_H_DEFAULT;
+  }
+
+  function applyDrawerHeight(): void {
+    const h = `${drawerHeight()}px`;
+    prevPeek.style.height = h;
+    histPeek.style.height = h;
+  }
+
+  function openPreview(open: boolean): void {
+    prevOpen = open;
+    if (open) { histOpen = false; histPeek.classList.remove("open"); }
+    prevPeek.classList.toggle("open", open);
+    prevBtn.classList.toggle("active", open);
+    if (open) renderPreview();
+  }
+
+  function openHistory(open: boolean): void {
+    histOpen = open;
+    if (open) { prevOpen = false; prevPeek.classList.remove("open"); prevBtn.classList.remove("active"); }
+    histPeek.classList.toggle("open", open);
+    if (open) renderHistory();
+  }
+
   function renderPreview(): void {
-    if (!previewWrap.open) return;
+    if (!prevOpen) return;
     const p = safeBuildPrompt();
-    previewPre.textContent = p?.trim() ? p : "(empty)";
+    previewPre.textContent = p?.trim() ? p : "Nothing to preview — write the ask first.";
   }
 
   function renderHistory(): void {
@@ -333,6 +445,46 @@ export function mountComposer(opts: ComposerOptions): {
       histList.appendChild(item);
     }
   }
+
+  // Drag the drawer grab handle to resize; height persists globally.
+  let dragEl: HTMLElement | null = null;
+  let dragStartY = 0;
+  let dragStartH = 0;
+  let dragMax = 0;
+
+  function onDrawerDown(e: PointerEvent): void {
+    const grab = e.currentTarget as HTMLElement;
+    dragEl = grab.dataset.drag === "prev" ? prevPeek : histPeek;
+    dragStartY = e.clientY;
+    dragStartH = dragEl.getBoundingClientRect().height;
+    dragMax = Math.round(mainWrap.getBoundingClientRect().height * 0.9);
+    dragEl.classList.add("cmp-peek-dragging");
+    e.preventDefault();
+    window.addEventListener("pointermove", onDrawerMove);
+    window.addEventListener("pointerup", onDrawerUp);
+  }
+
+  function onDrawerMove(e: PointerEvent): void {
+    if (!dragEl) return;
+    const dy = dragStartY - e.clientY;
+    const h = clampDrawerHeight(dragStartH + dy, DRAWER_H_MIN, dragMax);
+    dragEl.style.height = `${h}px`;
+  }
+
+  function onDrawerUp(): void {
+    if (dragEl) {
+      const h = parseInt(dragEl.style.height, 10);
+      if (Number.isFinite(h)) localStorage.setItem(DRAWER_H_KEY, String(h));
+      dragEl.classList.remove("cmp-peek-dragging");
+      applyDrawerHeight(); // keep both drawers in sync
+      dragEl = null;
+    }
+    window.removeEventListener("pointermove", onDrawerMove);
+    window.removeEventListener("pointerup", onDrawerUp);
+  }
+
+  prevGrab.addEventListener("pointerdown", onDrawerDown);
+  histGrab.addEventListener("pointerdown", onDrawerDown);
 
   // ── @ / / completion ──────────────────────────────────────────────────────────
   function handleCompletion(ta: HTMLTextAreaElement): void {
@@ -402,6 +554,7 @@ export function mountComposer(opts: ComposerOptions): {
     taskArea.setSelectionRange(newPos, newPos);
     text["task"] = taskArea.value;
     hideSuggest();
+    updateTaskCount();
     renderPreview();
     autosave();
   }
@@ -533,8 +686,11 @@ export function mountComposer(opts: ComposerOptions): {
   stageInp.onchange = () => { submit = false; };
   submitInp.onchange = () => { submit = true; };
   thinkInp.onchange = () => { thinking = thinkInp.checked; renderPreview(); autosave(); };
-  previewWrap.ontoggle = () => { if (previewWrap.open) renderPreview(); };
-  histBtn.onclick = () => histList.classList.toggle("hidden");
+
+  prevBtn.onclick = () => openPreview(!prevOpen);
+  histToggleBtn.onclick = () => openHistory(!histOpen);
+  prevClose.onclick = () => openPreview(false);
+  histClose.onclick = () => openHistory(false);
 
   trustBtn.onclick = () => {
     localStorage.setItem(TRUST_KEY(root), "1");
@@ -546,6 +702,7 @@ export function mountComposer(opts: ComposerOptions): {
     mountTagManager({
       root,
       config,
+      trusted,
       // Re-read from disk (saveConfig already persisted + normalized) so the
       // composer reflects the normalized on-disk config, not the modal's copy.
       onSave: () => {
@@ -583,6 +740,8 @@ export function mountComposer(opts: ComposerOptions): {
 
   function dispose(): void {
     stopPoll();
+    window.removeEventListener("pointermove", onDrawerMove);
+    window.removeEventListener("pointerup", onDrawerUp);
     container.innerHTML = "";
   }
 
