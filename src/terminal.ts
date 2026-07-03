@@ -255,9 +255,16 @@ export class TerminalManager {
     this.activeByGroup[side] = t;
     this.renderGroups();
     term.onData((d) => {
-      const submittedCommand = d === "\r" || d === "\n" ? t.currentInput : null;
+      // Only track a shell command line while the normal buffer is active.
+      // Full-screen programs (vim/less/fzf/htop) switch to the alternate
+      // buffer; their keystrokes are not a shell prompt and must not feed
+      // history tracking or Tab interception.
+      const atPrompt = term.buffer.active.type === "normal";
+      const submittedCommand = atPrompt && (d === "\r" || d === "\n") ? t.currentInput : null;
       // Track raw input; newlines push to history.
-      if (d === "\r" || d === "\n") {
+      if (!atPrompt) {
+        // Alt-screen program owns input; leave currentInput untouched.
+      } else if (d === "\r" || d === "\n") {
         if (t.currentInput.trim()) {
           t.cmdHistory.push(t.currentInput);
         }
@@ -303,7 +310,9 @@ export class TerminalManager {
       }
 
       // Tab: show history suggestion if there's a match; else pass through for shell completion.
-      if (event.key === "Tab") {
+      // Never intercept while a full-screen program owns the alternate buffer
+      // (vim/less/fzf must receive Tab).
+      if (event.key === "Tab" && term.buffer.active.type === "normal") {
         const prefix = t.currentInput;
         if (prefix.trim() && !prefix.includes(" ")) {
           // Single-word prefix; try app-level history autocomplete.
