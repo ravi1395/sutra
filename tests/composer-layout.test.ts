@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { hoistTask, isFirstRunDraft, clampDrawerHeight } from "../src/composer-layout";
+import { hoistTask, isFirstRunDraft, clampDrawerHeight, orderSections } from "../src/composer-layout";
 
 test("hoistTask moves task to the front, preserving the rest in order", () => {
   const tags = [{ id: "role" }, { id: "context" }, { id: "task" }, { id: "constraints" }];
@@ -37,4 +37,23 @@ test("clampDrawerHeight bounds the value into [min, max]", () => {
 test("clampDrawerHeight falls back to min on non-finite input", () => {
   assert.equal(clampDrawerHeight(Number.NaN, 120, 400), 120);
   assert.equal(clampDrawerHeight(Number.POSITIVE_INFINITY, 120, 400), 120);
+});
+
+test("orderSections hoists role, context, task in fixed order", () => {
+  const tags = [
+    { id: "task" }, { id: "constraints" }, { id: "role" },
+    { id: "output" }, { id: "context" },
+  ];
+  assert.deepEqual(
+    orderSections(tags).map((t) => t.id),
+    ["role", "context", "task", "constraints", "output"],
+  );
+});
+
+test("orderSections skips absent lead tags, preserves remainder order", () => {
+  const tags = [{ id: "task" }, { id: "output" }, { id: "constraints" }];
+  assert.deepEqual(
+    orderSections(tags).map((t) => t.id),
+    ["task", "output", "constraints"],
+  );
 });
