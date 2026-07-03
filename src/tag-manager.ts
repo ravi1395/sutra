@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG, normalizeConfig, type TagConfig, type TagDef } from "./
 
 const CONFIG_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
 const CONFIG_DIR = (root: string) => `${root}/.sutra`;
+const INPUT_TYPES: TagDef["input"][] = ["text", "textarea", "chips", "chips+text", "bullet", "pairs", "dropdown"];
 
 // ── pure mutations (tested in tests/tag-manager.test.ts) ──────────────────────
 
@@ -63,6 +64,8 @@ export async function saveConfig(root: string, config: TagConfig): Promise<void>
 export interface TagManagerOptions {
   root: string;
   config: TagConfig;
+  /** Whether the workspace is trusted (repo config honored); shown as a badge. */
+  trusted?: boolean;
   /** Called with the new config after a successful save. */
   onSave: (config: TagConfig) => void;
 }
@@ -81,11 +84,17 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
   const modal = mk("div", "tm-modal");
 
   const header = mk("div", "tm-header");
+  const titleWrap = mk("div", "tm-title-wrap");
   const titleEl = mk("span", "tm-title");
-  titleEl.textContent = "Tag Manager";
+  titleEl.textContent = "Tag manager";
+  const subEl = mk("span", "tm-subtitle");
+  subEl.textContent = ".sutra/prompt-tags.json";
+  titleWrap.append(titleEl, subEl);
+  const badge = mk("span", `tm-badge ${opts.trusted ? "trusted" : "untrusted"}`);
+  badge.textContent = opts.trusted ? "trusted" : "untrusted";
   const closeBtn = mk("button", "tm-close");
   closeBtn.textContent = "×";
-  header.append(titleEl, closeBtn);
+  header.append(titleWrap, badge, closeBtn);
 
   const body = mk("div", "tm-body");
 
@@ -111,19 +120,44 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
     tagSection.appendChild(tagTitle);
 
     for (const tag of config.tags) {
-      const row = mk("div", "tm-row");
+      const row = mk("div", `tm-row${tag.defaultOn ? "" : " tm-row-off"}`);
+      // Drag affordance only — reorder DnD is deferred; template order is edited below.
+      const drag = mk("span", "tm-drag");
+      drag.textContent = "⠿";
+      drag.title = "Reorder — coming soon";
       const idSpan = mk("span", "tm-tag-id");
       idSpan.textContent = tag.id;
+
+      const typeSel = mk("select", "tm-type");
+      for (const it of INPUT_TYPES) {
+        const o = document.createElement("option");
+        o.value = it; o.textContent = it;
+        if (it === tag.input) o.selected = true;
+        typeSel.appendChild(o);
+      }
+      typeSel.onchange = () => { config = upsertTag(config, { ...tag, input: typeSel.value as TagDef["input"] }); };
+
       const lblInp = mk("input", "tm-input");
       lblInp.type = "text";
       lblInp.value = tag.label;
       lblInp.placeholder = "label";
       lblInp.oninput = () => { config = upsertTag(config, { ...tag, label: lblInp.value }); };
+
+      const toggle = mk("input", "tm-toggle");
+      toggle.type = "checkbox";
+      toggle.checked = tag.defaultOn;
+      toggle.title = "On by default";
+      toggle.onchange = () => {
+        config = upsertTag(config, { ...tag, defaultOn: toggle.checked });
+        row.classList.toggle("tm-row-off", !toggle.checked);
+      };
+
       const rmBtn = mk("button", "tm-rm");
       rmBtn.textContent = "−";
       rmBtn.title = `Remove tag "${tag.id}"`;
       rmBtn.onclick = () => { config = removeTag(config, tag.id); render(); };
-      row.append(idSpan, lblInp, rmBtn);
+
+      row.append(drag, idSpan, typeSel, lblInp, toggle, rmBtn);
       tagSection.appendChild(row);
     }
 
@@ -133,6 +167,13 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
     newId.placeholder = "tag-id";
     const newLbl = mk("input", "tm-input tm-input-sm");
     newLbl.placeholder = "Label";
+    const newType = mk("select", "tm-type");
+    for (const it of INPUT_TYPES) {
+      const o = document.createElement("option");
+      o.value = it; o.textContent = it;
+      if (it === "textarea") o.selected = true;
+      newType.appendChild(o);
+    }
     const addBtn = mk("button", "tm-add");
     addBtn.textContent = "+";
     addBtn.onclick = () => {
@@ -141,7 +182,7 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
       const t: TagDef = {
         id,
         label: newLbl.value.trim() || id,
-        input: "textarea",
+        input: newType.value as TagDef["input"],
         default: "",
         placeholder: "",
         defaultOn: true,
@@ -151,20 +192,28 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
       newLbl.value = "";
       render();
     };
-    addRow.append(newId, newLbl, addBtn);
+    addRow.append(newId, newLbl, newType, addBtn);
     tagSection.appendChild(addRow);
     body.appendChild(tagSection);
 
     // ── templates ─────────────────────────────────────────────────────────────
     const tmplSection = mk("div", "tm-section");
     const tmplTitle = mk("div", "tm-section-title");
-    tmplTitle.textContent = "Templates (tag order)";
+    tmplTitle.textContent = "Templates";
     tmplSection.appendChild(tmplTitle);
 
     for (const tmpl of config.templates) {
-      const row = mk("div", "tm-row");
-      const nameEl = mk("span", "tm-tmpl-name");
+      const active = tmpl.name === config.activeTemplate;
+      const card = mk("div", `tm-tpl-card${active ? " tm-tpl-active" : ""}`);
+      const head = mk("div", "tm-tpl-head");
+      const nameEl = mk("span", "tm-tpl-name");
       nameEl.textContent = tmpl.name;
+      head.appendChild(nameEl);
+      if (active) {
+        const b = mk("span", "tm-tpl-badge");
+        b.textContent = "active";
+        head.appendChild(b);
+      }
       const orderInp = mk("input", "tm-input tm-tmpl-order");
       orderInp.type = "text";
       orderInp.value = tmpl.tags.join(", ");
@@ -176,8 +225,8 @@ export function mountTagManager(opts: TagManagerOptions): { close: () => void } 
           .filter(Boolean);
         config = reorderTemplate(config, tmpl.name, newOrder);
       };
-      row.append(nameEl, orderInp);
-      tmplSection.appendChild(row);
+      card.append(head, orderInp);
+      tmplSection.appendChild(card);
     }
     body.appendChild(tmplSection);
   }

@@ -5,6 +5,7 @@
 // can't be squeezed off when the terminal drawer steals panel height).
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
+import { hoistTask, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
 import { matchFiles, matchAssets, assetToken, type AssetOption } from "./composer-complete";
 import {
   saveDraft, loadDraft, clearDraft, loadHistory, saveHistory, pushHistory,
@@ -116,6 +117,14 @@ export function mountComposer(opts: ComposerOptions): {
   const addSelBtn = mkBtn("cmp-add-sel sbtn", `${icon("pencil", 12)} Add selection`);
   addSelBtn.title = "Insert current editor selection as a context chip";
   chipRail.appendChild(addSelBtn);
+
+  // Onboarding whisper — shown only on a fresh, empty draft.
+  const onboardEl = mk("div", "cmp-onboard hidden");
+  const chord = IS_MAC ? "⌘↵" : "Ctrl+↵";
+  onboardEl.innerHTML =
+    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">1</span><span>Pick a <b>template</b> — it sets which sections show.</span></div>' +
+    '<div class="cmp-onboard-row"><span class="cmp-onboard-n">2</span><span>Write <b>the ask</b>. Type <b>@</b> for a file, <b>/</b> for a skill.</span></div>' +
+    `<div class="cmp-onboard-row"><span class="cmp-onboard-n">3</span><span>Choose an <b>agent terminal</b> above, then <b>${chord}</b> to send.</span></div>`;
 
   // Preview drawer
   const prevPeek = mk("div", "cmp-peek");
@@ -275,7 +284,7 @@ export function mountComposer(opts: ComposerOptions): {
         text[tag.id] = ta.value;
         renderPreview();
         autosave();
-        if (isTask) { updateTaskCount(); handleCompletion(ta); }
+        if (isTask) { updateTaskCount(); updateOnboard(); handleCompletion(ta); }
       };
       ta.onkeydown = (e) => { if (isTask) onTaskKeydown(e, ta); };
       if (isTask) {
@@ -295,22 +304,40 @@ export function mountComposer(opts: ComposerOptions): {
     sectionsEl.innerHTML = "";
     taskArea = null;
     taskCount = null;
-    const tags = templateTags(config, templateName);
+    sectionsEl.appendChild(onboardEl);
     // Task is hoisted to the top as the hero, regardless of template order.
-    const taskTag = tags.find((t) => t.id === "task");
-    const rest = tags.filter((t) => t.id !== "task");
-    if (taskTag) {
-      renderSection(taskTag);
-      updateTaskCount();
-      sectionsEl.appendChild(suggestEl);
-      sectionsEl.appendChild(chipRail);
-    }
-    for (const tag of rest) renderSection(tag);
-    if (!taskTag) {
+    const ordered = hoistTask(templateTags(config, templateName));
+    const hasTask = ordered[0]?.id === "task";
+    ordered.forEach((tag, i) => {
+      renderSection(tag);
+      // Suggestion dropdown + chip rail sit directly under the task hero.
+      if (i === 0 && hasTask) {
+        updateTaskCount();
+        sectionsEl.appendChild(suggestEl);
+        sectionsEl.appendChild(chipRail);
+      }
+    });
+    if (!hasTask) {
       // No task section in this template — keep completion + chips reachable.
       sectionsEl.appendChild(suggestEl);
       sectionsEl.appendChild(chipRail);
     }
+    updateOnboard();
+  }
+
+  // First run: nothing written and no chips attached yet.
+  function isFirstRun(): boolean {
+    return isFirstRunDraft(text["task"] ?? "", chips.length);
+  }
+
+  function updateOnboard(): void {
+    onboardEl.classList.toggle("hidden", !isFirstRun());
+  }
+
+  // Send needs a target terminal; reflect that on the button.
+  function updateSendState(): void {
+    sendBtn.disabled = !targetId;
+    sendBtn.title = targetId ? "" : "No agent terminal — open one to send.";
   }
 
   function updateTaskCount(): void {
@@ -335,6 +362,7 @@ export function mountComposer(opts: ComposerOptions): {
       // Keep chips before the "Add selection" button.
       chipRail.insertBefore(pill, addSelBtn);
     });
+    updateOnboard();
   }
 
   function renderTargetPicker(): void {
@@ -356,6 +384,7 @@ export function mountComposer(opts: ComposerOptions): {
       targetId = targetSel.value || null;
     }
     updateStateDot();
+    updateSendState();
   }
 
   function updateStateDot(): void {
@@ -394,7 +423,7 @@ export function mountComposer(opts: ComposerOptions): {
   function renderPreview(): void {
     if (!prevOpen) return;
     const p = safeBuildPrompt();
-    previewPre.textContent = p?.trim() ? p : "(empty)";
+    previewPre.textContent = p?.trim() ? p : "Nothing to preview — write the ask first.";
   }
 
   function renderHistory(): void {
@@ -438,7 +467,7 @@ export function mountComposer(opts: ComposerOptions): {
   function onDrawerMove(e: PointerEvent): void {
     if (!dragEl) return;
     const dy = dragStartY - e.clientY;
-    const h = Math.max(DRAWER_H_MIN, Math.min(dragMax, dragStartH + dy));
+    const h = clampDrawerHeight(dragStartH + dy, DRAWER_H_MIN, dragMax);
     dragEl.style.height = `${h}px`;
   }
 
@@ -673,6 +702,7 @@ export function mountComposer(opts: ComposerOptions): {
     mountTagManager({
       root,
       config,
+      trusted,
       // Re-read from disk (saveConfig already persisted + normalized) so the
       // composer reflects the normalized on-disk config, not the modal's copy.
       onSave: () => {

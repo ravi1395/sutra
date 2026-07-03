@@ -214,6 +214,33 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   The lock releases when the agent goes idle.
 - Scope is terminal-agent only; agents launched outside Sutra are not reviewed.
 
+### Prompt builder
+
+A docked panel (right of the editor) that assembles an XML-tagged prompt from
+template sections and routed chips, then delivers it to a chosen agent terminal.
+
+- **Focus layout.** The **task** is the hero field at the top (regardless of
+  template order), with the context chip rail directly beneath it; the remaining
+  sections (role, context, constraints, output, examples, …) sit full-size
+  below. The **Send** action is pinned in a footer, always visible.
+- **Templates** (Bug fix / Feature / Review / Explain) pick which sections show.
+  Type `@` in the task for a file or `/` for a skill/subagent to insert a chip;
+  drag a chip onto a section to re-route which tag it lands in.
+- **Preview** and **History** open as slide-up drawers that overlay the scroll
+  area — the footer stays reachable and neither can be squeezed off-screen when
+  the terminal drawer is open. They are mutually exclusive; drag the grab handle
+  to resize, and the height is remembered (localStorage `composer-drawer-h`).
+  Preview shows the assembled prompt and updates live while open.
+- **Send modes:** *Stage* types the prompt into the terminal without submitting;
+  *Submit* also presses enter. *Think* prepends a brief reasoning instruction.
+  `⌘↵` (macOS) / `Ctrl+↵` sends. Send is disabled until an agent terminal exists.
+- **First run** shows a short onboarding whisper and a serif placeholder until
+  you start writing.
+- **Tag manager** (gear icon) edits `.sutra/prompt-tags.json`: per-tag input
+  type and default-on toggle, plus per-template tag sets. Repo-supplied config is
+  only honored for **trusted** workspaces (shown as a badge); otherwise built-in
+  defaults apply.
+
 ## Harness
 
 The harness turns Sutra into a review surface for agent-driven coding: project
