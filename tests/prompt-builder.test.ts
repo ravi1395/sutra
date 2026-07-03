@@ -1,7 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import { DEFAULT_CONFIG } from "../src/prompt-tags";
-import { orderSections } from "../src/composer-layout";
 import {
   buildPrompt,
   defaultSection,

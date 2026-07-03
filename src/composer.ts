@@ -1,8 +1,10 @@
-// Docked prompt-composer panel: template picker, section inputs with @ / /
-// completion, chip rail, agent target selector, draft persistence, send flow.
-// "Focus" layout: task hero on top, other sections full-size below, and
-// Preview / History as slide-up drawers that overlay the scroll area (so they
-// can't be squeezed off when the terminal drawer steals panel height).
+// Docked prompt-composer panel: template picker, section inputs, chip rail,
+// agent target selector, draft persistence, send flow.
+// "Focus" layout: two heroes — Context (owns @file / /skill / +selection
+// completion and the chip rail) and Task — render first, in role→context→
+// task→rest order (task is not hoisted ahead of context); Preview / History
+// are slide-up drawers that overlay the scroll area (so they can't be
+// squeezed off when the terminal drawer steals panel height).
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
 import { orderSections, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
@@ -110,7 +112,7 @@ export function mountComposer(opts: ComposerOptions): {
   // Main area: scrollable sections + overlay drawers (position anchor)
   const mainWrap = mk("div", "cmp-main");
   const sectionsEl = mk("div", "cmp-sections");
-  // Suggestion dropdown (moved under the task hero during render)
+  // Suggestion dropdown (moved under the Context hero during render)
   const suggestEl = mk("div", "cmp-suggest hidden");
   // Chip rail (rendered directly under the context hero)
   const chipRail = mk("div", "cmp-chip-rail");
@@ -326,6 +328,11 @@ export function mountComposer(opts: ComposerOptions): {
     sectionsEl.innerHTML = "";
     ctxArea = null; taskCount = null; ctxCount = null;
     sectionsEl.appendChild(onboardEl);
+    // chipRail persists across renders (only its .cmp-chip pills are re-rendered
+    // elsewhere) — drop any fallback "+ selection" button from a prior render
+    // before deciding whether to re-add one below, to avoid duplicates on
+    // repeated template switches.
+    chipRail.querySelectorAll(".cmp-add-sel").forEach((e) => e.remove());
     const ordered = orderSections(templateTags(config, templateName));
     let placed = false;
     for (const tag of ordered) {
@@ -338,7 +345,13 @@ export function mountComposer(opts: ComposerOptions): {
       }
     }
     if (!placed) {
-      // No context section — keep completion + chips reachable at the end.
+      // No context section — keep completion + chips reachable at the end,
+      // and preserve the "+ selection" affordance the Context hero would
+      // otherwise provide, so selection chips stay reachable.
+      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
+      selBtn.title = "Insert current editor selection as a context chip";
+      selBtn.onclick = addSelectionChip;
+      chipRail.appendChild(selBtn);
       sectionsEl.appendChild(suggestEl);
       sectionsEl.appendChild(chipRail);
     }
