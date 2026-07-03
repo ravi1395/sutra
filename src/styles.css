@@ -2690,12 +2690,64 @@ button:hover {
 }
 .cmp-tmpl-btn:hover { background: var(--bg-3); color: var(--fg); }
 .cmp-tmpl-btn.active { background: var(--bg-3); color: var(--fg); border-color: var(--em-dim); }
+/* main area anchors the overlay drawers over the scroll region */
+.cmp-main {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .cmp-sections {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
 }
 .cmp-section { margin-bottom: 8px; }
+/* task hero — the field you actually write in, hoisted to the top */
+.cmp-hero {
+  position: relative;
+  background: linear-gradient(180deg, var(--bg-3), var(--bg-1));
+  border: 1px solid var(--line-menu);
+  border-radius: var(--r-md);
+  padding: 7px 9px 8px 11px;
+  margin-bottom: 10px;
+}
+.cmp-hero::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 8px; bottom: 8px;
+  width: 2px;
+  border-radius: 99px;
+  background: var(--em);
+}
+.cmp-hero .cmp-section-lbl {
+  display: flex;
+  align-items: center;
+  font-family: var(--voice);
+  font-style: italic;
+  font-size: 12.5px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg);
+}
+.cmp-hero-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--fg-faint);
+}
+.cmp-hero .cmp-section-input {
+  min-height: 68px;
+  font-family: var(--ui);
+  font-size: 12.5px;
+  background: transparent;
+  border: none;
+  padding: 3px 2px 0;
+}
+.cmp-hero .cmp-section-input:focus { border: none; box-shadow: none; }
 .cmp-section-lbl {
   font-size: 10px;
   color: var(--fg-dim);
@@ -2824,61 +2876,104 @@ button:hover {
 }
 .cmp-send:hover { opacity: 0.85; }
 .cmp-send:disabled { opacity: 0.4; cursor: default; }
-.cmp-preview-wrap {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--line);
-}
-.cmp-preview-wrap > summary {
-  padding: 4px 8px;
+.cmp-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
+  padding: 3px 9px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   color: var(--fg-dim);
   cursor: pointer;
-  user-select: none;
-  list-style: none;
 }
-.cmp-preview-wrap > summary::before { content: "▶ "; font-size: 9px; }
-.cmp-preview-wrap[open] > summary::before { content: "▼ "; }
-.cmp-preview-pre {
-  margin: 0;
-  padding: 6px 8px;
-  font-size: 10.5px;
-  font-family: var(--mono);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 140px;
-  overflow-y: auto;
-  color: var(--fg-dim);
-  background: var(--bg-1);
-  border-top: 1px solid var(--line-soft);
+.cmp-preview-btn:hover { color: var(--fg); border-color: var(--line-menu); }
+.cmp-preview-btn.active { color: var(--em); border-color: var(--em-dim); background: var(--em-wash); }
+/* ── Preview / History slide-up drawers ─────────────────────────────────────── */
+.cmp-peek {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 220px;
+  min-height: 120px;
+  max-height: 92%;
+  background: var(--bg-3);
+  border-top: 1px solid var(--em-dim);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  box-shadow: 0 -16px 34px -12px rgba(0, 0, 0, 0.55);
+  transform: translateY(101%);
+  transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  z-index: 5;
 }
-.cmp-hist-wrap {
+.cmp-peek.open { transform: translateY(0); }
+.cmp-peek-dragging { transition: none; }
+.cmp-peek-grab {
   flex: 0 0 auto;
-  border-top: 1px solid var(--line);
+  padding: 6px 0 3px;
+  cursor: ns-resize;
+  touch-action: none;
 }
-.cmp-hist-btn {
-  width: 100%;
-  text-align: left;
-  padding: 4px 8px;
-  font-size: 11px;
+.cmp-peek-grabbar {
+  width: 34px; height: 4px;
+  border-radius: 99px;
+  background: var(--line-menu);
+  margin: 0 auto;
+  transition: background 0.15s;
+}
+.cmp-peek-grab:hover .cmp-peek-grabbar { background: var(--em-dim); }
+.cmp-peek-h {
+  display: flex;
+  align-items: center;
+  padding: 0 8px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.cmp-peek-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--em);
+}
+.cmp-peek-close {
+  margin-left: auto;
   background: none;
   border: none;
   color: var(--fg-dim);
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
+  padding: 0 2px;
 }
-.cmp-hist-btn:hover { color: var(--fg); }
-.cmp-hist-list { max-height: 110px; overflow-y: auto; border-top: 1px solid var(--line-soft); }
-.cmp-hist-item {
-  padding: 3px 8px;
+.cmp-peek-close:hover { color: var(--fg); }
+.cmp-peek-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+.cmp-preview-pre {
+  margin: 0;
   font-size: 10.5px;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-dim);
+}
+.cmp-hist-item {
+  padding: 4px 6px;
+  font-size: 11px;
   font-family: var(--mono);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--fg-dim);
+  border-radius: var(--r-sm);
 }
-.cmp-hist-item:hover { background: var(--bg-3); color: var(--fg); }
-.cmp-hist-empty { padding: 4px 8px; font-size: 10.5px; color: var(--fg-dim); font-style: italic; }
+.cmp-hist-item:hover { background: var(--bg-2); color: var(--fg); }
+.cmp-hist-empty { padding: 12px 8px; font-size: 11px; color: var(--fg-faint); font-style: italic; text-align: center; }
 .cmp-status {
   padding: 4px 8px;
   font-size: 11px;
