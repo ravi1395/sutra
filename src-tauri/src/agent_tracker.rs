@@ -769,7 +769,18 @@ fn scan_workspace(root: &Path, previous: Option<&Snapshot>) -> Result<Snapshot, 
     let mut snapshot = Snapshot::new();
     for entry in WalkBuilder::new(root)
         .hidden(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| {
+            if entry.file_name() == ".git" {
+                return false;
+            }
+            // Skip nested git repos/worktrees (a `.git` dir or linked-worktree
+            // file at their root): their files belong to their own tracking
+            // session, not this root's baseline.
+            let is_nested_repo = entry.depth() > 0
+                && entry.file_type().is_some_and(|kind| kind.is_dir())
+                && entry.path().join(".git").exists();
+            !is_nested_repo
+        })
         .build()
     {
         let entry = match entry {
@@ -1157,6 +1168,22 @@ mod tests {
             assert_eq!(self.sessions.len(), 1, "expected exactly one session");
             self.sessions.values().next().unwrap()
         }
+    }
+
+    // A nested git worktree/repo checked out inside the root must not be
+    // walked into this root's snapshot — its files belong to its own tracking
+    // session and would flood the baseline with false "modified" entries.
+    #[test]
+    fn scan_workspace_skips_nested_git_repos() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "root file").unwrap();
+        let nested = tmp.path().join("wt");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join(".git"), "gitdir: /elsewhere").unwrap(); // linked-worktree marker
+        fs::write(nested.join("tracked.txt"), "worktree file").unwrap();
+        let snapshot = scan_workspace(tmp.path(), None).unwrap();
+        assert!(snapshot.contains_key(&tmp.path().join("a.txt")));
+        assert!(!snapshot.keys().any(|p| p.starts_with(&nested)));
     }
 
     fn snapshot(entries: &[(&str, &[u8])]) -> Snapshot {
