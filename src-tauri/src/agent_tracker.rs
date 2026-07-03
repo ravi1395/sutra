@@ -180,6 +180,28 @@ impl Tracker {
         ))
     }
 
+    /// Read-only status for `root` that never creates or resets the shared
+    /// single session. The multi-root sessions panel polls every worktree; if it
+    /// used `poll` (which resets the one session whenever the root differs) it
+    /// would continuously wipe the active workspace's pending changes and drop
+    /// every agent report. `peek` reports live agent detection for `root` and,
+    /// only when the active session already belongs to `root`, its pending count.
+    fn peek(&self, root: &Path) -> AgentTrackingStatus {
+        let agent_active = self.agent_kind_for_root(root).is_some();
+        match self.session.as_ref().filter(|session| session.root == root) {
+            Some(session) => {
+                let mut status = session_status(session);
+                status.agent_active = agent_active;
+                status
+            }
+            None => AgentTrackingStatus {
+                enabled: false,
+                agent_active,
+                changes: vec![],
+            },
+        }
+    }
+
     fn accept(&mut self, root: &Path) -> Result<AgentTrackingStatus, String> {
         let Some(session) = self.session.as_mut().filter(|session| session.root == root) else {
             return Ok(disabled_status());
@@ -1062,6 +1084,17 @@ pub fn agent_tracking_poll(
     tracker.poll(root, agent_active, discover)
 }
 
+/// Read-only agent-tracking status for `root`; never mutates the shared session.
+/// The sessions panel uses this to poll worktree roots without clobbering the
+/// active workspace's tracking session.
+#[tauri::command]
+pub fn agent_tracking_peek(
+    _state: State<'_, AgentTrackerState>,
+    root: String,
+) -> Result<AgentTrackingStatus, String> {
+    Ok(TRACKER.lock().unwrap().peek(Path::new(&root)))
+}
+
 #[tauri::command]
 pub fn agent_tracking_accept(
     _state: State<'_, AgentTrackerState>,
@@ -1596,6 +1629,86 @@ mod tests {
         assert_eq!(tracker.base_content(&root, &created), Some(String::new()));
         assert_eq!(tracker.base_content(&root, &unsafe_path), None);
         assert_eq!(tracker.base_content(&root, &root.join("absent.txt")), None);
+    }
+
+    // Setup: an active (Claude report-mode) session for `root` with one reported
+    // AI change pending. Returns (tracker, edited path).
+    fn active_session_with_reported_change() -> (tempfile::TempDir, Tracker, PathBuf) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let head = commit_all(&repo, "init");
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let mut tracker = Tracker {
+            session: Some(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head,
+                last_scan: baseline.clone(),
+                baseline,
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: true,
+            }),
+            ..Tracker::default()
+        };
+        fs::write(&path, "agent").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(tracker.session.as_ref().unwrap().pending.contains_key(&path));
+        (dir, tracker, path)
+    }
+
+    #[test]
+    fn polling_another_root_wipes_the_active_sessions_pending() {
+        // Documents the root cause: the tracker holds ONE session, so polling a
+        // different root (as the multi-root sessions panel did) resets it and
+        // drops the active workspace's reported AI changes.
+        let (_dir, mut tracker, path) = active_session_with_reported_change();
+        let other = tempdir().unwrap();
+        let repo = git2::Repository::init(other.path()).unwrap();
+        commit_all(&repo, "other");
+
+        tracker.poll(other.path(), false, true).unwrap();
+
+        let session = tracker.session.as_ref().unwrap();
+        assert_eq!(session.root, other.path());
+        assert!(!session.pending.contains_key(&path)); // change lost
+    }
+
+    #[test]
+    fn peek_reports_status_without_disturbing_another_roots_session() {
+        // The fix: peeking a different root (worktree) must leave the active
+        // session — and its pending AI change — intact.
+        let (_dir, tracker, path) = active_session_with_reported_change();
+        let other = tempdir().unwrap();
+
+        let status = tracker.peek(other.path());
+
+        assert!(!status.enabled); // no session for the peeked root
+        assert!(status.changes.is_empty());
+        // Active session untouched: pending change still present.
+        assert_eq!(tracker.session.as_ref().unwrap().root, _dir.path());
+        assert!(tracker
+            .session
+            .as_ref()
+            .unwrap()
+            .pending
+            .contains_key(&path));
+    }
+
+    #[test]
+    fn peek_of_active_root_reports_its_pending_without_mutation() {
+        let (dir, tracker, path) = active_session_with_reported_change();
+
+        let status = tracker.peek(dir.path());
+
+        assert!(status.enabled);
+        assert_eq!(status.changes.len(), 1);
+        assert_eq!(status.changes[0].path, path.to_string_lossy());
+        assert!(!status.changes[0].human_touched);
+        // Still present after peek (no mutation).
+        assert!(tracker.session.as_ref().unwrap().pending.contains_key(&path));
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {

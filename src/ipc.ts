@@ -88,6 +88,11 @@ export interface AgentRevertResult {
 
 export const agentTrackingPoll = (root: string) =>
   invoke<AgentTrackingStatus>("agent_tracking_poll", { root });
+// Read-only status: never resets the shared tracker session. Used by the
+// multi-root sessions panel so peeking a worktree can't clobber the active
+// workspace's tracking (which drops agent-modification reports).
+export const agentTrackingPeek = (root: string) =>
+  invoke<AgentTrackingStatus>("agent_tracking_peek", { root });
 export const agentTrackingBegin = (root: string) =>
   invoke<AgentTrackingStatus>("agent_tracking_begin", { root });
 export const agentTrackingAccept = (root: string) =>

@@ -78,6 +78,7 @@ pub fn run() {
             assets::scan_agent_assets,
             agent_tracker::agent_tracking_begin,
             agent_tracker::agent_tracking_poll,
+            agent_tracker::agent_tracking_peek,
             agent_tracker::agent_tracking_accept,
             agent_tracker::agent_tracking_revert,
             agent_tracker::agent_base_content,

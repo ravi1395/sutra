@@ -3,7 +3,7 @@
 // cheap agentTrackingPoll per root → expensive turnList only where
 // shouldFullPoll passes → per-section re-render.
 import {
-  agentTrackingPoll,
+  agentTrackingPeek,
   hookInstall,
   hookStatus,
   listWorktreeRoots,
@@ -213,7 +213,7 @@ export async function refreshSessions(): Promise<void> {
     await Promise.all(
       roots.map(async (root) => {
         try {
-          const st = await agentTrackingPoll(root);
+          const st = await agentTrackingPeek(root);
           polls.set(root, {
             agentKind: st.agentActive ? "agent" : null,
             pending: st.changes.length,
