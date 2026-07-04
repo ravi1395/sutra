@@ -82,7 +82,7 @@ tests/  one .test.ts per frontend module (node:test)
 - Poll cadences: agent tracker + turn poll 1.5 s piggyback; sessions panel polls cheap, full only for active roots
 
 ## State
-- Version: v2.0.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
+- Version: v2.0.1 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
 - Tests: `npm test` → 253 pass; `cargo test` (inside src-tauri/) → 137 pass
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, etc.) via `mcp.rs`
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)

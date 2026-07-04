@@ -105,10 +105,9 @@ jobs:
       # matrix when the asset already exists — combined with max-parallel:1 the
       # final latest.json carries BOTH darwin and windows entries.
       #
-      # macOS signing/notarization: uncomment the APPLE_* lines once the repo
-      # secrets exist. Passing them unset breaks the build. Without them the
-      # .app is ad-hoc signed (users must right-click > Open on first launch);
-      # updater minisign verification is independent and still works.
+      # macOS signing/notarization requires APPLE_CERTIFICATE (base64 .p12),
+      # APPLE_CERTIFICATE_PASSWORD, and APPLE_PASSWORD repository secrets.
+      # Updater minisign verification is independent.
       #
       # REQUIRED secret: TAURI_SIGNING_PRIVATE_KEY must be the ENTIRE contents
       # of the generated .key file (the `untrusted comment:` header line AND the
@@ -122,12 +121,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application: Ravi Chandrasekhar (SHY6KTU5EB)'
+          APPLE_ID: ravi1395@gmail.com
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
