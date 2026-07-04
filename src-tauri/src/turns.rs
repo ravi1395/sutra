@@ -175,10 +175,21 @@ impl TurnEngine {
         self.close_open(now_ms, "hook")
     }
 
-    /// Advance the quiet-window heuristic. Only closes a turn when no hook is
-    /// installed for its agent kind (`hook_installed = false` on this engine).
+    /// Advance the quiet-window heuristic. Suppressed only when the open
+    /// turn's agent kind is covered by an installed Stop hook — today that is
+    /// Claude only (an empty kind also counts: any signal closes it, see
+    /// `observe_signal`). A codex/unknown turn has no hook that will ever
+    /// close it, so it must keep the quiet-window fallback even with the
+    /// Claude hook installed, else it stays open forever and blocks rollback
+    /// for the whole root.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Turn> {
-        if self.hook_installed {
+        let hook_covers_open_turn = self.hook_installed
+            && self
+                .open
+                .as_ref()
+                .map(|turn| turn.agent_kind == "claude" || turn.agent_kind.is_empty())
+                .unwrap_or(true);
+        if hook_covers_open_turn {
             return vec![];
         }
         let Some(last_change) = self.last_change_at else {
@@ -307,6 +318,7 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
         let mut last_after_leq_n: Option<Option<String>> = None;
         let mut earliest_before: Option<Option<String>> = None;
         let mut earliest_unsafe = false;
+        let mut earliest_snapshotted = true;
         let mut earliest_id = u64::MAX;
         for turn in turns {
             if turn.rolled_back {
@@ -325,15 +337,17 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                     earliest_id = turn.id;
                     earliest_before = Some(file.before_hash.clone());
                     earliest_unsafe = file.unsafe_before;
+                    earliest_snapshotted = file.snapshotted;
                 }
             }
         }
         let restore_to = last_after_leq_n.unwrap_or_else(|| earliest_before.unwrap_or(None));
-        // Never plan a delete for a file whose pre-edit content was unrecoverable:
-        // the user still has that file and we never captured its original, so
-        // deleting it would be silent data loss. Exclude it from rollback entirely
-        // (the frontend surfaces it via TurnFile.unsafe_before).
-        if restore_to.is_none() && earliest_unsafe {
+        // Never plan a delete for a file whose pre-edit content was unrecoverable
+        // (unsafe_before) or never snapshotted (>10MB cap): before_hash=None there
+        // means "original unknown", not "didn't exist", so deleting would be silent
+        // data loss. Exclude such files from rollback entirely (the frontend
+        // surfaces them via TurnFile.unsafe_before / !snapshotted).
+        if restore_to.is_none() && (earliest_unsafe || !earliest_snapshotted) {
             continue;
         }
         plan.insert(path, restore_to);
@@ -487,8 +501,9 @@ fn blob_store(root: &str) -> BlobStore {
     BlobStore::new(turns_dir(root).join("objects"))
 }
 
-/// Load all turns from the manifest. On a corrupt line, the manifest is
-/// renamed to `.bak` and an empty list is returned.
+/// Load all turns from the manifest. Corrupt lines (torn writes, concurrent
+/// readers observing a partial append) are skipped, never fatal: wiping the
+/// whole file on one bad line destroyed all turn/rollback history for the root.
 fn load_manifest(root: &str) -> Vec<Turn> {
     let path = manifest_path(root);
     let Ok(file) = fs::File::open(&path) else {
@@ -501,13 +516,8 @@ fn load_manifest(root: &str) -> Vec<Turn> {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Turn>(&line) {
-            Ok(turn) => turns.push(turn),
-            Err(_) => {
-                let backup = path.with_extension("jsonl.bak");
-                let _ = fs::rename(&path, backup);
-                return vec![];
-            }
+        if let Ok(turn) = serde_json::from_str::<Turn>(&line) {
+            turns.push(turn);
         }
     }
     turns
@@ -538,7 +548,11 @@ fn rewrite_manifest(root: &str, turns: &[Turn]) -> Result<(), String> {
         out.push_str(&serde_json::to_string(turn).map_err(|e| e.to_string())?);
         out.push('\n');
     }
-    fs::write(&path, out).map_err(|e| e.to_string())
+    // Temp-file + rename so a reader never observes a truncated mid-rewrite
+    // manifest (also survives a crash mid-write).
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// GC the manifest + blob store for `root`: past the turn-count or blob-size
@@ -671,6 +685,9 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
 /// List recorded turns for `root`.
 #[tauri::command]
 pub fn turn_list(root: String) -> Result<Vec<Turn>, String> {
+    // Same lock discipline as the writers (turn_poll/turn_rollback/GC) so a
+    // read never interleaves with an in-progress append/rewrite.
+    let _roots = ROOTS.lock().unwrap();
     Ok(load_manifest(&root))
 }
 
@@ -896,6 +913,7 @@ fn branch_of(path: &Path) -> String {
 
 /// Latest recorded test status for `root` (consumed by mcp.rs).
 pub fn latest_test_status(root: &str) -> Option<(u64, TestStatus)> {
+    let _roots = ROOTS.lock().unwrap(); // read under writer lock, see turn_list
     load_manifest(root)
         .into_iter()
         .filter_map(|turn| turn.test_status.map(|status| (turn.id, status)))
@@ -970,6 +988,19 @@ mod tests {
         let mut h = TurnEngine::new(10_000, true); // hook installed → heuristic suppressed
         h.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
         assert!(h.tick(60_000).is_empty());
+    }
+
+    // A codex/unknown-kind turn has no Stop hook to close it — the quiet
+    // window must still apply even when the Claude hook is installed, else
+    // the turn stays open forever and blocks rollback for the whole root.
+    #[test]
+    fn quiet_window_closes_codex_turn_despite_claude_hook() {
+        let mut e = TurnEngine::new(10_000, true); // Claude hook installed
+        e.observe_changes(0, &[("a.rs".into(), None, false)], "codex");
+        assert!(e.tick(9_999).is_empty());
+        let closed = e.tick(10_001);
+        assert_eq!(closed[0].boundary_source, "quiet");
+        assert_eq!(closed[0].agent_kind, "codex");
     }
 
     #[test]
@@ -1062,6 +1093,39 @@ mod tests {
         let plan = resolve_restore(&turns, 0);
         assert!(!plan.contains_key("unsafe.rs")); // excluded from rollback
         assert_eq!(plan.get("created.rs"), Some(&None)); // created → delete
+    }
+
+    // A torn/garbage manifest line (interrupted write, concurrent reader) must
+    // not wipe the whole history — parseable lines around it still load and the
+    // manifest file stays in place.
+    #[test]
+    fn load_manifest_skips_corrupt_lines_without_wiping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        append_manifest(root, &turn_fixture(1, vec![("a", Some("h0"), Some("h1"))])).unwrap();
+        {
+            use std::io::Write;
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(manifest_path(root))
+                .unwrap();
+            writeln!(f, "{{\"id\": 2, \"root\"").unwrap(); // torn line
+        }
+        append_manifest(root, &turn_fixture(3, vec![("b", Some("h2"), Some("h3"))])).unwrap();
+        let turns = load_manifest(root);
+        assert_eq!(turns.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
+        assert!(manifest_path(root).exists()); // not renamed away
+    }
+
+    // An oversized (>10MB cap) pre-existing file records before_hash=None with
+    // snapshotted=false — resolve_restore must exclude it from delete-on-rollback
+    // rather than treat it like a created file.
+    #[test]
+    fn unsnapshotted_oversized_file_excluded_from_delete() {
+        let mut t = turn_fixture(1, vec![("big.bin", None, Some("hafter"))]);
+        t.files[0].snapshotted = false;
+        let plan = resolve_restore(&[t], 0);
+        assert!(!plan.contains_key("big.bin"));
     }
 
     // I1: after a rollback writes a synthetic pre-rollback turn, the engine's

@@ -93,6 +93,10 @@ export const agentTrackingPoll = (root: string) =>
 // workspace's tracking (which drops agent-modification reports).
 export const agentTrackingPeek = (root: string) =>
   invoke<AgentTrackingStatus>("agent_tracking_peek", { root });
+// Panel refresh: real poll when the root already has a live tracking session
+// (background worktree agents keep reconciling), read-only peek otherwise.
+export const agentTrackingRefresh = (root: string) =>
+  invoke<AgentTrackingStatus>("agent_tracking_refresh", { root });
 export const agentTrackingBegin = (root: string) =>
   invoke<AgentTrackingStatus>("agent_tracking_begin", { root });
 export const agentTrackingAccept = (root: string) =>

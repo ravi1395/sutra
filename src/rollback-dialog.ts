@@ -218,7 +218,11 @@ export function openRollbackDialog(
       return;
     }
     const dirty = dirtyOpenPaths();
-    const blocked = checkedPaths().filter((p) => dirty.has(p));
+    // Editor tabs carry absolute paths; checklist rows are root-relative
+    // (TurnFileEntry.path) — resolve to absolute before comparing, else the
+    // guard never matches and unsaved edits get silently overwritten.
+    const toAbs = (p: string) => (p.startsWith("/") ? p : `${root}/${p}`);
+    const blocked = checkedPaths().filter((p) => dirty.has(toAbs(p)));
     if (blocked.length > 0) {
       dirtyBanner.textContent = `Unsaved edits — save first or uncheck: ${blocked.join(", ")}`;
       dirtyBanner.style.display = "";
