@@ -69,6 +69,8 @@ import {
   diagnosticsExtension,
   initDiagnostics,
   notifyDocChanged,
+  pauseDiagnosticsFsTrigger,
+  resumeDiagnosticsFsTrigger,
   problemsPanelEl,
 } from "./diagnostics";
 import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
@@ -313,6 +315,12 @@ void onFsChanged((payload) => {
   if (!currentRoot) return;
   const root = currentRoot;
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
+    return;
+  }
+  if (bgPaused) {
+    // Window hidden: defer tree refresh + lang re-index; catch up on re-show.
+    fsChangedWhileHidden = true;
+    for (const p of payload.paths) hiddenFsPaths.add(p);
     return;
   }
   // Inform the lang engine to re-index changed files (gracefully degrades if backend absent).
@@ -1063,6 +1071,11 @@ function toggleSearchView(): void {
 // catch-up tick. `*Wanted` = the poll should run (feature/workspace on);
 // `bgPaused` = the window is currently hidden.
 let bgPaused = false;
+// Deferred fs-changed work while hidden: tree refresh + lang re-index accumulate
+// and run once on re-show, instead of firing on every background FS event (e.g. a
+// worktree agent editing files while the window is off-screen).
+let fsChangedWhileHidden = false;
+const hiddenFsPaths = new Set<string>();
 
 // ---- integrated-agent workspace tracking ----
 let pollTimer: number | undefined;
@@ -1130,13 +1143,23 @@ function setBackgroundPaused(hidden: boolean): void {
     if (gitPollTimer !== undefined) { clearInterval(gitPollTimer); gitPollTimer = undefined; }
     pauseSessionsPolling();
     composerPanel?.pausePolling();
+    pauseDiagnosticsFsTrigger();
   } else {
     armAgentPoll();
     armGitPoll();
     resumeSessionsPolling();
     composerPanel?.resumePolling();
+    resumeDiagnosticsFsTrigger();
     if (agentPollWanted) void pollAgentChanges();
     if (gitPollWanted) void pollGitIndex();
+    if (fsChangedWhileHidden && currentRoot) {
+      // One catch-up for FS churn accumulated while hidden.
+      fsChangedWhileHidden = false;
+      const paths = [...hiddenFsPaths];
+      hiddenFsPaths.clear();
+      if (paths.length) void langIndexInvalidate(paths).catch(() => {});
+      scheduleFileSystemRefresh(currentRoot);
+    }
   }
 }
 

@@ -115,6 +115,12 @@ let state: DiagState = emptyDiagState();
 let currentRoot: string | null = null;
 let running = false;
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
+// Window-hidden gate for the fs-settle trigger: while off-screen we don't run
+// tsc/cargo jobs on background FS churn (e.g. an agent editing). A single
+// catch-up runs on re-show if anything relevant changed meanwhile.
+let diagFsPaused = false;
+let diagFsPendingWhileHidden = false;
+let diagGetRoot: (() => string | null) | null = null;
 let inFlight = false;
 const views = new Set<EditorView>();
 
@@ -321,6 +327,7 @@ async function runDiagnostics(root: string): Promise<void> {
 /** Wire the diagnostics trigger loop to the active workspace root. */
 export function initDiagnostics(getRoot: () => string | null): void {
   currentRoot = getRoot();
+  diagGetRoot = getRoot;
 
   void onDiagnosticsUpdated(({ root, source, diagnostics }) => {
     setDiagnostics(root, source, diagnostics);
@@ -329,6 +336,10 @@ export function initDiagnostics(getRoot: () => string | null): void {
   void onFsChanged(({ paths }) => {
     const relevant = paths.some((p) => !p.includes("/.sutra/") && !p.startsWith(".sutra/"));
     if (!relevant) return;
+    if (diagFsPaused) {
+      diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
+      return;
+    }
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => {
       settleTimer = null;
@@ -336,4 +347,26 @@ export function initDiagnostics(getRoot: () => string | null): void {
       if (currentRoot) void runDiagnostics(currentRoot);
     }, SETTLE_MS);
   });
+}
+
+// Window-hidden gate: called by the main idle gate so background FS churn
+// doesn't spin up tsc/cargo diagnostics jobs while the window is off-screen.
+export function pauseDiagnosticsFsTrigger(): void {
+  diagFsPaused = true;
+  if (settleTimer) {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+  }
+}
+
+// Re-arm on re-show; run one catch-up job if anything changed while hidden.
+export function resumeDiagnosticsFsTrigger(): void {
+  diagFsPaused = false;
+  if (!diagFsPendingWhileHidden) return;
+  diagFsPendingWhileHidden = false;
+  const root = diagGetRoot?.() ?? currentRoot;
+  if (root) {
+    currentRoot = root;
+    void runDiagnostics(root);
+  }
 }
