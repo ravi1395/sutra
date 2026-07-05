@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceUpdate, diagsForPath, chipState, emptyDiagState, settleTrigger, toolFailures } from "../src/diagnostics";
+import { reduceUpdate, diagsForPath, chipState, emptyDiagState, settleTrigger, toolFailures, isDiagRelevantPath } from "../src/diagnostics";
 
 const d = (path: string, severity: "error" | "warning" = "error") =>
   ({ path, line: 1, col: 1, severity, message: "m", source: "tsc" });
@@ -58,4 +58,22 @@ test("settleTrigger fires only once settle window has elapsed since last fire", 
   assert.equal(settleTrigger(0, null, 1000), true);
   assert.equal(settleTrigger(500, 0, 1000), false);
   assert.equal(settleTrigger(1000, 0, 1000), true);
+});
+
+test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {
+  // cargo check writes target/** on every run — the original infinite-loop trigger
+  assert.equal(isDiagRelevantPath("/r/src-tauri/target/debug/build/libc-5f4e/output"), false);
+  assert.equal(isDiagRelevantPath("/r/node_modules/typescript/lib/tsc.js"), false);
+  assert.equal(isDiagRelevantPath("/r/dist/bundle.js"), false);
+  // hidden state dirs: .git index churn, .sutra turn store, .remember hook logs
+  assert.equal(isDiagRelevantPath("/r/.git/index"), false);
+  assert.equal(isDiagRelevantPath("/r/.sutra/turns/objects/ab"), false);
+  assert.equal(isDiagRelevantPath("/r/.remember/logs/memory.log"), false);
+  // real source changes still trigger
+  assert.equal(isDiagRelevantPath("/r/src/main.ts"), true);
+  assert.equal(isDiagRelevantPath("/r/src-tauri/src/lib.rs"), true);
+  // segment equality, not substring — a source dir merely containing "target" passes
+  assert.equal(isDiagRelevantPath("/r/src/retarget/foo.ts"), true);
+  // windows separators
+  assert.equal(isDiagRelevantPath("C:\\r\\node_modules\\x.js"), false);
 });

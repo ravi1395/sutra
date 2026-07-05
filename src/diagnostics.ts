@@ -109,6 +109,19 @@ export function settleTrigger(nowMs: number, lastFireMs: number | null, settleMs
   return nowMs - lastFireMs >= settleMs;
 }
 
+// Build outputs the diag jobs themselves write into: `cargo check` touches
+// target/** on every run, so an unfiltered fs trigger re-runs the jobs forever.
+const DIAG_IGNORED_SEGMENTS = new Set(["node_modules", "target", "dist"]);
+
+/** True when a changed path should (re)schedule diagnostics: excludes build
+ * outputs and hidden dirs (.git/.sutra/.remember/…) so tool self-writes and
+ * VCS/state churn can't sustain a spawn loop. Pure; segment match, not substring. */
+export function isDiagRelevantPath(path: string): boolean {
+  return !path
+    .split(/[\\/]/)
+    .some((seg) => DIAG_IGNORED_SEGMENTS.has(seg) || (seg.length > 1 && seg.startsWith(".")));
+}
+
 // ---- module state (DOM/CM6 layer) ----
 
 let state: DiagState = emptyDiagState();
@@ -334,7 +347,7 @@ export function initDiagnostics(getRoot: () => string | null): void {
   });
 
   void onFsChanged(({ paths }) => {
-    const relevant = paths.some((p) => !p.includes("/.sutra/") && !p.startsWith(".sutra/"));
+    const relevant = paths.some(isDiagRelevantPath);
     if (!relevant) return;
     if (diagFsPaused) {
       diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
