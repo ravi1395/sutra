@@ -286,6 +286,22 @@ pub fn has_permission_prompt(tail: &str) -> bool {
         || t.contains("❯1.")
 }
 
+/// Scan the recent output tail for the agent's interruptible-work marker
+/// ("esc to interrupt", shown by claude/codex only while generating or running a
+/// tool). Strips ANSI, all whitespace, and case so cursor-positioned and
+/// literally-spaced renderings collapse to one signature (mirrors
+/// `has_permission_prompt`). This is the positive "busy" signal: pure output
+/// silence is NOT a reliable idle proxy because an idle agent still repaints its
+/// input box / custom statusline, which kept `quiesced` false and stuck the
+/// write-gate at Busy (never delivering composed prompts).
+pub fn has_working_prompt(tail: &str) -> bool {
+    let t: String = strip_ansi(tail)
+        .split_whitespace()
+        .collect::<String>()
+        .to_lowercase();
+    t.contains("esctointerrupt")
+}
+
 /// Command name (argv[0] basename) of a pid. Unix: `ps -o comm=`. Other: None.
 #[cfg(unix)]
 fn process_command_name(pid: u32) -> Option<String> {
@@ -389,33 +405,47 @@ pub fn pty_list_agents(state: State<'_, PtyState>) -> Result<Vec<AgentTerminal>,
             .elapsed()
             .as_millis()
             >= QUIESCE_MS;
-        let permission = {
+        let (permission, working) = {
             let t = snap.tail.lock().unwrap();
-            has_permission_prompt(&String::from_utf8_lossy(&t))
+            let s = String::from_utf8_lossy(&t);
+            (has_permission_prompt(&s), has_working_prompt(&s))
         };
         out.push(AgentTerminal {
             id: snap.id,
             kind: comm_ref.unwrap_or("").to_string(),
             cwd: snap.leader.and_then(process_cwd),
-            state: classify_state(comm_ref, quiesced, permission),
+            state: classify_state(comm_ref, quiesced, working, permission),
         });
     }
     Ok(out)
 }
 
-/// Combine the three signals into a write-gate state.
+/// Combine the signals into a write-gate state.
 /// `leader_comm` = command name of the tty foreground process group leader.
-/// `quiesced` = no PTY output for QUIESCE_MS. `permission` = tail has a prompt.
-pub fn classify_state(leader_comm: Option<&str>, quiesced: bool, permission: bool) -> AgentState {
+/// `quiesced` = no PTY output for QUIESCE_MS. `working` = tail shows the agent's
+/// interruptible-work marker. `permission` = tail has a confirmation prompt.
+///
+/// An agent is Busy only when it shows the work marker AND is still emitting.
+/// Output alone is not enough: an idle agent keeps repainting its input box and
+/// custom statusline, which used to keep `quiesced` false and wedge the gate at
+/// Busy so composed prompts never delivered. Requiring `working` ignores those
+/// cosmetic repaints; ANDing `!quiesced` lets a stale marker in the 4 KB tail
+/// self-heal to Idle once output actually stops.
+pub fn classify_state(
+    leader_comm: Option<&str>,
+    quiesced: bool,
+    working: bool,
+    permission: bool,
+) -> AgentState {
     if permission {
         return AgentState::AwaitingInput;
     }
     match leader_comm {
         Some(c) if is_agent(c) => {
-            if quiesced {
-                AgentState::Idle
-            } else {
+            if working && !quiesced {
                 AgentState::Busy
+            } else {
+                AgentState::Idle
             }
         }
         _ => AgentState::Busy,
@@ -424,7 +454,7 @@ pub fn classify_state(leader_comm: Option<&str>, quiesced: bool, permission: boo
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_state, has_permission_prompt, is_agent, process_command_name, process_cwd, resolve_shell, strip_ansi, AgentState};
+    use super::{classify_state, has_permission_prompt, has_working_prompt, is_agent, process_command_name, process_cwd, resolve_shell, strip_ansi, AgentState};
 
     #[test]
     fn process_command_name_reads_self() {
@@ -486,14 +516,34 @@ mod tests {
     }
 
     #[test]
+    fn working_prompt_detected_after_ansi_case_and_space_strip() {
+        // claude's generating spinner: cursor-positioned words, mixed case
+        assert!(has_working_prompt(
+            "\x1b[9G\x1b[2mEsc\x1b[13Gto\x1b[16Ginterrupt\x1b[0m"
+        ));
+        // literally-spaced / parenthesised variant collapses to the same signature
+        assert!(has_working_prompt("✻ Cerebrating… (esc to interrupt)"));
+        // idle input box and plain output carry no work marker
+        assert!(!has_working_prompt("? for shortcuts"));
+        assert!(!has_working_prompt("just some normal streaming output"));
+    }
+
+    #[test]
     fn classify_state_rules() {
-        // agent foreground + quiesced => idle
-        assert_eq!(classify_state(Some("claude"), true, false), AgentState::Idle);
-        // agent foreground + still emitting => busy (thinking)
-        assert_eq!(classify_state(Some("claude"), false, false), AgentState::Busy);
-        // a tool subprocess in foreground => busy
-        assert_eq!(classify_state(Some("bash"), true, false), AgentState::Busy);
-        // permission text wins regardless
-        assert_eq!(classify_state(Some("claude"), true, true), AgentState::AwaitingInput);
+        // agent at prompt, no work marker => idle (quiet OR still repainting)
+        assert_eq!(classify_state(Some("claude"), true, false, false), AgentState::Idle);
+        // REGRESSION: idle agent still emitting cosmetic repaints (animated input
+        // box / statusline) but no work marker => idle, not busy. This is the bug:
+        // composed prompts were refused as "agent busy" forever.
+        assert_eq!(classify_state(Some("claude"), false, false, false), AgentState::Idle);
+        // agent actively generating (work marker + still emitting) => busy
+        assert_eq!(classify_state(Some("claude"), false, true, false), AgentState::Busy);
+        // stale work marker lingering in the tail but output has stopped => idle
+        assert_eq!(classify_state(Some("claude"), true, true, false), AgentState::Idle);
+        // a tool subprocess in foreground (leader not an agent) => busy
+        assert_eq!(classify_state(Some("bash"), true, false, false), AgentState::Busy);
+        // permission text wins regardless of the other signals
+        assert_eq!(classify_state(Some("claude"), true, false, true), AgentState::AwaitingInput);
+        assert_eq!(classify_state(Some("claude"), false, true, true), AgentState::AwaitingInput);
     }
 }
