@@ -35,6 +35,8 @@ import {
   filterWorkspaceTabs,
   formatAge,
   pathBelongsToRoot,
+  parentDir,
+  resolveOpenPath,
   pruneWorkspaceSession,
   serializeWorkspaceSession,
   sessionFromTabs,
@@ -463,5 +465,40 @@ test("terminal close collapses right group and promotes right-only groups left",
   assert.deepEqual(collapseAfterClose({ left: [], right: [two] }), {
     left: [two],
     right: [],
+  });
+});
+
+// ---- resolveOpenPath (smart open rule for OS/CLI paths) ----
+
+test("parentDir returns the parent for both separators", () => {
+  assert.equal(parentDir("/a/b/c.ts"), "/a/b");
+  assert.equal(parentDir("C:\\a\\b\\c.ts"), "C:\\a\\b");
+  assert.equal(parentDir("bare"), "bare"); // no separator → unchanged
+});
+
+test("resolveOpenPath: a folder replaces the workspace root", () => {
+  assert.deepEqual(resolveOpenPath("/proj", true, "/other"), { kind: "workspace", dir: "/proj" });
+});
+
+test("resolveOpenPath: a file inside the current root opens as a tab", () => {
+  assert.deepEqual(resolveOpenPath("/proj/src/a.ts", false, "/proj"), {
+    kind: "fileInRoot",
+    file: "/proj/src/a.ts",
+  });
+});
+
+test("resolveOpenPath: a file outside the current root opens its parent + the file", () => {
+  assert.deepEqual(resolveOpenPath("/elsewhere/x.ts", false, "/proj"), {
+    kind: "fileWithParent",
+    parent: "/elsewhere",
+    file: "/elsewhere/x.ts",
+  });
+});
+
+test("resolveOpenPath: a file with no current root opens its parent + the file", () => {
+  assert.deepEqual(resolveOpenPath("/a/b/x.ts", false, null), {
+    kind: "fileWithParent",
+    parent: "/a/b",
+    file: "/a/b/x.ts",
   });
 });

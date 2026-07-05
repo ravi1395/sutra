@@ -41,6 +41,8 @@ import {
   gitCheckout,
   onPreviewOpen,
   onDrive,
+  onOpenPath,
+  takeLaunchPath,
   onUiRequest,
   onPromptRequest,
   mcpUiReply,
@@ -69,9 +71,11 @@ import {
   diagnosticsExtension,
   initDiagnostics,
   notifyDocChanged,
+  pauseDiagnosticsFsTrigger,
+  resumeDiagnosticsFsTrigger,
   problemsPanelEl,
 } from "./diagnostics";
-import { aggregateStripEl, initSessions, sessionsPanelEl } from "./sessions";
+import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -85,6 +89,7 @@ import {
   validateName,
   validateCommand,
   validateAutomation,
+  prepareCreateAutomation,
   testAutomation,
   type Automation,
   type AutomationBarHandle,
@@ -97,6 +102,7 @@ import {
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
+  resolveOpenPath,
   pruneWorkspaceSession,
   saveRecents,
   saveWorkspaceSession,
@@ -115,6 +121,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
+import { openAboutModal, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -273,6 +280,30 @@ void onDrive((d) => {
   }
 });
 
+// Open a path handed to Sutra by the OS/CLI while it's already running
+// (single-instance forward, macOS "Open With"). Cold-start paths are handled at
+// boot by bootOpen via takeLaunchPath.
+void onOpenPath((p) => void routeOpenPath(p.path, p.isDir));
+
+// Apply the smart open rule (decision in workspace.resolveOpenPath): a folder
+// replaces the workspace root; a file inside the current workspace opens as a tab;
+// a file outside opens its parent folder as the workspace, then the file.
+async function routeOpenPath(path: string, isDir: boolean): Promise<void> {
+  const action = resolveOpenPath(path, isDir, currentRoot);
+  switch (action.kind) {
+    case "workspace":
+      await openWorkspace(action.dir);
+      break;
+    case "fileInRoot":
+      await editor.openFile(action.file);
+      break;
+    case "fileWithParent":
+      await openWorkspace(action.parent);
+      await editor.openFile(action.file);
+      break;
+  }
+}
+
 // Track the origin of the currently active prompt URL so the bridge listener
 // can reject messages from any other source.
 let promptOrigin: string | null = null;
@@ -298,7 +329,16 @@ window.addEventListener("message", (e) => {
 });
 
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
+// Automation actions (create/list/run) are async and route to resolveAutomationUi;
+// the read-only queries resolve synchronously via resolveUiQuery.
 void onUiRequest((r) => {
+  if (r.query === "createAutomation" || r.query === "listAutomations" || r.query === "runAutomation") {
+    void resolveAutomationUi(r.query, r.params).then(
+      (payload) => void mcpUiReply(r.id, payload),
+      (e) => void mcpUiReply(r.id, { error: String(e) }),
+    );
+    return;
+  }
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
@@ -307,12 +347,56 @@ void onUiRequest((r) => {
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
 
+// Handle MCP automation actions from an AI agent/skill: create/list/run automations
+// against the current workspace, reusing the same validation + persistence + bar
+// refresh path as the manual automation drawer. Returns a JSON-serializable result.
+async function resolveAutomationUi(
+  query: "createAutomation" | "listAutomations" | "runAutomation",
+  params: unknown,
+): Promise<unknown> {
+  const root = currentRoot;
+  if (!root) return { error: "No workspace open in Sutra" };
+  const p = (params ?? {}) as { name?: string; command?: string; kind?: string; id?: string };
+
+  if (query === "listAutomations") {
+    return { automations };
+  }
+
+  if (query === "createAutomation") {
+    const prepared = prepareCreateAutomation(automations, p);
+    if ("error" in prepared) return { error: prepared.error };
+    const a = prepared.automation;
+    automations = upsertAutomation(automations, a);
+    try {
+      await saveAutomations(root, automations);
+    } catch (e) {
+      return { error: `Could not save automation: ${e}` };
+    }
+    automationBar.setAutomations(automations);
+    return { ok: true, id: a.id, name: a.name };
+  }
+
+  // runAutomation: match by id first, else by case-insensitive name.
+  const target = p.id
+    ? automations.find((x) => x.id === p.id)
+    : automations.find((x) => x.name.trim().toLowerCase() === (p.name ?? "").trim().toLowerCase());
+  if (!target) return { error: `No automation matching ${p.id ?? p.name ?? "(none)"}` };
+  void runAutomation(target);
+  return { ok: true, started: true, id: target.id, name: target.name };
+}
+
 // Native workspace watcher refreshes the visible tree and git badges after
 // filesystem changes from terminals, external tools, or Finder.
 void onFsChanged((payload) => {
   if (!currentRoot) return;
   const root = currentRoot;
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
+    return;
+  }
+  if (bgPaused) {
+    // Window hidden: defer tree refresh + lang re-index; catch up on re-show.
+    fsChangedWhileHidden = true;
+    for (const p of payload.paths) hiddenFsPaths.add(p);
     return;
   }
   // Inform the lang engine to re-index changed files (gracefully degrades if backend absent).
@@ -1056,16 +1140,37 @@ function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
+// ---- background-poll idle gate ----
+// macOS charges heavy energy to a backgrounded WebView that keeps polling and
+// repainting. When the window is hidden (occluded/minimized) we disarm every
+// cadence timer and pause CSS animations; on re-show we re-arm and run one
+// catch-up tick. `*Wanted` = the poll should run (feature/workspace on);
+// `bgPaused` = the window is currently hidden.
+let bgPaused = false;
+// Deferred fs-changed work while hidden: tree refresh + lang re-index accumulate
+// and run once on re-show, instead of firing on every background FS event (e.g. a
+// worktree agent editing files while the window is off-screen).
+let fsChangedWhileHidden = false;
+const hiddenFsPaths = new Set<string>();
+
 // ---- integrated-agent workspace tracking ----
 let pollTimer: number | undefined;
+let agentPollWanted = false;
+
+function armAgentPoll(): void {
+  if (pollTimer === undefined && agentPollWanted && !bgPaused) {
+    pollTimer = window.setInterval(pollAgentChanges, 1500);
+  }
+}
 
 function startAgentTrackingPoll(): void {
-  if (pollTimer !== undefined) return;
-  pollTimer = window.setInterval(pollAgentChanges, 1500);
+  agentPollWanted = true;
+  armAgentPoll();
 }
 
 // Halts agent-change polling and clears any whisper text it surfaced.
 function stopAgentTrackingPoll(): void {
+  agentPollWanted = false;
   if (pollTimer !== undefined) {
     clearInterval(pollTimer);
     pollTimer = undefined;
@@ -1079,13 +1184,21 @@ function stopAgentTrackingPoll(): void {
 let gitIndexMtime = 0;
 let gitPollTimer: number | undefined;
 let gitIndexPath: string | null = null;
+let gitPollWanted = false;
+
+function armGitPoll(): void {
+  if (gitPollTimer === undefined && gitPollWanted && !bgPaused) {
+    gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  }
+}
 
 function startGitPoll(): void {
-  if (gitPollTimer !== undefined) return;
-  gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  gitPollWanted = true;
+  armGitPoll();
 }
 
 function stopGitPoll(): void {
+  gitPollWanted = false;
   if (gitPollTimer !== undefined) {
     clearInterval(gitPollTimer);
     gitPollTimer = undefined;
@@ -1093,6 +1206,40 @@ function stopGitPoll(): void {
     gitIndexPath = null;
   }
 }
+
+// Disarm every cadence timer + pause animations while hidden; re-arm and run a
+// single catch-up tick on re-show. Preserves feature state (no teardown).
+function setBackgroundPaused(hidden: boolean): void {
+  if (hidden === bgPaused) return;
+  bgPaused = hidden;
+  document.body.classList.toggle("app-hidden", hidden);
+  terminals.setBlinkPaused(hidden); // stop xterm's JS blink loop while off-screen
+  if (hidden) {
+    if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
+    if (gitPollTimer !== undefined) { clearInterval(gitPollTimer); gitPollTimer = undefined; }
+    pauseSessionsPolling();
+    composerPanel?.pausePolling();
+    pauseDiagnosticsFsTrigger();
+  } else {
+    armAgentPoll();
+    armGitPoll();
+    resumeSessionsPolling();
+    composerPanel?.resumePolling();
+    resumeDiagnosticsFsTrigger();
+    if (agentPollWanted) void pollAgentChanges();
+    if (gitPollWanted) void pollGitIndex();
+    if (fsChangedWhileHidden && currentRoot) {
+      // One catch-up for FS churn accumulated while hidden.
+      fsChangedWhileHidden = false;
+      const paths = [...hiddenFsPaths];
+      hiddenFsPaths.clear();
+      if (paths.length) void langIndexInvalidate(paths).catch(() => {});
+      scheduleFileSystemRefresh(currentRoot);
+    }
+  }
+}
+
+document.addEventListener("visibilitychange", () => setBackgroundPaused(document.hidden));
 
 /** Resolve the real git index once per workspace, including linked worktrees. */
 async function resolveGitIndexPath(root: string): Promise<string> {
@@ -1256,17 +1403,27 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
+let lastWhisperSig = "";
 function renderWhisperBar(): void {
+  const dirty = editor.tabs.some((tab) => tab.dirty);
+  const activePath = editor.active?.path ?? null;
+  const agentCopy = whisperText(agentStatus, activePath);
+  const lnText = editor.active ? `ln ${editor.getSelection().line}` : "";
+  // Called every 1.5 s by the agent poll — skip the DOM teardown/rebuild unless
+  // something visible actually changed. diag chip + aggregate strip are singleton
+  // nodes mutated in place elsewhere, so their live textContent is the source of truth.
+  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
+  if (sig === lastWhisperSig) return;
+  lastWhisperSig = sig;
+
   whisperBar.innerHTML = "";
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
-  saveState.className = "whisper-save" + (editor.tabs.some((tab) => tab.dirty) ? " dirty" : "");
-  saveState.textContent = editor.tabs.some((tab) => tab.dirty) ? "unsaved changes" : "all changes saved";
+  saveState.className = "whisper-save" + (dirty ? " dirty" : "");
+  saveState.textContent = dirty ? "unsaved changes" : "all changes saved";
   left.append(saveState);
 
-  const activePath = editor.active?.path ?? null;
-  const agentCopy = whisperText(agentStatus, activePath);
   if (agentCopy) {
     const agent = document.createElement("button");
     agent.className = "whisper-agent";
@@ -1280,10 +1437,7 @@ function renderWhisperBar(): void {
 
   const right = document.createElement("div");
   right.className = "whisper-right";
-  if (editor.active) {
-    const selection = editor.getSelection();
-    right.textContent = `ln ${selection.line}`;
-  }
+  if (lnText) right.textContent = lnText;
   // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
   whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
 }
@@ -1431,6 +1585,10 @@ const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onInfo: (m) => void alertNative(m),
 });
 btnMenu.innerHTML = icon("menu", 17);
+// Version pill → About panel (What's New / Tutorial / About). Label lazily once the runtime version resolves.
+const btnVersion = $("btn-version") as HTMLButtonElement;
+void getVersion().then((v) => (btnVersion.textContent = `v${v}`), () => undefined);
+btnVersion.onclick = () => openAbout();
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
@@ -1475,6 +1633,7 @@ btnMenu.onclick = () => {
       foot.className = "menu-foot";
       el.appendChild(foot);
       mk("settings…", "⌘,", () => openSettings());
+      mk("about sutra…", "", () => openAbout());
     },
     "menu-card",
   );
@@ -1735,6 +1894,8 @@ const paletteCommands: Command[] = [
     search.focus();
   }, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
+  { id: "about", title: "About Sutra", run: () => openAbout() },
+  { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
   { id: "debug-start", title: "Debug: Start", run: () => void startDebugging(), shortcut: "F5" },
   { id: "debug-continue", title: "Debug: Continue", run: () => void debugSession.continue(), shortcut: "F5" },
   { id: "debug-pause", title: "Debug: Pause", run: () => void debugSession.pause(), shortcut: "F6" },
@@ -1777,6 +1938,11 @@ function openSettings(): void {
     version: getVersion(),
     shortcuts: shortcutEntries(),
   });
+}
+
+// Opens the About panel (version pill, app menu, palette). Resolves the runtime version first.
+function openAbout(tab: AboutTab = "What's New"): void {
+  void getVersion().then((v) => openAboutModal(v, tab), () => openAboutModal("", tab));
 }
 
 // ---- quit guard ----
@@ -1823,3 +1989,24 @@ applySettings(settings);
 editor.renderAllTabs();
 renderWhisperBar();
 setTerminal(drawerState.open);
+
+// Reopen the most-recently used folder so a relaunch (incl. after an app update,
+// which preserves localStorage) resumes where the user left off instead of a
+// blank window. Skip silently if the folder was moved/deleted since last run.
+void (async function bootOpen(): Promise<void> {
+  // A path handed to Sutra at launch (CLI arg / Finder "Open With") wins over
+  // last-folder restore. Consume it once; on none, fall back to the last workspace.
+  const launch = await takeLaunchPath().catch(() => null);
+  if (launch) {
+    await routeOpenPath(launch.path, launch.isDir);
+    return;
+  }
+  const [last] = loadRecents();
+  if (!last) return; // first run — nothing to restore
+  try {
+    await listDir(last.path); // cheap existence/readability probe
+  } catch {
+    return; // folder gone or unreadable — stay on the blank state
+  }
+  await openWorkspace(last.path);
+})();

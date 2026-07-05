@@ -14,6 +14,25 @@ export function pathBelongsToRoot(path: string, root: string): boolean {
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
+/** Parent directory of a path, tolerant of both separators. */
+export function parentDir(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : p;
+}
+
+/** How to open a path handed to Sutra by the OS/CLI. */
+export type OpenPathAction =
+  | { kind: "workspace"; dir: string } // folder → replace the workspace root
+  | { kind: "fileInRoot"; file: string } // file inside current root → open as a tab
+  | { kind: "fileWithParent"; parent: string; file: string }; // outside file → open parent as root + file
+
+/** Decide how to open a path per the smart rule (pure; caller performs the effects). */
+export function resolveOpenPath(path: string, isDir: boolean, currentRoot: string | null): OpenPathAction {
+  if (isDir) return { kind: "workspace", dir: path };
+  if (currentRoot && pathBelongsToRoot(path, currentRoot)) return { kind: "fileInRoot", file: path };
+  return { kind: "fileWithParent", parent: parentDir(path), file: path };
+}
+
 export interface BreadcrumbSegment { label: string; dirPath: string | null; leaf: boolean; }
 
 /** Split an absolute file path into clickable breadcrumb segments relative to root. */

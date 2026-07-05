@@ -1,6 +1,6 @@
 [package]
 name = "sutra"
-version = "2.0.1"
+version = "2.1.0"
 description = "Sutra — minimal Rust + Tauri code editor"
 authors = ["ravi1395"]
 license = "Apache-2.0"
@@ -53,9 +53,11 @@ tree-sitter-html = "0.23"
 tree-sitter-css = "0.23"
 tree-sitter-md = "0.3"
 
-# The self-updater is desktop-only (no Android/iOS bundle target).
+# Desktop-only plugins (no Android/iOS bundle target): self-updater +
+# single-instance (forwards an opened path into the running window).
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

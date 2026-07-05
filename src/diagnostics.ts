@@ -109,12 +109,31 @@ export function settleTrigger(nowMs: number, lastFireMs: number | null, settleMs
   return nowMs - lastFireMs >= settleMs;
 }
 
+// Build outputs the diag jobs themselves write into: `cargo check` touches
+// target/** on every run, so an unfiltered fs trigger re-runs the jobs forever.
+const DIAG_IGNORED_SEGMENTS = new Set(["node_modules", "target", "dist"]);
+
+/** True when a changed path should (re)schedule diagnostics: excludes build
+ * outputs and hidden dirs (.git/.sutra/.remember/…) so tool self-writes and
+ * VCS/state churn can't sustain a spawn loop. Pure; segment match, not substring. */
+export function isDiagRelevantPath(path: string): boolean {
+  return !path
+    .split(/[\\/]/)
+    .some((seg) => DIAG_IGNORED_SEGMENTS.has(seg) || (seg.length > 1 && seg.startsWith(".")));
+}
+
 // ---- module state (DOM/CM6 layer) ----
 
 let state: DiagState = emptyDiagState();
 let currentRoot: string | null = null;
 let running = false;
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
+// Window-hidden gate for the fs-settle trigger: while off-screen we don't run
+// tsc/cargo jobs on background FS churn (e.g. an agent editing). A single
+// catch-up runs on re-show if anything relevant changed meanwhile.
+let diagFsPaused = false;
+let diagFsPendingWhileHidden = false;
+let diagGetRoot: (() => string | null) | null = null;
 let inFlight = false;
 const views = new Set<EditorView>();
 
@@ -321,14 +340,19 @@ async function runDiagnostics(root: string): Promise<void> {
 /** Wire the diagnostics trigger loop to the active workspace root. */
 export function initDiagnostics(getRoot: () => string | null): void {
   currentRoot = getRoot();
+  diagGetRoot = getRoot;
 
   void onDiagnosticsUpdated(({ root, source, diagnostics }) => {
     setDiagnostics(root, source, diagnostics);
   });
 
   void onFsChanged(({ paths }) => {
-    const relevant = paths.some((p) => !p.includes("/.sutra/") && !p.startsWith(".sutra/"));
+    const relevant = paths.some(isDiagRelevantPath);
     if (!relevant) return;
+    if (diagFsPaused) {
+      diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
+      return;
+    }
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => {
       settleTimer = null;
@@ -336,4 +360,26 @@ export function initDiagnostics(getRoot: () => string | null): void {
       if (currentRoot) void runDiagnostics(currentRoot);
     }, SETTLE_MS);
   });
+}
+
+// Window-hidden gate: called by the main idle gate so background FS churn
+// doesn't spin up tsc/cargo diagnostics jobs while the window is off-screen.
+export function pauseDiagnosticsFsTrigger(): void {
+  diagFsPaused = true;
+  if (settleTimer) {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+  }
+}
+
+// Re-arm on re-show; run one catch-up job if anything changed while hidden.
+export function resumeDiagnosticsFsTrigger(): void {
+  diagFsPaused = false;
+  if (!diagFsPendingWhileHidden) return;
+  diagFsPendingWhileHidden = false;
+  const root = diagGetRoot?.() ?? currentRoot;
+  if (root) {
+    currentRoot = root;
+    void runDiagnostics(root);
+  }
 }

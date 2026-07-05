@@ -8,6 +8,7 @@ import {
   isDuplicateName,
   upsertAutomation,
   removeAutomation,
+  prepareCreateAutomation,
   parseAutomationsFile,
   serializeAutomations,
   automationMenuModel,
@@ -139,4 +140,36 @@ test("parseAutomationsFile filters out entries missing required fields", () => {
   });
   const parsed = parseAutomationsFile(raw);
   assert.deepEqual(parsed, [a("Build", "npm run tauri build", "id1")]);
+});
+
+// ---- prepareCreateAutomation (MCP create_automation validation) ----
+
+test("prepareCreateAutomation builds a trimmed shell automation from agent params", () => {
+  const r = prepareCreateAutomation([], { name: "  Debug  ", command: "  mvnDebug  " });
+  assert.ok("automation" in r);
+  if ("automation" in r) {
+    assert.equal(r.automation.name, "Debug");
+    assert.equal(r.automation.command, "mvnDebug");
+    assert.equal(r.automation.kind, undefined); // shell default
+    assert.ok(r.automation.id.length > 0);
+  }
+});
+
+test("prepareCreateAutomation honors a known kind and ignores unknown kinds", () => {
+  const known = prepareCreateAutomation([], { name: "T", command: "npm test", kind: "test" });
+  assert.ok("automation" in known && known.automation.kind === "test");
+  const unknown = prepareCreateAutomation([], { name: "X", command: "c", kind: "bogus" });
+  assert.ok("automation" in unknown && unknown.automation.kind === undefined);
+});
+
+test("prepareCreateAutomation rejects empty name, empty command, and duplicates", () => {
+  assert.ok("error" in prepareCreateAutomation([], { name: "", command: "c" }));
+  assert.ok("error" in prepareCreateAutomation([], { name: "n", command: "  " }));
+  const dup = prepareCreateAutomation([a("Run")], { name: "run", command: "c" });
+  assert.ok("error" in dup);
+});
+
+test("prepareCreateAutomation rejects diagnostics kind without a parser", () => {
+  const r = prepareCreateAutomation([], { name: "D", command: "c", kind: "diagnostics" });
+  assert.ok("error" in r); // diagnostics needs a parser (not settable via MCP create args)
 });
