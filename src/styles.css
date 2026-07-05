@@ -239,6 +239,19 @@ body {
 @keyframes pulse {
   50% { opacity: 0.35; }
 }
+
+/* Reduced-motion: stop the infinite indicator + drop-target pulses so they
+   don't drive continuous compositor repaints for users who opt out. (Cursor
+   blink is handled in terminal.ts, which also pauses it while hidden.) */
+@media (prefers-reduced-motion: reduce) {
+  .auto-chip .pulse,
+  .auto-chip-dot,
+  .auto-dot,
+  [class*="split-drop"]::before,
+  [class*="split-drop"]::after {
+    animation: none;
+  }
+}
 .glyph {
   width: 30px;
   height: 30px;

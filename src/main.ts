@@ -1124,6 +1124,7 @@ function setBackgroundPaused(hidden: boolean): void {
   if (hidden === bgPaused) return;
   bgPaused = hidden;
   document.body.classList.toggle("app-hidden", hidden);
+  terminals.setBlinkPaused(hidden); // stop xterm's JS blink loop while off-screen
   if (hidden) {
     if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
     if (gitPollTimer !== undefined) { clearInterval(gitPollTimer); gitPollTimer = undefined; }

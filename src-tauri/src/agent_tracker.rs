@@ -84,11 +84,23 @@ struct Tracker {
     // long-lived process doesn't keep a whole-tree snapshot for every root
     // ever visited.
     last_polled: HashMap<PathBuf, Instant>,
+    // Memoized agent-kind reading per root. `ps -axo` (fork+exec + full
+    // process-table parse) is the most expensive thing a poll does. The 1.5s
+    // agent poll and the turn poll it piggybacks both need the kind within the
+    // same tick; the authoritative pollers store here so the turn poll reads it
+    // back within KIND_CACHE_TTL instead of spawning a second ps.
+    kind_cache: HashMap<PathBuf, (Instant, Option<AgentKind>)>,
 }
 
 /// Sessions idle past this with nothing pending are dropped (poll re-creates
 /// one on demand, re-capturing the baseline from HEAD).
 const SESSION_IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
+
+/// Agent-kind cache lifetime. Shorter than the 1.5s poll cadence so a fresh
+/// authoritative poll always refreshes the entry before the piggybacked turn
+/// poll reads it, but long enough to cover the gap between the two IPC calls
+/// within a single tick.
+const KIND_CACHE_TTL: Duration = Duration::from_millis(1200);
 
 // Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
 // unit handle so command signatures keep `State<'_, AgentTrackerState>`, but the
@@ -113,6 +125,12 @@ struct ProcessInfo {
     command: String,
 }
 
+// Test-only counter of real `ps` invocations, used to measure that the kind
+// cache collapses a tick's multiple consumers down to a single spawn. Gated to
+// tests so production carries no counter.
+#[cfg(test)]
+thread_local!(static PS_SPAWN_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0));
+
 impl Tracker {
     /// Drop sessions idle past `max_idle` holding no pending changes and no
     /// active agent — the only removal path besides a root losing its git
@@ -128,6 +146,7 @@ impl Tracker {
         });
         let sessions = &self.sessions;
         stamps.retain(|root, _| sessions.contains_key(root));
+        self.kind_cache.retain(|root, _| sessions.contains_key(root));
     }
 
     fn poll(
@@ -143,6 +162,7 @@ impl Tracker {
             Some(head) => head,
             None => {
                 self.sessions.remove(root);
+                self.kind_cache.remove(root);
                 return Ok(disabled_status());
             }
         };
@@ -230,7 +250,10 @@ impl Tracker {
         if !self.sessions.contains_key(root) {
             return Ok(self.peek(root));
         }
-        let kind = self.agent_kind_for_root(root);
+        // Authoritative reading (drives poll()'s state machine) — take it live,
+        // and memoize so this same sessions pass's turn poll on this root reuses
+        // it instead of spawning a second ps.
+        let kind = self.agent_kind_store(root);
         let agent_active = kind.is_some();
         let discover = !matches!(kind, Some(AgentKind::Claude));
         self.poll(root, agent_active, discover)
@@ -513,6 +536,8 @@ impl Tracker {
         if shells.is_empty() {
             return None;
         }
+        #[cfg(test)]
+        PS_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
         let output = Command::new("ps")
             .args(["-axo", "pid=,ppid=,command="])
             .output()
@@ -521,6 +546,28 @@ impl Tracker {
             &shells,
             &parse_process_table(&String::from_utf8_lossy(&output.stdout)),
         )
+    }
+
+    /// Authoritative agent-kind reading: spawns ps and memoizes the result so a
+    /// piggybacked turn poll can reuse it. Used by the 1.5s agent poll and the
+    /// sessions refresh, which must observe live process state every tick.
+    fn agent_kind_store(&mut self, root: &Path) -> Option<AgentKind> {
+        let kind = self.agent_kind_for_root(root);
+        self.kind_cache
+            .insert(root.to_path_buf(), (Instant::now(), kind));
+        kind
+    }
+
+    /// Reuse the last authoritative reading while still fresh, else take (and
+    /// store) a live one. Lets the turn poll skip a second ps in the common case
+    /// where the agent poll ran microseconds earlier on the same root.
+    fn agent_kind_cached(&mut self, root: &Path) -> Option<AgentKind> {
+        if let Some((at, kind)) = self.kind_cache.get(root) {
+            if at.elapsed() < KIND_CACHE_TTL {
+                return *kind;
+            }
+        }
+        self.agent_kind_store(root)
     }
 
     /// Root of the session that owns `path`: the longest tracked root that is an
@@ -695,8 +742,8 @@ pub fn pending_snapshot(root: &str) -> Vec<(String, Option<Vec<u8>>, bool)> {
 
 /// Detected agent kind ("claude" | "codex") for `root`, when known.
 pub fn detected_agent_kind(root: &str) -> Option<String> {
-    let tracker = TRACKER.lock().unwrap();
-    match tracker.agent_kind_for_root(Path::new(root))? {
+    let mut tracker = TRACKER.lock().unwrap();
+    match tracker.agent_kind_cached(Path::new(root))? {
         AgentKind::Claude => Some("claude".to_string()),
         AgentKind::Codex => Some("codex".to_string()),
     }
@@ -1178,7 +1225,7 @@ pub fn agent_tracking_poll(
 ) -> Result<AgentTrackingStatus, String> {
     let mut tracker = TRACKER.lock().unwrap();
     let root = Path::new(&root);
-    let kind = tracker.agent_kind_for_root(root);
+    let kind = tracker.agent_kind_store(root);
     let agent_active = kind.is_some();
     let discover = !matches!(kind, Some(AgentKind::Claude));
     tracker.poll(root, agent_active, discover)
@@ -1274,6 +1321,25 @@ mod tests {
         assert!(tracker.sessions.is_empty(), "idle session evicted past threshold");
     }
 
+    // The agent-kind cache must not outlive the session it belongs to, or a
+    // long-lived process leaks one entry per root ever polled.
+    #[test]
+    fn evicting_an_idle_session_drops_its_kind_cache_entry() {
+        let dir = tempdir().unwrap();
+        let mut tracker = tracker_with(idle_session(dir.path()));
+        tracker
+            .kind_cache
+            .insert(dir.path().to_path_buf(), (Instant::now(), Some(AgentKind::Claude)));
+        let now = Instant::now();
+        tracker.evict_idle(now, Duration::ZERO); // stamp
+        tracker.evict_idle(now + Duration::from_secs(1), Duration::ZERO); // evict
+        assert!(tracker.sessions.is_empty(), "idle session evicted");
+        assert!(
+            !tracker.kind_cache.contains_key(dir.path()),
+            "kind cache entry pruned alongside its session"
+        );
+    }
+
     #[test]
     fn sessions_with_pending_or_active_agent_never_evicted() {
         let (_dir, mut tracker, _path) = active_session_with_reported_change(); // pending non-empty
@@ -1285,6 +1351,71 @@ mod tests {
         tracker.evict_idle(now, Duration::ZERO);
         tracker.evict_idle(now + Duration::from_secs(3600), Duration::ZERO);
         assert_eq!(tracker.sessions.len(), 2, "pending/active sessions must survive eviction");
+    }
+
+    // The turn poll reuses the agent poll's kind reading instead of spawning a
+    // second ps. A fresh cache entry is honored even though this tracker has no
+    // registered shells — a live ps-based reading would short-circuit to None —
+    // proving the read never consulted the process table. Once the entry ages
+    // past the TTL the read falls back to a live reading (None here).
+    #[test]
+    fn cached_agent_kind_reused_within_ttl_then_refreshes() {
+        let root = PathBuf::from("/tmp/sutra-kind-cache");
+        let mut tracker = Tracker::default();
+
+        tracker
+            .kind_cache
+            .insert(root.clone(), (Instant::now(), Some(AgentKind::Claude)));
+        assert_eq!(
+            tracker.agent_kind_cached(&root),
+            Some(AgentKind::Claude),
+            "fresh cache entry served without a live ps reading"
+        );
+
+        let stale = Instant::now()
+            .checked_sub(KIND_CACHE_TTL + Duration::from_millis(50))
+            .expect("test host uptime exceeds the cache TTL");
+        tracker
+            .kind_cache
+            .insert(root.clone(), (stale, Some(AgentKind::Claude)));
+        assert_eq!(
+            tracker.agent_kind_cached(&root),
+            None,
+            "expired entry falls through to a live reading (no shells → None)"
+        );
+    }
+
+    fn reset_ps_spawns() {
+        PS_SPAWN_COUNT.with(|count| count.set(0));
+    }
+
+    fn ps_spawns() -> usize {
+        PS_SPAWN_COUNT.with(|count| count.get())
+    }
+
+    // Measurement: count real `ps` execs across one tick's consumers. A shell
+    // rooted in the workspace makes agent_kind_for_root actually spawn ps.
+    // Un-deduped, a tick reads the kind twice (agent poll + turn poll, or
+    // sessions refresh + turn poll) = 2 spawns; the store-then-cached path
+    // collapses that to 1. Thread-local counter → immune to parallel tests.
+    #[test]
+    fn kind_cache_collapses_a_tick_to_one_ps_spawn() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut tracker = Tracker::default();
+        tracker.shells.insert(std::process::id(), root.clone());
+
+        // Baseline (pre-dedup): two independent live readings in one tick.
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_for_root(&root);
+        let _ = tracker.agent_kind_for_root(&root);
+        assert_eq!(ps_spawns(), 2, "un-deduped tick spawns ps twice");
+
+        // Deduped: authoritative store + piggybacked cached read, same tick.
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_store(&root); // agent poll / sessions refresh
+        let _ = tracker.agent_kind_cached(&root); // turn poll piggyback (same tick)
+        assert_eq!(ps_spawns(), 1, "deduped tick spawns ps once");
     }
 
     // refresh() must never create a session (the panel would otherwise spin up

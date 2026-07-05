@@ -74,6 +74,12 @@ export class TerminalManager {
   private fontFamily = '"SF Mono", Menlo, monospace';
   private scrollback = 5000;
   private shellPref: string | null = null;
+  // Cursor blink is a repaint loop that keeps the compositor awake. Read the OS
+  // reduced-motion preference once, and let the window-idle gate pause blink
+  // while hidden — WKWebView keeps xterm's blink timer running off-screen where
+  // the CSS animation gate cannot reach it.
+  private reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  private blinkPaused = false;
   cwd: string | null = null;
   onTabsChanged?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
@@ -220,7 +226,7 @@ export class TerminalManager {
       theme: THEME,
       fontFamily: this.fontFamily,
       fontSize: this.fontSize,
-      cursorBlink: true,
+      cursorBlink: !this.reducedMotion && !this.blinkPaused,
       scrollback: this.scrollback,
     });
     const fit = new FitAddon();
@@ -663,6 +669,18 @@ export class TerminalManager {
     this.scrollback = lines;
     for (const t of this.terms) {
       t.term.options.scrollback = lines;
+    }
+  }
+
+  /** Pause cursor blink across every terminal while the window is hidden; the
+   *  window-idle gate calls this so xterm stops repainting the cursor off-screen.
+   *  Reduced-motion users never blink regardless of this flag. */
+  setBlinkPaused(paused: boolean): void {
+    if (this.blinkPaused === paused) return;
+    this.blinkPaused = paused;
+    const on = !this.reducedMotion && !this.blinkPaused;
+    for (const t of this.terms) {
+      t.term.options.cursorBlink = on;
     }
   }
 
