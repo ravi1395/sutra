@@ -2617,6 +2617,33 @@ button:hover {
 }
 .settings-reset:hover { border-color: var(--deleted); color: var(--deleted); }
 
+/* ── version pill + About panel (reuses .settings-* modal grammar) ── */
+.version-pill {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--fg-ghost, var(--fg-dim));
+  font-family: var(--ui);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.version-pill:hover { color: var(--fg); border-color: var(--line-menu); }
+.about-modal .settings-content { line-height: 1.5; }
+.about-release { margin-bottom: 16px; }
+.about-release-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.about-ver { font-size: 13px; font-weight: 600; color: var(--fg); }
+.about-date { font-size: 11px; color: var(--fg-dim); }
+.about-notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.about-notes li { font-size: 12px; color: var(--fg-dim); line-height: 1.5; }
+.about-step { margin-bottom: 12px; }
+.about-step-title { font-size: 12px; font-weight: 600; color: var(--fg); margin-bottom: 2px; }
+.about-step .settings-desc { margin: 0; }
+.about-links { display: flex; gap: 8px; margin-top: 12px; }
+.about-links .settings-reset { margin-top: 0; }
+
 /* Debugger: breakpoint gutter, paused line, inline value hints */
 .cm-bp-gutter { width: 14px; cursor: pointer; }
 .cm-bp-verified { color: #e51400; }

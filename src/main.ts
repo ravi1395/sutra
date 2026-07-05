@@ -117,6 +117,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
+import { openAboutModal, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -1509,6 +1510,10 @@ const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onInfo: (m) => void alertNative(m),
 });
 btnMenu.innerHTML = icon("menu", 17);
+// Version pill → About panel (What's New / Tutorial / About). Label lazily once the runtime version resolves.
+const btnVersion = $("btn-version") as HTMLButtonElement;
+void getVersion().then((v) => (btnVersion.textContent = `v${v}`), () => undefined);
+btnVersion.onclick = () => openAbout();
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
@@ -1553,6 +1558,7 @@ btnMenu.onclick = () => {
       foot.className = "menu-foot";
       el.appendChild(foot);
       mk("settings…", "⌘,", () => openSettings());
+      mk("about sutra…", "", () => openAbout());
     },
     "menu-card",
   );
@@ -1813,6 +1819,8 @@ const paletteCommands: Command[] = [
     search.focus();
   }, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
+  { id: "about", title: "About Sutra", run: () => openAbout() },
+  { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
   { id: "debug-start", title: "Debug: Start", run: () => void startDebugging(), shortcut: "F5" },
   { id: "debug-continue", title: "Debug: Continue", run: () => void debugSession.continue(), shortcut: "F5" },
   { id: "debug-pause", title: "Debug: Pause", run: () => void debugSession.pause(), shortcut: "F6" },
@@ -1855,6 +1863,11 @@ function openSettings(): void {
     version: getVersion(),
     shortcuts: shortcutEntries(),
   });
+}
+
+// Opens the About panel (version pill, app menu, palette). Resolves the runtime version first.
+function openAbout(tab: AboutTab = "What's New"): void {
+  void getVersion().then((v) => openAboutModal(v, tab), () => openAboutModal("", tab));
 }
 
 // ---- quit guard ----
