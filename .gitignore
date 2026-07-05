@@ -7,6 +7,8 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 .claude/*
+!.claude/skills/
+!.claude/skills/**
 .code-review-graph/*
 .sutra/
 .superpowers/*
@@ -36,7 +38,7 @@ plans*
 .mcp.json
 .codex/
 design/
-.claude/
+*.p12
 
 # Tauri updater signing keys — NEVER commit the private key.
 *.key
