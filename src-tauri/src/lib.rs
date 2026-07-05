@@ -1,4 +1,41 @@
-use tauri::Manager;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager};
+
+/// Holds a file/folder path handed to Sutra at launch (CLI arg or OS file-open),
+/// consumed once by the frontend on boot via `take_launch_path`. Warm opens
+/// (second instance, macOS "Open With" while running) emit `open-path` directly.
+#[derive(Default)]
+struct LaunchPath(Mutex<Option<String>>);
+
+/// First argv entry after the exe that is not a flag and names an existing path.
+fn first_path_arg(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
+        .cloned()
+}
+
+/// Emit an `open-path` event tagging whether `raw` is a directory. No-op for a
+/// path that doesn't exist (guards against stray argv/flags).
+fn emit_open_path(app: &tauri::AppHandle, raw: &str) {
+    let p = std::path::Path::new(raw);
+    if !p.exists() {
+        return;
+    }
+    let _ = app.emit(
+        "open-path",
+        serde_json::json!({ "path": raw, "isDir": p.is_dir() }),
+    );
+}
+
+/// Return and clear the cold-start launch path (CLI arg / OS file-open on launch).
+/// The frontend calls this once on boot and routes the result through its open rule.
+#[tauri::command]
+fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value> {
+    let raw = state.0.lock().ok()?.take()?;
+    let p = std::path::Path::new(&raw);
+    Some(serde_json::json!({ "path": raw, "isDir": p.is_dir() }))
+}
 
 // agent_tracker/runner/turns are pub: their contract fns are stubbed for the
 // harness-v2 wave and consumed cross-module (kept out of dead_code until wired).
@@ -22,7 +59,23 @@ mod watcher;
 pub fn run() {
     let local_auth_token =
         mcp::LocalAuthToken::generate().expect("failed to generate local server auth token");
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // Single-instance must be registered first (plugin requirement). When a 2nd
+    // `sutra <path>` launches, forward the path into the running window and focus
+    // it rather than opening a duplicate. Desktop-only (no mobile bundle).
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(path) = first_path_arg(&argv) {
+                emit_open_path(app, &path);
+            }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+        }));
+    }
+    builder
         // Keep native Edit responders for standard shortcuts; the in-window
         // menu bar remains the visible source of truth for app commands.
         .menu(|handle| {
@@ -51,6 +104,7 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .manage(proxy::ProxyServerState::default())
         .manage(watcher::WatcherState::default())
+        .manage(LaunchPath::default())
         .setup(|app| {
             // Desktop-only self-updater: registered here so the chain stays
             // mobile-safe (no updater crate on Android/iOS).
@@ -71,6 +125,13 @@ pub fn run() {
                 token,
             ) {
                 eprintln!("[mcp] server failed to start: {e}");
+            }
+            // Stash a cold-start path (CLI arg / OS file-open on launch) for the
+            // frontend to consume on boot via `take_launch_path`.
+            if let Some(path) = first_path_arg(&std::env::args().collect::<Vec<_>>()) {
+                if let Ok(mut g) = app.state::<LaunchPath>().0.lock() {
+                    *g = Some(path);
+                }
             }
             Ok(())
         })
@@ -142,7 +203,43 @@ pub fn run() {
             search::search_dir,
             watcher::watch_start,
             watcher::watch_stop,
+            take_launch_path,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            // macOS delivers Finder "Open With" / `open <file>` as file-open events
+            // here (not argv). Forward each into the running window.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                for url in urls {
+                    if let Ok(path) = url.to_file_path() {
+                        emit_open_path(app_handle, &path.to_string_lossy());
+                    }
+                }
+            }
+            let _ = (app_handle, &event);
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_path_arg;
+
+    #[test]
+    fn first_path_arg_skips_exe_flags_and_missing_paths() {
+        let dir = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let argv = vec![
+            "sutra".to_string(),             // exe — skipped
+            "--flag".to_string(),            // flag — skipped
+            "/no/such/path/xyz".to_string(), // missing — skipped
+            dir.clone(),                     // existing dir — picked
+        ];
+        assert_eq!(first_path_arg(&argv), Some(dir));
+    }
+
+    #[test]
+    fn first_path_arg_none_when_only_exe() {
+        assert_eq!(first_path_arg(&["sutra".to_string()]), None);
+    }
 }
