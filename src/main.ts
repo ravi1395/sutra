@@ -41,6 +41,8 @@ import {
   gitCheckout,
   onPreviewOpen,
   onDrive,
+  onOpenPath,
+  takeLaunchPath,
   onUiRequest,
   onPromptRequest,
   mcpUiReply,
@@ -100,6 +102,7 @@ import {
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
+  resolveOpenPath,
   pruneWorkspaceSession,
   saveRecents,
   saveWorkspaceSession,
@@ -276,6 +279,30 @@ void onDrive((d) => {
       break;
   }
 });
+
+// Open a path handed to Sutra by the OS/CLI while it's already running
+// (single-instance forward, macOS "Open With"). Cold-start paths are handled at
+// boot by bootOpen via takeLaunchPath.
+void onOpenPath((p) => void routeOpenPath(p.path, p.isDir));
+
+// Apply the smart open rule (decision in workspace.resolveOpenPath): a folder
+// replaces the workspace root; a file inside the current workspace opens as a tab;
+// a file outside opens its parent folder as the workspace, then the file.
+async function routeOpenPath(path: string, isDir: boolean): Promise<void> {
+  const action = resolveOpenPath(path, isDir, currentRoot);
+  switch (action.kind) {
+    case "workspace":
+      await openWorkspace(action.dir);
+      break;
+    case "fileInRoot":
+      await editor.openFile(action.file);
+      break;
+    case "fileWithParent":
+      await openWorkspace(action.parent);
+      await editor.openFile(action.file);
+      break;
+  }
+}
 
 // Track the origin of the currently active prompt URL so the bridge listener
 // can reject messages from any other source.
@@ -1966,7 +1993,14 @@ setTerminal(drawerState.open);
 // Reopen the most-recently used folder so a relaunch (incl. after an app update,
 // which preserves localStorage) resumes where the user left off instead of a
 // blank window. Skip silently if the folder was moved/deleted since last run.
-void (async function restoreLastWorkspace(): Promise<void> {
+void (async function bootOpen(): Promise<void> {
+  // A path handed to Sutra at launch (CLI arg / Finder "Open With") wins over
+  // last-folder restore. Consume it once; on none, fall back to the last workspace.
+  const launch = await takeLaunchPath().catch(() => null);
+  if (launch) {
+    await routeOpenPath(launch.path, launch.isDir);
+    return;
+  }
   const [last] = loadRecents();
   if (!last) return; // first run — nothing to restore
   try {
