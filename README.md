@@ -102,6 +102,10 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - The **＋** button adds a folder via the native dialog.
 - Recents are deduped, most-recent-first, capped at 8, and persisted in
   `localStorage` across relaunches. Also reachable via **File ▸ Open Recent**.
+- On launch Sutra **reopens the most-recent folder** automatically (rather than
+  starting blank), so a relaunch — including after an app update, which keeps
+  `localStorage` — resumes where you left off. If that folder was moved or
+  deleted, the blank state is shown instead.
 - Each workspace restores its previous file tabs from `localStorage` after the
   tree loads. Missing files are skipped; the saved active tab is reactivated
   when it still exists.

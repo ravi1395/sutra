@@ -1823,3 +1823,17 @@ applySettings(settings);
 editor.renderAllTabs();
 renderWhisperBar();
 setTerminal(drawerState.open);
+
+// Reopen the most-recently used folder so a relaunch (incl. after an app update,
+// which preserves localStorage) resumes where the user left off instead of a
+// blank window. Skip silently if the folder was moved/deleted since last run.
+void (async function restoreLastWorkspace(): Promise<void> {
+  const [last] = loadRecents();
+  if (!last) return; // first run — nothing to restore
+  try {
+    await listDir(last.path); // cheap existence/readability probe
+  } catch {
+    return; // folder gone or unreadable — stay on the blank state
+  }
+  await openWorkspace(last.path);
+})();
