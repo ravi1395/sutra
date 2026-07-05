@@ -118,6 +118,24 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   badges after filesystem changes. A 10s git-index mtime poll remains as a
   fallback.
 
+#### Open with Sutra (Finder / Explorer / command line)
+- Sutra registers as a file opener, so you can right-click a source or text file
+  and **Open With ▸ Sutra**, run `open -a Sutra <path>` (macOS), or pass a path
+  on the command line.
+- Opening a **folder** replaces the current workspace root. Opening a **file**
+  inside the current workspace focuses it as a tab; a file **outside** it opens
+  its parent folder as the workspace, then the file.
+- Sutra runs as a **single window**: launching it again with a path forwards the
+  path into the running window and focuses it instead of opening a duplicate.
+- A path handed to Sutra at launch takes precedence over last-folder restore.
+
+### About, What's New & Tutorial
+- The **version pill** at the right of the title bar (e.g. `v2.1.0`) opens an
+  About panel with three tabs: **What's New** (the bundled changelog), a short
+  **Tutorial** (core workflows + a keyboard cheatsheet), and **About** (version
+  and links). Also reachable from the app menu and the command palette
+  (**About Sutra**, **What's New**).
+
 ### Editor
 - CodeMirror 6 with **line numbers**, one-dark theme, bracket matching, search,
   and syntax highlighting for HTML, JS, TS, Python, Java, SQL, Rust, Go, Ruby,
@@ -425,6 +443,20 @@ read tools (keyed by request id), so concurrent prompts resolve independently.
 | `search` | `query`, `caseInsensitive?`, `isRegex?` | Matching file/line/text results. Literal by default; set `isRegex` to opt in. |
 | `get_open_tabs` | — | Open tab paths, names, active/dirty flags (live, via UI round-trip). |
 | `get_selection` | — | Active file path, selected text, line (live, via UI round-trip). |
+
+### Automation tools
+
+| Tool | Argument | Effect |
+|---|---|---|
+| `create_automation` | `name`, `command`, `kind?` | Saves a named shell command to `.sutra/automations.json` and adds it to the automation bar. Returns the new id or a validation error. |
+| `list_automations` | — | Lists the workspace's saved automations. |
+| `run_automation` | `name` \| `id` | Runs a saved automation in a Sutra terminal. |
+
+These let an agent set up a project's run/debug commands for you. The bundled
+**`sutra-setup-automation`** skill uses them: it inspects the open project
+(any stack — it reads the config markers present), infers a run or **debug**
+command, and saves it as an automation so it becomes a one-click button. Ask
+the in-app agent to *"set up a debug automation for this project"*.
 
 Ephemeral HTML is written to `<root>/.sutra/preview/` (newest 10 retained,
 pruned on each render). All path-taking tools target the **active workspace

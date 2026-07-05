@@ -33,6 +33,7 @@ src/
   palette.ts           Cmd+P command palette | Cmd+T symbol picker | goto-def chooser
   workspace.ts         root folder state, recents, localStorage
   settings.ts          UserSettings model + helpers  |  settings-modal.ts  UI modal
+  about-modal.ts       version pill → What's New / Tutorial / About (bundled RELEASES)
   preview.ts           Markdown/HTML split preview   |  browser.ts  localhost iframe
   search.ts / search-panel.ts  project-wide file search
   gitbar.ts            branch whisper + dropdown  |  git-index.ts  worktree helpers
@@ -83,8 +84,9 @@ tests/  one .test.ts per frontend module (node:test)
 
 ## State
 - Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 274 pass; `cargo test` (inside src-tauri/) → 157 pass
-- MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, etc.) via `mcp.rs`
+- Tests: `npm test` → 287 pass; `cargo test` (inside src-tauri/) → 159 pass
+- MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, `create_automation`/`list_automations`/`run_automation`, etc.) via `mcp.rs`
+- OS open: `lib.rs` single-instance + `fileAssociations` + macOS `RunEvent::Opened` + cold-start `take_launch_path` → emit `open-path{path,isDir}`; frontend `routeOpenPath`/`resolveOpenPath` (single window, replace root)
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
 
 ## Best Practices
