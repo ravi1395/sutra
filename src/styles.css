@@ -3354,3 +3354,12 @@ button:hover {
   color: var(--fg-dim);
   white-space: nowrap;
 }
+
+/* Idle energy: while the window is hidden (occluded/minimized), halt every CSS
+   animation so the compositor can sleep instead of pinning the GPU on offscreen
+   pulses/spinners. Paired with the JS poll gate in main.ts (setBackgroundPaused). */
+body.app-hidden *,
+body.app-hidden *::before,
+body.app-hidden *::after {
+  animation-play-state: paused !important;
+}

@@ -177,10 +177,24 @@ function renderSection(row: SessionRow): HTMLElement {
   return section;
 }
 
+let lastPanelSig = "";
+/** Signature of everything renderSection draws — lets renderPanel skip the full
+ *  replaceChildren when a poll returns identical state (idle-repaint dedup). */
+function panelSignature(rows: SessionRow[], pending: number, failing: number): string {
+  const rowSig = (r: SessionRow): string =>
+    `${r.root}~${r.busy ? 1 : 0}~${r.branch}~${r.label}~${r.agentKind ?? ""}~${r.pendingFiles}` +
+    `~${turnChipText(r.latestTurn)}~${expanded.has(r.root) ? 1 : 0}~${hookOffers.get(r.root) ? 1 : 0}` +
+    `~${expanded.has(r.root) ? (r.latestTurn?.files ?? []).map((f) => f.path).join(",") : ""}`;
+  return rows.map(rowSig).join("␟") + `|${pending}|${failing}`;
+}
+
 /** Re-render the panel and aggregate strip from cached rows (no IPC). */
 function renderPanel(): void {
-  sessionsPanelEl().replaceChildren(...latestRows.map(renderSection));
   const totals = aggregate(latestRows);
+  const sig = panelSignature(latestRows, totals.pending, totals.failingTurns);
+  if (sig === lastPanelSig) return;
+  lastPanelSig = sig;
+  sessionsPanelEl().replaceChildren(...latestRows.map(renderSection));
   aggregateStripEl().textContent = `${totals.pending} pending · ${totals.failingTurns} failing`;
 }
 
@@ -190,6 +204,22 @@ export function initSessions(primaryRoot: () => string | null): void {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => void refreshSessions(), 3000);
   void refreshSessions(); // immediate first paint; don't wait 3 s
+}
+
+/** Pause the 3 s refresh loop while the window is hidden (state kept intact). */
+export function pauseSessionsPolling(): void {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+/** Resume the refresh loop and run one immediate catch-up refresh. */
+export function resumeSessionsPolling(): void {
+  if (!refreshTimer && primaryRootGetter) {
+    refreshTimer = setInterval(() => void refreshSessions(), 3000);
+    void refreshSessions();
+  }
 }
 
 /** Re-query worktree roots + per-root state and re-render the panel. */

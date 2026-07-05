@@ -71,7 +71,7 @@ import {
   notifyDocChanged,
   problemsPanelEl,
 } from "./diagnostics";
-import { aggregateStripEl, initSessions, sessionsPanelEl } from "./sessions";
+import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -1056,16 +1056,32 @@ function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
+// ---- background-poll idle gate ----
+// macOS charges heavy energy to a backgrounded WebView that keeps polling and
+// repainting. When the window is hidden (occluded/minimized) we disarm every
+// cadence timer and pause CSS animations; on re-show we re-arm and run one
+// catch-up tick. `*Wanted` = the poll should run (feature/workspace on);
+// `bgPaused` = the window is currently hidden.
+let bgPaused = false;
+
 // ---- integrated-agent workspace tracking ----
 let pollTimer: number | undefined;
+let agentPollWanted = false;
+
+function armAgentPoll(): void {
+  if (pollTimer === undefined && agentPollWanted && !bgPaused) {
+    pollTimer = window.setInterval(pollAgentChanges, 1500);
+  }
+}
 
 function startAgentTrackingPoll(): void {
-  if (pollTimer !== undefined) return;
-  pollTimer = window.setInterval(pollAgentChanges, 1500);
+  agentPollWanted = true;
+  armAgentPoll();
 }
 
 // Halts agent-change polling and clears any whisper text it surfaced.
 function stopAgentTrackingPoll(): void {
+  agentPollWanted = false;
   if (pollTimer !== undefined) {
     clearInterval(pollTimer);
     pollTimer = undefined;
@@ -1079,13 +1095,21 @@ function stopAgentTrackingPoll(): void {
 let gitIndexMtime = 0;
 let gitPollTimer: number | undefined;
 let gitIndexPath: string | null = null;
+let gitPollWanted = false;
+
+function armGitPoll(): void {
+  if (gitPollTimer === undefined && gitPollWanted && !bgPaused) {
+    gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  }
+}
 
 function startGitPoll(): void {
-  if (gitPollTimer !== undefined) return;
-  gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  gitPollWanted = true;
+  armGitPoll();
 }
 
 function stopGitPoll(): void {
+  gitPollWanted = false;
   if (gitPollTimer !== undefined) {
     clearInterval(gitPollTimer);
     gitPollTimer = undefined;
@@ -1093,6 +1117,29 @@ function stopGitPoll(): void {
     gitIndexPath = null;
   }
 }
+
+// Disarm every cadence timer + pause animations while hidden; re-arm and run a
+// single catch-up tick on re-show. Preserves feature state (no teardown).
+function setBackgroundPaused(hidden: boolean): void {
+  if (hidden === bgPaused) return;
+  bgPaused = hidden;
+  document.body.classList.toggle("app-hidden", hidden);
+  if (hidden) {
+    if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
+    if (gitPollTimer !== undefined) { clearInterval(gitPollTimer); gitPollTimer = undefined; }
+    pauseSessionsPolling();
+    composerPanel?.pausePolling();
+  } else {
+    armAgentPoll();
+    armGitPoll();
+    resumeSessionsPolling();
+    composerPanel?.resumePolling();
+    if (agentPollWanted) void pollAgentChanges();
+    if (gitPollWanted) void pollGitIndex();
+  }
+}
+
+document.addEventListener("visibilitychange", () => setBackgroundPaused(document.hidden));
 
 /** Resolve the real git index once per workspace, including linked worktrees. */
 async function resolveGitIndexPath(root: string): Promise<string> {
@@ -1256,17 +1303,27 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
+let lastWhisperSig = "";
 function renderWhisperBar(): void {
+  const dirty = editor.tabs.some((tab) => tab.dirty);
+  const activePath = editor.active?.path ?? null;
+  const agentCopy = whisperText(agentStatus, activePath);
+  const lnText = editor.active ? `ln ${editor.getSelection().line}` : "";
+  // Called every 1.5 s by the agent poll — skip the DOM teardown/rebuild unless
+  // something visible actually changed. diag chip + aggregate strip are singleton
+  // nodes mutated in place elsewhere, so their live textContent is the source of truth.
+  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
+  if (sig === lastWhisperSig) return;
+  lastWhisperSig = sig;
+
   whisperBar.innerHTML = "";
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
-  saveState.className = "whisper-save" + (editor.tabs.some((tab) => tab.dirty) ? " dirty" : "");
-  saveState.textContent = editor.tabs.some((tab) => tab.dirty) ? "unsaved changes" : "all changes saved";
+  saveState.className = "whisper-save" + (dirty ? " dirty" : "");
+  saveState.textContent = dirty ? "unsaved changes" : "all changes saved";
   left.append(saveState);
 
-  const activePath = editor.active?.path ?? null;
-  const agentCopy = whisperText(agentStatus, activePath);
   if (agentCopy) {
     const agent = document.createElement("button");
     agent.className = "whisper-agent";
@@ -1280,10 +1337,7 @@ function renderWhisperBar(): void {
 
   const right = document.createElement("div");
   right.className = "whisper-right";
-  if (editor.active) {
-    const selection = editor.getSelection();
-    right.textContent = `ln ${selection.line}`;
-  }
+  if (lnText) right.textContent = lnText;
   // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
   whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
 }
