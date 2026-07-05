@@ -87,6 +87,7 @@ import {
   validateName,
   validateCommand,
   validateAutomation,
+  prepareCreateAutomation,
   testAutomation,
   type Automation,
   type AutomationBarHandle,
@@ -301,7 +302,16 @@ window.addEventListener("message", (e) => {
 });
 
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
+// Automation actions (create/list/run) are async and route to resolveAutomationUi;
+// the read-only queries resolve synchronously via resolveUiQuery.
 void onUiRequest((r) => {
+  if (r.query === "createAutomation" || r.query === "listAutomations" || r.query === "runAutomation") {
+    void resolveAutomationUi(r.query, r.params).then(
+      (payload) => void mcpUiReply(r.id, payload),
+      (e) => void mcpUiReply(r.id, { error: String(e) }),
+    );
+    return;
+  }
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
@@ -309,6 +319,44 @@ void onUiRequest((r) => {
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
+
+// Handle MCP automation actions from an AI agent/skill: create/list/run automations
+// against the current workspace, reusing the same validation + persistence + bar
+// refresh path as the manual automation drawer. Returns a JSON-serializable result.
+async function resolveAutomationUi(
+  query: "createAutomation" | "listAutomations" | "runAutomation",
+  params: unknown,
+): Promise<unknown> {
+  const root = currentRoot;
+  if (!root) return { error: "No workspace open in Sutra" };
+  const p = (params ?? {}) as { name?: string; command?: string; kind?: string; id?: string };
+
+  if (query === "listAutomations") {
+    return { automations };
+  }
+
+  if (query === "createAutomation") {
+    const prepared = prepareCreateAutomation(automations, p);
+    if ("error" in prepared) return { error: prepared.error };
+    const a = prepared.automation;
+    automations = upsertAutomation(automations, a);
+    try {
+      await saveAutomations(root, automations);
+    } catch (e) {
+      return { error: `Could not save automation: ${e}` };
+    }
+    automationBar.setAutomations(automations);
+    return { ok: true, id: a.id, name: a.name };
+  }
+
+  // runAutomation: match by id first, else by case-insensitive name.
+  const target = p.id
+    ? automations.find((x) => x.id === p.id)
+    : automations.find((x) => x.name.trim().toLowerCase() === (p.name ?? "").trim().toLowerCase());
+  if (!target) return { error: `No automation matching ${p.id ?? p.name ?? "(none)"}` };
+  void runAutomation(target);
+  return { ok: true, started: true, id: target.id, name: target.name };
+}
 
 // Native workspace watcher refreshes the visible tree and git badges after
 // filesystem changes from terminals, external tools, or Finder.

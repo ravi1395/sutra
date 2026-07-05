@@ -166,7 +166,15 @@ export const onPromptRequest = (cb: (r: PromptRequest) => void): Promise<Unliste
 
 export interface UiRequest {
   id: number;
-  query: "openTabs" | "selection" | "annotations";
+  query:
+    | "openTabs"
+    | "selection"
+    | "annotations"
+    | "createAutomation"
+    | "listAutomations"
+    | "runAutomation";
+  /** Action queries (create/run automation) carry arguments here. */
+  params?: unknown;
 }
 /** Listen for MCP UI-state read requests from Rust. */
 export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>

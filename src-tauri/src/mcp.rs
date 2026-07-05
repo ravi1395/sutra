@@ -381,6 +381,26 @@ struct RootParam {
     root: Option<String>,
 }
 
+/// Args for create_automation.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateAutomationArgs {
+    /// Short unique display name (max 40 chars), e.g. "Debug app".
+    name: String,
+    /// Shell command to run, e.g. "mvnDebug" or "npm run dev".
+    command: String,
+    /// Kind: "shell" (default, runs in a terminal), "diagnostics", or "test".
+    kind: Option<String>,
+}
+
+/// Args for run_automation: identify the target by name or id.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct RunAutomationArgs {
+    /// Name of the automation to run (case-insensitive). Provide this or `id`.
+    name: Option<String>,
+    /// Id of the automation to run. Provide this or `name`.
+    id: Option<String>,
+}
+
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
 /// session; all clones share the same `AppHandle` and active-root `Arc`.
 #[derive(Clone)]
@@ -467,6 +487,35 @@ impl SutraMcp {
                     pending.remove(&id);
                 }
                 Err(McpError::internal_error("ui state request timed out", None))
+            }
+        }
+    }
+
+    /// Emit a UI action request carrying `params` and await the frontend reply.
+    /// Like `request_ui` but for mutating actions (create/run automation) that pass
+    /// arguments and may touch the filesystem; uses a longer 5s timeout.
+    async fn request_ui_action(
+        &self,
+        query: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        let (tx, rx) = oneshot::channel();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.pending
+            .lock()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .insert(id, tx);
+        let _ = self.app.emit(
+            "sutra://ui/request",
+            serde_json::json!({ "id": id, "query": query, "params": params }),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(value)) => Ok(value),
+            _ => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err(McpError::internal_error("ui action request timed out", None))
             }
         }
     }
@@ -808,6 +857,48 @@ impl SutraMcp {
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
+    }
+
+    #[tool(
+        description = "Create or update a workspace automation — a named shell command runnable from \
+                       Sutra's automation bar — persisted to .sutra/automations.json. Use this after \
+                       inspecting a project's config to save its run/debug command. Returns the new id, \
+                       or a validation error (empty/over-long/duplicate name, empty command)."
+    )]
+    async fn create_automation(
+        &self,
+        Parameters(args): Parameters<CreateAutomationArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let params = serde_json::json!({
+            "name": args.name,
+            "command": args.command,
+            "kind": args.kind,
+        });
+        let value = self.request_ui_action("createAutomation", params).await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(description = "List the current workspace's saved automations (id, name, command, kind).")]
+    async fn list_automations(&self) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action("listAutomations", serde_json::Value::Null)
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Run a saved automation by name or id in a Sutra terminal. Returns whether it started."
+    )]
+    async fn run_automation(
+        &self,
+        Parameters(args): Parameters<RunAutomationArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let params = serde_json::json!({ "name": args.name, "id": args.id });
+        let value = self.request_ui_action("runAutomation", params).await?;
+        Ok(Self::ok_json(value))
     }
 }
 
