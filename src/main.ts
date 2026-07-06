@@ -101,6 +101,7 @@ import { mountUpdater } from "./updater";
 import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import {
   breadcrumbSegments,
+  ensureTrustSeeded,
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
@@ -109,6 +110,7 @@ import {
   saveRecents,
   saveWorkspaceSession,
   sessionFromTabs,
+  trustWorkspace,
   upsertRecent,
 } from "./workspace";
 import {
@@ -669,8 +671,13 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
 editor.saveHandler = saveTab;
 
 // ---- workspace open (single path shared by switcher rows, File menu, dialogs) ----
-async function openWorkspace(dir: string): Promise<void> {
+// `explicit` = the user deliberately chose this folder in-app (File▸Open, switcher,
+// worktree pick) → mark it trusted so its repo-defined commands may run. Folders
+// arriving via OS file-association / CLI / single-instance forward or session
+// restore pass explicit=false and stay untrusted until the user clicks Trust.
+async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
+  if (explicit) trustWorkspace(dir);
   persistWorkspaceSession();
   suppressSessionSave = true;
   try {
@@ -713,7 +720,7 @@ async function openWorkspace(dir: string): Promise<void> {
 
 async function openFolderDialog(): Promise<void> {
   const dir = await open({ directory: true, multiple: false });
-  if (typeof dir === "string") await openWorkspace(dir);
+  if (typeof dir === "string") await openWorkspace(dir, true); // explicit user pick → trusted
 }
 
 async function closeActiveTab(): Promise<void> {
@@ -1725,7 +1732,7 @@ const actions = {
     $<HTMLInputElement>("browser-url").select();
   },
   recents: () => loadRecents(),
-  switchWorkspace: (path: string) => void openWorkspace(path),
+  switchWorkspace: (path: string) => void openWorkspace(path, true), // explicit switcher pick → trusted
   addFolder: () => void openFolderDialog(),
 };
 
@@ -1740,7 +1747,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
 workspaceBar.setCurrentWorkspace(null);
 
 gitBar = createGitBar($("branch-whisper"));
-gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
+gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path, true); // explicit worktree pick → trusted
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
 async function refreshGitState(root: string): Promise<void> {
@@ -2046,6 +2053,11 @@ setTerminal(drawerState.open);
 // which preserves localStorage) resumes where the user left off instead of a
 // blank window. Skip silently if the folder was moved/deleted since last run.
 void (async function bootOpen(): Promise<void> {
+  // One-shot on upgrade: seed the trusted set from folders already in recents so
+  // workspaces the user opened deliberately before the trust gate existed are not
+  // re-gated. Must run before any open below, whose watcher can fire the diagnostics
+  // trust check. Idempotent after the first run (sutra.trustMigrated flag).
+  ensureTrustSeeded(loadRecents().map((r) => r.path));
   // A path handed to Sutra at launch (CLI arg / Finder "Open With") wins over
   // last-folder restore. Consume it once; on none, fall back to the last workspace.
   const launch = await takeLaunchPath().catch(() => null);

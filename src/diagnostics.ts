@@ -15,6 +15,7 @@ import { RangeSetBuilder, StateEffect, type Extension } from "@codemirror/state"
 import { diagDetect, diagRun, onDiagnosticsUpdated, onFsChanged, type Diagnostic } from "./ipc";
 import { loadSettings } from "./settings";
 import { diagnosticsAutomations, loadAutomations } from "./automations";
+import { isWorkspaceTrusted } from "./workspace";
 
 const TOOLFAIL_MARK = ":toolfail:";
 
@@ -349,14 +350,43 @@ function renderProblemsPanel(): void {
 
 const SETTLE_MS = 1000;
 
+/** Notified when diagnostics jobs are suppressed because the workspace is
+ * untrusted; the UI layer (main.ts) wires this to a "Trust folder" banner.
+ * Null until wired, so the security gate holds even with no UI attached. */
+let onUntrustedDiagnostics: ((root: string) => void) | null = null;
+
+/** Register the untrusted-diagnostics notifier (Phase 3 trust banner). */
+export function setUntrustedDiagnosticsHandler(fn: ((root: string) => void) | null): void {
+  onUntrustedDiagnostics = fn;
+}
+
+/** Decide whether built diagnostics jobs may execute. Executing jobs means
+ * running repo-defined automation commands OR detected toolchain commands
+ * (`cargo check` runs build.rs/proc-macros = code execution), so a job list is
+ * only run for a trusted workspace. Pure — unit-tested. */
+export function diagnosticsExecDecision(
+  jobCount: number,
+  trusted: boolean,
+): "run" | "suppress-untrusted" | "noop" {
+  if (jobCount === 0) return "noop";
+  return trusted ? "run" : "suppress-untrusted";
+}
+
 /** Gather this root's diagnostics jobs (automations, else detected tsc/cargo/
  * go/ruff manifests) and run them once. Broken out of runDiagnostics so its
- * rerun-coalescing loop is unit-testable with a fake `execute`. */
+ * rerun-coalescing loop is unit-testable with a fake `execute`.
+ * Building jobs is side-effect-free (loadAutomations reads JSON, diagDetect
+ * only probes for manifest files); the trust gate sits in front of diagRun,
+ * the sole step that actually spawns commands. */
 async function executeDiagnostics(root: string): Promise<void> {
   const autos = diagnosticsAutomations(await loadAutomations(root));
   const jobs = autos.length
     ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
     : await diagDetect(root);
+  if (diagnosticsExecDecision(jobs.length, isWorkspaceTrusted(root)) === "suppress-untrusted") {
+    onUntrustedDiagnostics?.(root);
+    return;
+  }
   await diagRun(root, jobs);
 }
 

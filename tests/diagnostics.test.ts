@@ -13,6 +13,7 @@ import {
   pauseDiagnosticsFsTrigger,
   resumeDiagnosticsFsTrigger,
   onDiagPathsChanged,
+  diagnosticsExecDecision,
 } from "../src/diagnostics";
 import { mock } from "node:test";
 
@@ -244,4 +245,15 @@ test("isDiagRelevantPath excludes build/vendor/out (aligned with runner.rs EXCLU
   assert.equal(isDiagRelevantPath("/r/tsconfig.tsbuildinfo", "/r"), false);
   // a source dir merely containing these names as a substring still passes (segment match).
   assert.equal(isDiagRelevantPath("/r/src/outline/foo.ts", "/r"), true);
+});
+
+test("diagnosticsExecDecision gates job execution on workspace trust", () => {
+  // No jobs → nothing to run or suppress, regardless of trust.
+  assert.equal(diagnosticsExecDecision(0, true), "noop");
+  assert.equal(diagnosticsExecDecision(0, false), "noop");
+  // Jobs + trusted → run (repo automations or detected cargo/tsc are honored).
+  assert.equal(diagnosticsExecDecision(3, true), "run");
+  // Jobs + untrusted → suppress: an untrusted repo's automations OR a detected
+  // cargo build.rs / proc-macro must NOT execute until the user trusts the folder.
+  assert.equal(diagnosticsExecDecision(3, false), "suppress-untrusted");
 });
