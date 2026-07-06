@@ -65,7 +65,9 @@ import {
   getTurns,
   groupHunksByTurn,
   hunkDiagBadge,
+  isRollbackable,
   onTurnClosed,
+  replaceTurns,
   setTurnState,
   turnChipClass,
   type ReviewFile,
@@ -131,4 +133,22 @@ test("setTurnState stores turns per root; onTurnClosed fires per closed turn", (
   setTurnState("/rootA", { openTurn: null, closed: [t2closed] });
   assert.deepEqual(closedSeen, [["/rootA", 1], ["/rootA", 2]]);
   assert.equal(getTurns("/rootA").find((t) => t.id === 2)?.boundarySource, "hook");
+});
+
+test("replaceTurns overwrites a root's full turn list (W2.1: turn_list refresh after rollback)", () => {
+  setTurnState("/rootC", { openTurn: null, closed: [turnFixture(1, ["a.ts"]), turnFixture(2, ["b.ts"])] });
+  assert.deepEqual(getTurns("/rootC").map((t) => t.id), [1, 2]);
+  const rolledBack = { ...turnFixture(1, ["a.ts"]), rolledBack: true };
+  replaceTurns("/rootC", [rolledBack]);
+  assert.deepEqual(getTurns("/rootC").map((t) => t.id), [1]);
+  assert.equal(getTurns("/rootC")[0].rolledBack, true);
+});
+
+test("isRollbackable: rolled-back turns and turns while any turn is open are not rollbackable", () => {
+  const t1 = turnFixture(1, ["a.ts"]);
+  const rolledBack = { ...turnFixture(2, ["b.ts"]), rolledBack: true };
+  assert.equal(isRollbackable(t1, [t1, rolledBack]), true);
+  assert.equal(isRollbackable(rolledBack, [t1, rolledBack]), false);
+  const openTurn = { ...turnFixture(3, ["c.ts"]), boundarySource: "open" as const };
+  assert.equal(isRollbackable(t1, [t1, openTurn]), false);
 });

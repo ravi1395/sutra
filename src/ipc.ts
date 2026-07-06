@@ -377,7 +377,7 @@ export interface DiagJob { source: string; command: string; cwd: string; parser:
 export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean }
 export interface TestStatus { state: "running" | "pass" | "fail" | "skipped"; exitCode?: number | null; durationMs?: number; outputTail: string }
 export interface TurnFileEntry { path: string; beforeHash?: string | null; afterHash?: string | null; snapshotted: boolean; unsafeBefore?: boolean }
-export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
+export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
 export interface TurnPollResult { openTurn?: Turn | null; closed: Turn[] }
 export interface RollbackResult { restored: string[]; failed: { path: string; error: string }[] }
 export interface WorktreeRoot { path: string; branch: string }

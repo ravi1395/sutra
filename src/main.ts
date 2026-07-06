@@ -55,6 +55,7 @@ import {
   langIndexInvalidate,
   resolveDebugAdapter,
   turnPoll,
+  turnList,
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
@@ -63,7 +64,7 @@ import {
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, mergeChangedFiles, onTurnClosed, reviewablePaths, setTurnState, turnHeaderEl, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, turnHeaderEl, whisperText } from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -790,6 +791,15 @@ function renderTurnStrip(root: string): void {
       turns,
       onApply: async (paths) => {
         const res = await turnRollback(root, rollbackTargetId(turn), paths);
+        // turn_poll is consume-once and never re-delivers a closed turn, so
+        // rolled_back (set server-side on the manifest) would otherwise never
+        // reach turnsByRoot — re-fetch the full list so the strip reflects it
+        // immediately instead of showing a stale live Rollback button.
+        try {
+          replaceTurns(root, await turnList(root));
+        } catch (e) {
+          console.warn("turnList refresh after rollback failed", e);
+        }
         diffViewer.invalidate();
         void refreshDiffFileList();
         return res;
@@ -800,7 +810,13 @@ function renderTurnStrip(root: string): void {
         ) as Record<string, string>,
     });
   };
-  for (const turn of turns) strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
+  // rollback can itself be undone; they aren't a real agent turn and have no
+  // useful strip entry of their own.
+  for (const turn of turns) {
+    if (turn.boundarySource === "rollback") continue;
+    strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  }
 }
 
 // ---- diff file list ----

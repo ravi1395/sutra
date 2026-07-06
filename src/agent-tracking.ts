@@ -71,6 +71,21 @@ export function getTurns(root: string): Turn[] {
   return turnsByRoot.get(root) ?? [];
 }
 
+/** Overwrite `root`'s full turn list wholesale (vs. setTurnState's consume-once
+ * merge). Needed after turnRollback: rolled_back is set server-side on the
+ * manifest, but turn_poll only ever delivers a closed turn once, so it never
+ * reaches turnsByRoot on its own — callers must re-fetch via turnList and
+ * replace the cached list so the strip reflects rolled_back immediately. */
+export function replaceTurns(root: string, turns: Turn[]): void {
+  turnsByRoot.set(root, [...turns].sort((a, b) => a.id - b.id));
+}
+
+/** Whether `turn`'s Rollback button should be live: not itself already rolled
+ * back, and no turn in the root (any id) is still open (agent mid-write). */
+export function isRollbackable(turn: Turn, allTurns: Turn[]): boolean {
+  return !turn.rolledBack && !allTurns.some((t) => t.boundarySource === "open");
+}
+
 /** Subscribe to turn-closed events; multiple subscribers allowed. */
 export function onTurnClosed(cb: (root: string, turn: Turn) => void): void {
   turnClosedSubscribers.push(cb);
@@ -128,8 +143,8 @@ export function turnHeaderEl(
   }
   const rollback = document.createElement("button");
   rollback.className = "turn-rollback";
-  rollback.textContent = "rollback";
-  rollback.disabled = allTurns.some((t) => t.boundarySource === "open");
+  rollback.textContent = turn.rolledBack ? "rolled back" : "rollback";
+  rollback.disabled = !isRollbackable(turn, allTurns);
   rollback.onclick = (ev) => {
     ev.stopPropagation();
     onRollback(turn);
