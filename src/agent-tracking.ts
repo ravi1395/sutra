@@ -71,6 +71,52 @@ export function getTurns(root: string): Turn[] {
   return turnsByRoot.get(root) ?? [];
 }
 
+/** Overwrite `root`'s full turn list wholesale (vs. setTurnState's consume-once
+ * merge). Needed after turnRollback: rolled_back is set server-side on the
+ * manifest, but turn_poll only ever delivers a closed turn once, so it never
+ * reaches turnsByRoot on its own — callers must re-fetch via turnList and
+ * replace the cached list so the strip reflects rolled_back immediately. */
+export function replaceTurns(root: string, turns: Turn[]): void {
+  turnsByRoot.set(root, [...turns].sort((a, b) => a.id - b.id));
+}
+
+/** Whether `turn`'s Rollback button should be live: not itself already rolled
+ * back, and no turn in the root (any id) is still open (agent mid-write). */
+export function isRollbackable(turn: Turn, allTurns: Turn[]): boolean {
+  return !turn.rolledBack && !allTurns.some((t) => t.boundarySource === "open");
+}
+
+/** Optimistically mark `turnId` rolled back in the local cache. Fallback for
+ * when the authoritative turnList re-fetch after a rollback fails (IPC error):
+ * without it the strip keeps a live Rollback button and re-applying no-ops into
+ * a false success. A later successful replaceTurns overwrites this. */
+export function markRolledBack(root: string, turnId: number): void {
+  const turns = turnsByRoot.get(root);
+  const turn = turns?.find((t) => t.id === turnId);
+  if (turn) turn.rolledBack = true;
+}
+
+/** Of `ids`, the turn-test runner ids a cancel actually KILLED (returned true).
+ * Only these may be suppressed in onRunnerDone — poisoning an id with nothing
+ * running (cancel → false, e.g. a still-open newer turn whose test hasn't
+ * started, or a rollback the backend then rejects) would silently drop that
+ * turn's future *legitimate* test result. */
+export async function suppressibleCancelledIds(
+  ids: string[],
+  cancel: (id: string) => Promise<boolean>,
+): Promise<string[]> {
+  const results = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        return (await cancel(id)) ? id : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return results.filter((id): id is string => id !== null);
+}
+
 /** Subscribe to turn-closed events; multiple subscribers allowed. */
 export function onTurnClosed(cb: (root: string, turn: Turn) => void): void {
   turnClosedSubscribers.push(cb);
@@ -128,8 +174,8 @@ export function turnHeaderEl(
   }
   const rollback = document.createElement("button");
   rollback.className = "turn-rollback";
-  rollback.textContent = "rollback";
-  rollback.disabled = allTurns.some((t) => t.boundarySource === "open");
+  rollback.textContent = turn.rolledBack ? "rolled back" : "rollback";
+  rollback.disabled = !isRollbackable(turn, allTurns);
   rollback.onclick = (ev) => {
     ev.stopPropagation();
     onRollback(turn);

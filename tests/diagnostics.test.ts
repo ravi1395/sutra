@@ -1,6 +1,38 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceUpdate, diagsForPath, chipState, emptyDiagState, settleTrigger, toolFailures } from "../src/diagnostics";
+import {
+  reduceUpdate,
+  diagsForPath,
+  chipState,
+  emptyDiagState,
+  settleTrigger,
+  toolFailures,
+  isDiagRelevantPath,
+  resolveGotoPath,
+  runDiagnostics,
+  pauseDiagnosticsFsTrigger,
+  resumeDiagnosticsFsTrigger,
+  onDiagPathsChanged,
+  diagnosticsExecDecision,
+} from "../src/diagnostics";
+import { mock } from "node:test";
+
+// ---- minimal fake `document` so updateChip()'s diagChipEl() singleton doesn't
+// throw under node:test (no real DOM) — mirrors the FakeElement pattern in
+// tests/rollback-dialog.test.ts, trimmed to what the chip element touches. ----
+class FakeChipEl {
+  classList = { add: (..._c: string[]) => {}, remove: (..._c: string[]) => {} };
+  title = "";
+}
+function setupDiagDom(): () => void {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: () => new FakeChipEl() } as unknown as Document;
+  return () => {
+    globalThis.document = previous;
+  };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const d = (path: string, severity: "error" | "warning" = "error") =>
   ({ path, line: 1, col: 1, severity, message: "m", source: "tsc" });
@@ -45,6 +77,18 @@ test("recovered tool clears earlier toolfail for same source", () => {
   assert.deepEqual(toolFailures(s, "/r"), [{ source: "tsc", excerpt: "second" }]);
 });
 
+test("transient tool failure keeps last-good diags instead of blanking them", () => {
+  let s = reduceUpdate(emptyDiagState(), "/r", "tsc", [d("a.ts")]); // good run
+  s = reduceUpdate(s, "/r", "tsc:toolfail:network blip", []); // transient failure, empty diags
+  // last-good "tsc" diags must still be present — the invariant is "keeps last-good diags".
+  assert.equal(diagsForPath(s, "a.ts").length, 1);
+  assert.equal(chipState(s, "/r", false), "toolfail"); // chip still reflects the failure
+  // recovery (a fresh good run) still clears the toolfail key — existing behavior.
+  s = reduceUpdate(s, "/r", "tsc", [d("a.ts")]);
+  assert.deepEqual(toolFailures(s, "/r"), []);
+  assert.equal(diagsForPath(s, "a.ts").length, 1);
+});
+
 test("staleness matches across absolute/relative path forms", () => {
   let s = reduceUpdate(emptyDiagState(), "/r", "tsc", [d("src/a.ts")]);
   s.stalePaths.add("/r/src/a.ts"); // doc-change hook passes absolute path
@@ -58,4 +102,158 @@ test("settleTrigger fires only once settle window has elapsed since last fire", 
   assert.equal(settleTrigger(0, null, 1000), true);
   assert.equal(settleTrigger(500, 0, 1000), false);
   assert.equal(settleTrigger(1000, 0, 1000), true);
+});
+
+test("a trigger while a run is in flight schedules exactly one follow-up run (not dropped, not N reruns)", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    let calls = 0;
+    const pending: Array<() => void> = [];
+    const execute = async (_root: string) => {
+      calls++;
+      await new Promise<void>((resolve) => pending.push(resolve));
+    };
+    const run1 = runDiagnostics("/r", execute, () => "/r");
+    await flush();
+    assert.equal(calls, 1); // first call started immediately
+
+    // Three triggers arrive while the first run is still in flight.
+    await runDiagnostics("/r", execute, () => "/r");
+    await runDiagnostics("/r", execute, () => "/r");
+    await runDiagnostics("/r", execute, () => "/r");
+    assert.equal(calls, 1); // still just the one in-flight execution — triggers coalesced, not dropped
+
+    pending[0](); // finish the first execute
+    await flush();
+    assert.equal(calls, 2); // exactly one follow-up run, not three
+
+    pending[1](); // finish the follow-up so run1 settles and the module unlatches
+    await run1;
+    assert.equal(calls, 2); // no further reruns once nothing re-triggered
+  } finally {
+    restoreDom();
+  }
+});
+
+test("no rerun loop when nothing re-triggers during the run", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    let calls = 0;
+    const execute = async (_root: string) => {
+      calls++;
+    };
+    await runDiagnostics("/r", execute, () => "/r");
+    assert.equal(calls, 1);
+  } finally {
+    restoreDom();
+  }
+});
+
+test("resume catch-up run picks up the latest root via getRoot", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    const seenRoots: string[] = [];
+    const pending: Array<() => void> = [];
+    const execute = async (root: string) => {
+      seenRoots.push(root);
+      await new Promise<void>((resolve) => pending.push(resolve));
+    };
+    const run1 = runDiagnostics("/r-old", execute, () => "/r-new");
+    await flush();
+    assert.deepEqual(seenRoots, ["/r-new"]); // getRoot() wins over the stale root arg
+    pending[0]();
+    await run1;
+  } finally {
+    restoreDom();
+  }
+});
+
+test("pause clears an armed settle timer but marks a hidden catch-up pending; resume runs it exactly once", async () => {
+  const restoreDom = setupDiagDom();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let calls = 0;
+    const execute = async (_root: string) => {
+      calls++;
+    };
+    onDiagPathsChanged(["/r/src/main.ts"], "/r", execute); // arms the settle timer
+    pauseDiagnosticsFsTrigger(); // hides the window before the 1s settle fires
+    mock.timers.tick(1000); // even if the cleared timer somehow fired, prove no run happened
+    assert.equal(calls, 0);
+    resumeDiagnosticsFsTrigger(execute, () => "/r");
+    assert.equal(calls, 1); // the armed-but-cleared trigger is not lost
+  } finally {
+    mock.timers.reset();
+    restoreDom();
+  }
+});
+
+test("pause with no armed timer and nothing changed while hidden produces no catch-up on resume", () => {
+  let calls = 0;
+  const execute = async (_root: string) => {
+    calls++;
+  };
+  pauseDiagnosticsFsTrigger(); // nothing armed, no fs event
+  resumeDiagnosticsFsTrigger(execute);
+  assert.equal(calls, 0);
+});
+
+test("resolveGotoPath: absolute paths pass through; relative ones join onto root (belt-and-braces)", () => {
+  // runner.rs now emits absolute Diagnostic.path at the source (W3.5) — this
+  // is only a defensive fallback for a relative path slipping through (e.g. a
+  // user regex automation).
+  assert.equal(resolveGotoPath("/abs/src/a.ts", "/r"), "/abs/src/a.ts");
+  assert.equal(resolveGotoPath("src/a.ts", "/r"), "/r/src/a.ts");
+});
+
+test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {
+  // cargo check writes target/** on every run — the original infinite-loop trigger
+  assert.equal(isDiagRelevantPath("/r/src-tauri/target/debug/build/libc-5f4e/output", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/node_modules/typescript/lib/tsc.js", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/dist/bundle.js", "/r"), false);
+  // hidden state dirs: .git index churn, .sutra turn store, .remember hook logs
+  assert.equal(isDiagRelevantPath("/r/.git/index", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/.sutra/turns/objects/ab", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/.remember/logs/memory.log", "/r"), false);
+  // real source changes still trigger
+  assert.equal(isDiagRelevantPath("/r/src/main.ts", "/r"), true);
+  assert.equal(isDiagRelevantPath("/r/src-tauri/src/lib.rs", "/r"), true);
+  // segment equality, not substring — a source dir merely containing "target" passes
+  assert.equal(isDiagRelevantPath("/r/src/retarget/foo.ts", "/r"), true);
+  // windows separators
+  assert.equal(isDiagRelevantPath("C:\\r\\node_modules\\x.js", "C:\\r"), false);
+});
+
+test("isDiagRelevantPath strips the workspace root before segment-splitting (W3.6a: hidden/named ancestors)", () => {
+  // a workspace nested under a hidden ancestor dir must not be blinded —
+  // ".dotfiles" is above root, not below it, so it must not count as a segment.
+  const root = "/Users/x/.dotfiles/proj";
+  assert.equal(isDiagRelevantPath(`${root}/src/main.rs`, root), true);
+  // likewise a root literally named "target"/"dist"/"node_modules" (a worktree
+  // parented under such a dir) must not blind every event below it.
+  const targetRoot = "/Users/x/target/proj";
+  assert.equal(isDiagRelevantPath(`${targetRoot}/src/main.rs`, targetRoot), true);
+  // a path outside root entirely is never relevant.
+  assert.equal(isDiagRelevantPath("/elsewhere/src/main.rs", root), false);
+});
+
+test("isDiagRelevantPath excludes build/vendor/out (aligned with runner.rs EXCLUDED_DIR_NAMES) and *.tsbuildinfo (W3.6b)", () => {
+  assert.equal(isDiagRelevantPath("/r/build/x.o", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/vendor/pkg/mod.go", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/out/bundle.js", "/r"), false);
+  // tsc incremental writes this at the project root on every run — must not self-retrigger.
+  assert.equal(isDiagRelevantPath("/r/tsconfig.tsbuildinfo", "/r"), false);
+  // a source dir merely containing these names as a substring still passes (segment match).
+  assert.equal(isDiagRelevantPath("/r/src/outline/foo.ts", "/r"), true);
+});
+
+test("diagnosticsExecDecision gates job execution on workspace trust", () => {
+  // No jobs → nothing to run or suppress, regardless of trust.
+  assert.equal(diagnosticsExecDecision(0, true), "noop");
+  assert.equal(diagnosticsExecDecision(0, false), "noop");
+  // Jobs + trusted → run (repo automations or detected cargo/tsc are honored).
+  assert.equal(diagnosticsExecDecision(3, true), "run");
+  // Jobs + untrusted → suppress: an untrusted repo's automations OR a detected
+  // cargo build.rs / proc-macro must NOT execute until the user trusts the folder.
+  assert.equal(diagnosticsExecDecision(3, false), "suppress-untrusted");
 });

@@ -151,6 +151,9 @@ export function openRollbackDialog(
   // has been rendered, so a click during the async resolve can't fire
   // opts.onApply([]) — a silent no-op rollback that looks successful.
   let rowsLoaded = false;
+  // Last-rendered rows, keyed by path — apply() re-resolves against this to
+  // detect drift (see below).
+  let lastRows = new Map<string, ChecklistRow>();
   const list = document.createElement("div");
   list.className = "rollback-file-list";
   list.textContent = "Checking file status…";
@@ -158,6 +161,7 @@ export function openRollbackDialog(
 
   function renderRows(rows: ChecklistRow[]) {
     checkboxes.clear();
+    lastRows = new Map(rows.map((row) => [row.path, row]));
     list.textContent = "";
     for (const row of rows) {
       const rowEl = document.createElement("label");
@@ -229,15 +233,51 @@ export function openRollbackDialog(
       applyBtn.disabled = true;
     } else {
       dirtyBanner.style.display = "none";
-      applyBtn.disabled = false;
+      // Zero checked paths (common: every row defaults unchecked because
+      // human-touched/unsnapshotted) must not leave Apply clickable — that
+      // calls onApply([]), which restores nothing but still reports success.
+      applyBtn.disabled = checkedPaths().length === 0;
     }
   }
 
   async function apply() {
+    // Rows not loaded yet: the button is visually disabled, but guard the
+    // handler directly too (a stray click event, or a test invoking onclick
+    // manually) so a concurrent re-resolve can't race the initial load's
+    // in-flight getDiskHashes call.
+    if (!rowsLoaded) return;
+    // The dirty-buffer guard only re-runs on row-load and checkbox change; the
+    // dialog never takes DOM focus (see below), so a keystroke reaching the
+    // editor behind it goes unnoticed until now. Re-run it at the moment of
+    // apply and bail if it now blocks — the banner stays visible, explaining
+    // why nothing happened.
+    refreshGuard();
+    if (applyBtn.disabled) return;
     failuresEl.textContent = "";
     applyBtn.disabled = true;
+    const paths = checkedPaths();
     try {
-      const result = await opts.onApply(checkedPaths());
+      // Rows are resolved once at open, but the workspace can change while the
+      // dialog sits open (e.g. an agent turn closes mid-review). Re-resolve
+      // against the same turns + live disk hashes and refuse to apply if any
+      // CHECKED path's row now differs from what was displayed — silently
+      // reverting content the checklist never showed would bypass the
+      // human-touched/unsnapshotted/unsafe protections entirely.
+      // TODO: longer-term fix is a compare-and-swap (expected hash) argument
+      // on turn_rollback itself; this is a frontend-only stopgap.
+      const freshRows = await resolveRollbackChecklist(root, opts.turns, rollbackTargetId(turn), opts.getDiskHashes);
+      const freshByPath = new Map(freshRows.map((row) => [row.path, row]));
+      const drifted = paths.filter((p) => {
+        const fresh = freshByPath.get(p);
+        const was = lastRows.get(p);
+        return !fresh || !was || fresh.reason !== was.reason;
+      });
+      if (drifted.length > 0) {
+        failuresEl.textContent = `Workspace changed — review again: ${drifted.join(", ")}`;
+        renderRows(freshRows); // re-renders + re-runs refreshGuard()
+        return;
+      }
+      const result = await opts.onApply(paths);
       if (result.failed.length > 0) {
         failuresEl.textContent = result.failed.map((f) => `${f.path}: ${f.error}`).join("\n");
         applyBtn.disabled = false;
@@ -264,6 +304,13 @@ export function openRollbackDialog(
 
   refreshGuard();
   document.body.appendChild(overlay);
+  // Focus containment: the overlay is a plain DOM node, not a native <dialog>,
+  // so without this the CM6 editor behind it keeps focus and keystrokes keep
+  // landing in the buffer while the dialog is open (see the dirty re-check
+  // above). tabIndex -1 makes it focusable via script without adding it to
+  // the tab order.
+  dialog.tabIndex = -1;
+  dialog.focus?.();
 
   void resolveRollbackChecklist(root, opts.turns, rollbackTargetId(turn), opts.getDiskHashes).then(renderRows, renderError);
 }

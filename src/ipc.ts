@@ -156,6 +156,17 @@ export interface DrivePayload {
 export const onDrive = (cb: (p: DrivePayload) => void): Promise<UnlistenFn> =>
   listen<DrivePayload>("sutra://drive", (e) => cb(e.payload));
 
+export interface OpenPathPayload {
+  path: string;
+  isDir: boolean;
+}
+/** Listen for an OS/CLI request to open a path while running (single-instance
+ *  forward, macOS "Open With"). Cold-start paths come from takeLaunchPath. */
+export const onOpenPath = (cb: (p: OpenPathPayload) => void): Promise<UnlistenFn> =>
+  listen<OpenPathPayload>("open-path", (e) => cb(e.payload));
+/** Retrieve and clear a path handed to Sutra at cold start (CLI arg / file-open on launch). */
+export const takeLaunchPath = () => invoke<OpenPathPayload | null>("take_launch_path");
+
 export interface PromptRequest {
   id: number;
   url: string; // preview-server URL of the injected interactive HTML
@@ -166,7 +177,15 @@ export const onPromptRequest = (cb: (r: PromptRequest) => void): Promise<Unliste
 
 export interface UiRequest {
   id: number;
-  query: "openTabs" | "selection" | "annotations";
+  query:
+    | "openTabs"
+    | "selection"
+    | "annotations"
+    | "createAutomation"
+    | "listAutomations"
+    | "runAutomation";
+  /** Action queries (create/run automation) carry arguments here. */
+  params?: unknown;
 }
 /** Listen for MCP UI-state read requests from Rust. */
 export const onUiRequest = (cb: (r: UiRequest) => void): Promise<UnlistenFn> =>
@@ -358,7 +377,7 @@ export interface DiagJob { source: string; command: string; cwd: string; parser:
 export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean }
 export interface TestStatus { state: "running" | "pass" | "fail" | "skipped"; exitCode?: number | null; durationMs?: number; outputTail: string }
 export interface TurnFileEntry { path: string; beforeHash?: string | null; afterHash?: string | null; snapshotted: boolean; unsafeBefore?: boolean }
-export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
+export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
 export interface TurnPollResult { openTurn?: Turn | null; closed: Turn[] }
 export interface RollbackResult { restored: string[]; failed: { path: string; error: string }[] }
 export interface WorktreeRoot { path: string; branch: string }

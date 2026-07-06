@@ -15,6 +15,7 @@ import { RangeSetBuilder, StateEffect, type Extension } from "@codemirror/state"
 import { diagDetect, diagRun, onDiagnosticsUpdated, onFsChanged, type Diagnostic } from "./ipc";
 import { loadSettings } from "./settings";
 import { diagnosticsAutomations, loadAutomations } from "./automations";
+import { isWorkspaceTrusted } from "./workspace";
 
 const TOOLFAIL_MARK = ":toolfail:";
 
@@ -41,15 +42,22 @@ function sourceBase(key: string): string {
   return idx === -1 ? key : key.slice(0, idx);
 }
 
-/** Replace diagnostics for (root, source). Any prior key with the same source base
- * (e.g. an earlier "tsc:toolfail:…" once "tsc" recovers, or a previous excerpt) is
- * dropped, and staleness is cleared for paths present in the fresh batch. */
+/** Replace diagnostics for (root, source). Direction-aware cleanup of prior
+ * same-base keys: a recovering good run (e.g. "tsc") still drops an earlier
+ * "tsc:toolfail:…" (and a repeat failure replaces rather than accumulates
+ * excerpts), but an incoming toolfail must NOT drop the last-good entry for
+ * its base — the documented invariant is "tool failure keeps last-good
+ * diags." Staleness is cleared for paths present in the fresh batch. */
 export function reduceUpdate(s: DiagState, root: string, source: string, diags: Diagnostic[]): DiagState {
   const byRoot = new Map(s.byRoot);
   const bySource = new Map(byRoot.get(root) ?? new Map<string, Diagnostic[]>());
   const base = sourceBase(source);
+  const incomingIsToolfail = source.includes(TOOLFAIL_MARK);
   for (const key of [...bySource.keys()]) {
-    if (key !== source && sourceBase(key) === base) bySource.delete(key);
+    if (key === source || sourceBase(key) !== base) continue;
+    const keyIsToolfail = key.includes(TOOLFAIL_MARK);
+    if (incomingIsToolfail && !keyIsToolfail) continue; // keep last-good on failure
+    bySource.delete(key);
   }
   bySource.set(source, diags);
   byRoot.set(root, bySource);
@@ -109,12 +117,45 @@ export function settleTrigger(nowMs: number, lastFireMs: number | null, settleMs
   return nowMs - lastFireMs >= settleMs;
 }
 
+// Build outputs the diag jobs themselves write into: `cargo check` touches
+// target/** on every run, so an unfiltered fs trigger re-runs the jobs
+// forever. Keep this aligned with runner.rs's EXCLUDED_DIR_NAMES (detect()'s
+// manifest walk) — a name a diag job writes under but this list omits can
+// resurrect the self-retrigger loop.
+const DIAG_IGNORED_SEGMENTS = new Set(["node_modules", "target", "dist", "build", "vendor", "out", "__pycache__"]);
+
+/** True when a changed path should (re)schedule diagnostics: excludes build
+ * outputs and hidden dirs (.git/.sutra/.remember/…) so tool self-writes and
+ * VCS/state churn can't sustain a spawn loop, and excludes tsc's incremental
+ * *.tsbuildinfo (rewritten on every run — an echo re-trigger otherwise).
+ * Segments are checked only BELOW `root`: the watcher emits absolute paths,
+ * so without stripping root first, an ancestor merely named "target" or a
+ * hidden ancestor dir (~/.dotfiles/proj) would blind every event for that
+ * workspace. A path outside root is never relevant. Pure; segment match, not
+ * substring. */
+export function isDiagRelevantPath(path: string, root: string): boolean {
+  const norm = path.replace(/\\/g, "/");
+  const normRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (norm !== normRoot && !norm.startsWith(`${normRoot}/`)) return false;
+  const rel = norm === normRoot ? "" : norm.slice(normRoot.length + 1);
+  const segments = rel.split("/").filter(Boolean);
+  const base = segments[segments.length - 1] ?? "";
+  if (base.endsWith(".tsbuildinfo")) return false;
+  return !segments.some((seg) => DIAG_IGNORED_SEGMENTS.has(seg) || (seg.length > 1 && seg.startsWith(".")));
+}
+
 // ---- module state (DOM/CM6 layer) ----
 
 let state: DiagState = emptyDiagState();
 let currentRoot: string | null = null;
 let running = false;
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
+// Window-hidden gate for the fs-settle trigger: while off-screen we don't run
+// tsc/cargo jobs on background FS churn (e.g. an agent editing). A single
+// catch-up runs on re-show if anything relevant changed meanwhile.
+let diagFsPaused = false;
+let diagFsPendingWhileHidden = false;
+let diagGetRoot: (() => string | null) | null = null;
 let inFlight = false;
 const views = new Set<EditorView>();
 
@@ -270,18 +311,27 @@ export function diagChipEl(): HTMLElement {
   return diagChip;
 }
 
+/** Resolve a diagnostic's path for the problems-panel "go to" dispatch:
+ * absolute paths pass through; a workspace-relative one joins onto `root`.
+ * Belt-and-braces — runner.rs emits absolute Diagnostic.path at the source,
+ * but a user-defined regex automation could still report a relative one. */
+export function resolveGotoPath(path: string, root: string): string {
+  return path.startsWith("/") ? path : `${root}/${path}`;
+}
+
 function renderProblemsPanel(): void {
   const panel = problemsPanelEl();
   panel.innerHTML = "";
   if (!currentRoot) return;
+  const root = currentRoot; // narrow for the row closures below (currentRoot is a mutable module let)
   // Tool failures render first as banner rows so a broken tool is never a silent empty state.
-  for (const f of toolFailures(state, currentRoot)) {
+  for (const f of toolFailures(state, root)) {
     const row = document.createElement("div");
     row.className = "problem-row problem-row--toolfail";
     row.textContent = `${f.source} failed: ${f.excerpt}`;
     panel.appendChild(row);
   }
-  const bySource = state.byRoot.get(currentRoot);
+  const bySource = state.byRoot.get(root);
   if (!bySource) return;
   for (const [source, diags] of bySource) {
     if (source.includes(TOOLFAIL_MARK)) continue;
@@ -290,7 +340,8 @@ function renderProblemsPanel(): void {
       row.className = "problem-row";
       row.textContent = `${diag.severity} ${diag.path}:${diag.line}:${diag.col} ${diag.message}`;
       row.onclick = () => {
-        window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path: diag.path, line: diag.line, col: diag.col } }));
+        const path = resolveGotoPath(diag.path, root);
+        window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path, line: diag.line, col: diag.col } }));
       };
       panel.appendChild(row);
     }
@@ -299,18 +350,76 @@ function renderProblemsPanel(): void {
 
 const SETTLE_MS = 1000;
 
-async function runDiagnostics(root: string): Promise<void> {
-  if (inFlight) return;
+/** Notified when diagnostics jobs are suppressed because the workspace is
+ * untrusted; the UI layer (main.ts) wires this to a "Trust folder" banner.
+ * Null until wired, so the security gate holds even with no UI attached. */
+let onUntrustedDiagnostics: ((root: string) => void) | null = null;
+
+/** Register the untrusted-diagnostics notifier (Phase 3 trust banner). */
+export function setUntrustedDiagnosticsHandler(fn: ((root: string) => void) | null): void {
+  onUntrustedDiagnostics = fn;
+}
+
+/** Decide whether built diagnostics jobs may execute. Executing jobs means
+ * running repo-defined automation commands OR detected toolchain commands
+ * (`cargo check` runs build.rs/proc-macros = code execution), so a job list is
+ * only run for a trusted workspace. Pure — unit-tested. */
+export function diagnosticsExecDecision(
+  jobCount: number,
+  trusted: boolean,
+): "run" | "suppress-untrusted" | "noop" {
+  if (jobCount === 0) return "noop";
+  return trusted ? "run" : "suppress-untrusted";
+}
+
+/** Gather this root's diagnostics jobs (automations, else detected tsc/cargo/
+ * go/ruff manifests) and run them once. Broken out of runDiagnostics so its
+ * rerun-coalescing loop is unit-testable with a fake `execute`.
+ * Building jobs is side-effect-free (loadAutomations reads JSON, diagDetect
+ * only probes for manifest files); the trust gate sits in front of diagRun,
+ * the sole step that actually spawns commands. */
+async function executeDiagnostics(root: string): Promise<void> {
+  const autos = diagnosticsAutomations(await loadAutomations(root));
+  const jobs = autos.length
+    ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
+    : await diagDetect(root);
+  if (diagnosticsExecDecision(jobs.length, isWorkspaceTrusted(root)) === "suppress-untrusted") {
+    onUntrustedDiagnostics?.(root);
+    return;
+  }
+  await diagRun(root, jobs);
+}
+
+// Set only by a real trigger arriving while a run is in flight (never by the
+// loop itself) — see runDiagnostics.
+let rerunPending = false;
+
+/** Run diagnostics for `root`. A trigger arriving while a run is already in
+ * flight (cargo/tsc jobs run 30-120s vs. a 1s fs-settle window) is NOT
+ * dropped: it latches exactly one follow-up run — N triggers during one run
+ * still produce only one rerun — re-reading the root via `getRoot` so a
+ * workspace switch mid-run targets the right one. `execute`/`getRoot` are
+ * injectable for unit testing without real IPC; production call sites leave
+ * them at their defaults. */
+export async function runDiagnostics(
+  root: string,
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+  getRoot: () => string | null = () => diagGetRoot?.() ?? currentRoot,
+): Promise<void> {
+  if (inFlight) {
+    rerunPending = true;
+    return;
+  }
   if (!loadSettings().diagnosticsEnabled) return;
   inFlight = true;
   running = true;
   updateChip();
   try {
-    const autos = diagnosticsAutomations(await loadAutomations(root));
-    const jobs = autos.length
-      ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
-      : await diagDetect(root);
-    await diagRun(root, jobs);
+    do {
+      rerunPending = false;
+      const runRoot = getRoot() ?? root;
+      await execute(runRoot);
+    } while (rerunPending);
   } finally {
     running = false;
     inFlight = false;
@@ -318,22 +427,70 @@ async function runDiagnostics(root: string): Promise<void> {
   }
 }
 
+/** Handle one fs-changed batch: if any path is diagnostics-relevant for
+ * `root`, (re)arm the 1s settle timer — or, while paused, latch a pending
+ * catch-up instead of arming a timer that would just get cleared unseen.
+ * Exported for unit testing; `execute` is injectable, `initDiagnostics` wires
+ * this to the real onFsChanged listener. */
+export function onDiagPathsChanged(
+  paths: string[],
+  root: string | null,
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+): void {
+  if (!root) return;
+  if (!paths.some((p) => isDiagRelevantPath(p, root))) return;
+  if (diagFsPaused) {
+    diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
+    return;
+  }
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    const runRoot = diagGetRoot?.() ?? root;
+    if (runRoot) void runDiagnostics(runRoot, execute);
+  }, SETTLE_MS);
+}
+
 /** Wire the diagnostics trigger loop to the active workspace root. */
 export function initDiagnostics(getRoot: () => string | null): void {
   currentRoot = getRoot();
+  diagGetRoot = getRoot;
 
   void onDiagnosticsUpdated(({ root, source, diagnostics }) => {
     setDiagnostics(root, source, diagnostics);
   });
 
   void onFsChanged(({ paths }) => {
-    const relevant = paths.some((p) => !p.includes("/.sutra/") && !p.startsWith(".sutra/"));
-    if (!relevant) return;
-    if (settleTimer) clearTimeout(settleTimer);
-    settleTimer = setTimeout(() => {
-      settleTimer = null;
-      currentRoot = getRoot();
-      if (currentRoot) void runDiagnostics(currentRoot);
-    }, SETTLE_MS);
+    onDiagPathsChanged(paths, getRoot());
   });
+}
+
+// Window-hidden gate: called by the main idle gate so background FS churn
+// doesn't spin up tsc/cargo diagnostics jobs while the window is off-screen.
+export function pauseDiagnosticsFsTrigger(): void {
+  diagFsPaused = true;
+  if (settleTimer) {
+    // An armed timer means a real trigger already fired — clearing it
+    // without recording the pending flag would drop that edit's
+    // diagnostics forever (nothing else re-arms the timer while hidden).
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    diagFsPendingWhileHidden = true;
+  }
+}
+
+// Re-arm on re-show; run one catch-up job if anything changed while hidden.
+// `execute`/`getRoot` are injectable for unit testing.
+export function resumeDiagnosticsFsTrigger(
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+  getRoot: () => string | null = () => diagGetRoot?.() ?? currentRoot,
+): void {
+  diagFsPaused = false;
+  if (!diagFsPendingWhileHidden) return;
+  diagFsPendingWhileHidden = false;
+  const root = getRoot();
+  if (root) {
+    currentRoot = root;
+    void runDiagnostics(root, execute);
+  }
 }

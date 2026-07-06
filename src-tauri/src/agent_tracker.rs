@@ -84,11 +84,35 @@ struct Tracker {
     // long-lived process doesn't keep a whole-tree snapshot for every root
     // ever visited.
     last_polled: HashMap<PathBuf, Instant>,
+    // Memoized agent-kind reading per root. `ps -axo` (fork+exec + full
+    // process-table parse) is the most expensive thing a poll does. The 1.5s
+    // agent poll and the turn poll it piggybacks both need the kind within the
+    // same tick; the authoritative pollers store here so the turn poll reads it
+    // back within KIND_CACHE_TTL instead of spawning a second ps.
+    kind_cache: HashMap<PathBuf, (Instant, Option<AgentKind>)>,
+    // The process table is GLOBAL — only the per-root shells filter differs — so
+    // one ps snapshot classifies every root. The sessions panel's 3s pass calls
+    // refresh for N roots; caching the raw table for one TTL window collapses
+    // that to a single spawn per pass instead of N. peek reads it without ever
+    // spawning.
+    ps_cache: Option<(Instant, Vec<ProcessInfo>)>,
 }
 
 /// Sessions idle past this with nothing pending are dropped (poll re-creates
 /// one on demand, re-capturing the baseline from HEAD).
 const SESSION_IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
+
+/// Agent-kind cache lifetime. Shorter than the 1.5s poll cadence so a fresh
+/// authoritative poll always refreshes the entry before the piggybacked turn
+/// poll reads it, but long enough to cover the gap between the two IPC calls
+/// within a single tick.
+const KIND_CACHE_TTL: Duration = Duration::from_millis(1200);
+
+/// Cap on the bytes the tracker will read or retain for one pending change.
+/// Mirrors turns.rs MAX_SNAPSHOT_BYTES (10 MB). Above it, a file is tracked
+/// Unsafe with observed=None — never held in memory (a Bytes restore + observed
+/// copy is two full copies per file) and never re-read every reconcile tick.
+const MAX_PENDING_BYTES: u64 = 10 * 1024 * 1024;
 
 // Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
 // unit handle so command signatures keep `State<'_, AgentTrackerState>`, but the
@@ -113,6 +137,12 @@ struct ProcessInfo {
     command: String,
 }
 
+// Test-only counter of real `ps` invocations, used to measure that the kind
+// cache collapses a tick's multiple consumers down to a single spawn. Gated to
+// tests so production carries no counter.
+#[cfg(test)]
+thread_local!(static PS_SPAWN_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0));
+
 impl Tracker {
     /// Drop sessions idle past `max_idle` holding no pending changes and no
     /// active agent — the only removal path besides a root losing its git
@@ -128,6 +158,7 @@ impl Tracker {
         });
         let sessions = &self.sessions;
         stamps.retain(|root, _| sessions.contains_key(root));
+        self.kind_cache.retain(|root, _| sessions.contains_key(root));
     }
 
     fn poll(
@@ -143,6 +174,7 @@ impl Tracker {
             Some(head) => head,
             None => {
                 self.sessions.remove(root);
+                self.kind_cache.remove(root);
                 return Ok(disabled_status());
             }
         };
@@ -230,7 +262,10 @@ impl Tracker {
         if !self.sessions.contains_key(root) {
             return Ok(self.peek(root));
         }
-        let kind = self.agent_kind_for_root(root);
+        // Authoritative reading (drives poll()'s state machine) — take it live,
+        // and memoize so this same sessions pass's turn poll on this root reuses
+        // it instead of spawning a second ps.
+        let kind = self.agent_kind_store(root);
         let agent_active = kind.is_some();
         let discover = !matches!(kind, Some(AgentKind::Claude));
         self.poll(root, agent_active, discover)
@@ -242,21 +277,109 @@ impl Tracker {
     /// path. Lets background worktree agents report to their own session
     /// instead of being rejected against the active workspace root.
     fn record_report_owned(&mut self, path: PathBuf, active_root: Option<&Path>) -> bool {
-        if let Some(owner) = self.owning_root(&path) {
-            self.record_agent_report(&owner, path);
+        // Match sessions by canonical form and map the reported path back into
+        // the owning session's STORED (frontend) form, so a symlinked-root
+        // workspace (macOS /tmp -> /private/tmp) doesn't split one file across
+        // a canonical ingest key and a frontend baseline key (→ spurious "A" +
+        // duplicate pending entry). Exactly one path form circulates per root.
+        if let Some((owner, mapped)) = self.owning_root_mapped(&path) {
+            self.record_owned_or_nested(owner, mapped);
             return true;
         }
         let Some(root) = active_root else { return false };
         let Ok(root_canon) = fs::canonicalize(root) else { return false };
-        if !path.starts_with(&root_canon) {
+        let Ok(rel) = path
+            .strip_prefix(&root_canon)
+            .or_else(|_| path.strip_prefix(root))
+        else {
             return false;
-        }
-        self.record_agent_report(root, path);
+        };
+        self.record_agent_report(root, root.join(rel));
         true
     }
 
+    /// Owning session for a possibly-canonicalized `path`: the longest tracked
+    /// root (by canonical or stored prefix) that contains it, paired with the
+    /// path re-expressed in that root's STORED form. See `record_report_owned`.
+    fn owning_root_mapped(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
+        self.sessions
+            .keys()
+            .filter_map(|root| {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    return Some((root.clone(), root.join(rel)));
+                }
+                let canon = fs::canonicalize(root).ok()?;
+                let rel = path.strip_prefix(&canon).ok()?;
+                Some((root.clone(), root.join(rel)))
+            })
+            .max_by_key(|(root, _)| root.as_os_str().len())
+    }
+
+    /// Route a report to `owner`'s session, unless `path` lies inside a nested
+    /// repo (its own `.git`) between `owner`'s root and `path` — `scan_workspace`
+    /// deliberately excludes nested repos from a baseline (see its nested-repo
+    /// filter), so a pre-existing file there reads as a baseline miss through
+    /// `owner` and gets misclassified "A"+RestoreSource::Delete, which "Revert
+    /// all" would then delete. Prefer lazily creating a session for the nearest
+    /// enclosing nested-repo root (the same bootstrap `agent_tracking_begin`
+    /// uses) and recording there instead; if that bootstrap can't establish one
+    /// (e.g. the nested repo has no HEAD commit yet), fall back to recording
+    /// against `owner` with RestoreSource::Unsafe so the file is still never
+    /// deleted (Unsafe entries are excluded from revert and flagged in the UI).
+    fn record_owned_or_nested(&mut self, owner: PathBuf, path: PathBuf) {
+        let Some(nested_root) = nested_repo_root(&path, &owner) else {
+            self.record_agent_report(&owner, path);
+            return;
+        };
+        let freshly_created = !self.sessions.contains_key(&nested_root);
+        if freshly_created {
+            let _ = self.poll(&nested_root, true, true);
+        }
+        if self.sessions.contains_key(&nested_root) {
+            if freshly_created {
+                // The bootstrap scan captured POST-edit disk (the edit that
+                // triggered this report already happened), so record_agent_report
+                // would see baseline==current and silently absorb the change —
+                // no pending entry, nothing to review or revert. Seed this path's
+                // baseline from the nested repo's git HEAD (pre-edit truth): a
+                // tracked file then surfaces as "M" (restore to HEAD), a
+                // genuinely new file (absent from HEAD) as "A" (agent-created).
+                self.seed_baseline_from_head(&nested_root, &path);
+            }
+            self.record_agent_report(&nested_root, path);
+        } else {
+            self.record_agent_report_unsafe(&owner, path);
+        }
+    }
+
+    /// Set `path`'s baseline in `root`'s session to its git-HEAD content (or
+    /// remove it when HEAD lacks the file) so a bootstrap-time edit is diffed
+    /// against pre-edit truth rather than the post-edit disk the scan captured.
+    /// Built directly from HEAD bytes (not `file_signature`, which would re-stat
+    /// the post-edit file on disk). See `record_owned_or_nested`.
+    fn seed_baseline_from_head(&mut self, root: &Path, path: &Path) {
+        let Some(session) = self.sessions.get_mut(root) else {
+            return;
+        };
+        match git_head_bytes(root, path) {
+            Some(bytes) => {
+                session.baseline.insert(
+                    path.to_path_buf(),
+                    FileSignature {
+                        size: bytes.len() as u64,
+                        mtime_nanos: 0,
+                        hash: xxh3_64(&bytes),
+                    },
+                );
+            }
+            None => {
+                session.baseline.remove(path);
+            }
+        }
+    }
+
     fn peek(&self, root: &Path) -> AgentTrackingStatus {
-        let agent_active = self.agent_kind_for_root(root).is_some();
+        let agent_active = self.agent_kind_peek(root).is_some();
         match self.sessions.get(root) {
             Some(session) => {
                 let mut status = session_status(session);
@@ -400,10 +523,52 @@ impl Tracker {
     /// Record a path an agent reported editing as an AI change. Drops it if the
     /// file is back at the baseline.
     fn record_agent_report(&mut self, root: &Path, path: PathBuf) {
+        self.record_agent_report_inner(root, path, false);
+    }
+
+    /// Like `record_agent_report`, but a brand-new pending entry (no prior
+    /// entry in `session.pending`) is forced to `RestoreSource::Unsafe` instead
+    /// of the computed source — the W4.1 fallback for a nested-repo file whose
+    /// own session couldn't be bootstrapped: never deletable, even though its
+    /// baseline miss reads as "A".
+    fn record_agent_report_unsafe(&mut self, root: &Path, path: PathBuf) {
+        self.record_agent_report_inner(root, path, true);
+    }
+
+    fn record_agent_report_inner(&mut self, root: &Path, path: PathBuf, force_unsafe: bool) {
         let Some(session) = self.sessions.get_mut(root) else {
             return;
         };
         session.report_mode = true;
+        // Cap bytes per file (W4.9): a >MAX_PENDING_BYTES file is tracked Unsafe
+        // (no observed bytes, no baseline copy) — excluded from revert, flagged
+        // in the UI — instead of reading the whole file into memory here and
+        // re-reading it every 1.5s via refresh_pending. Same protection
+        // compare_snapshots gives the discover path; Claude sessions run this
+        // report path, so without this the oversized-artifact blowup persists.
+        if let Some(sig) = oversized_signature(&path) {
+            let human_touched = session
+                .pending
+                .get(&path)
+                .map(|c| c.human_touched)
+                .unwrap_or(false);
+            let status = if session.baseline.contains_key(&path) {
+                "M"
+            } else {
+                "A"
+            };
+            session.pending.insert(
+                path.clone(),
+                PendingChange {
+                    status: status.to_string(),
+                    human_touched,
+                    observed: None,
+                    restore: RestoreSource::Unsafe,
+                },
+            );
+            session.last_scan.insert(path, sig);
+            return;
+        }
         let current = fs::read(&path).ok();
         let baseline = session.baseline.get(&path).cloned();
         if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
@@ -425,16 +590,24 @@ impl Tracker {
             (Some(_), None) => "D",
             _ => "M",
         };
-        let restore = session
-            .pending
-            .get(&path)
-            .map(|change| change.restore.clone())
-            .unwrap_or_else(|| restore_source_for_change(&session.root, &path, baseline.as_ref()));
+        // Carry both restore and human_touched forward from any existing
+        // entry in one .get() — re-ingest (hook edit reports) must never reset
+        // a human_touched flag set by an editor save in between two agent
+        // edits, else "Revert all" would overwrite the human's mid-session
+        // edit with the pre-agent baseline.
+        let (restore, human_touched) = match session.pending.get(&path) {
+            Some(change) => (change.restore.clone(), change.human_touched),
+            None if force_unsafe => (RestoreSource::Unsafe, false),
+            None => (
+                restore_source_for_change(&session.root, &path, baseline.as_ref()),
+                false,
+            ),
+        };
         session.pending.insert(
             path.clone(),
             PendingChange {
                 status: status.to_string(),
-                human_touched: false,
+                human_touched,
                 observed: current,
                 restore,
             },
@@ -462,6 +635,22 @@ impl Tracker {
             return;
         };
         for path in session.pending.keys().cloned().collect::<Vec<_>>() {
+            // Same oversized cap as record_agent_report_inner (W4.9): never
+            // re-read a >MAX_PENDING_BYTES file every tick; keep it Unsafe.
+            if let Some(sig) = oversized_signature(&path) {
+                let status = if session.baseline.contains_key(&path) {
+                    "M"
+                } else {
+                    "A"
+                };
+                if let Some(change) = session.pending.get_mut(&path) {
+                    change.status = status.to_string();
+                    change.observed = None;
+                    change.restore = RestoreSource::Unsafe;
+                }
+                session.last_scan.insert(path, sig);
+                continue;
+            }
             let current = fs::read(&path).ok();
             let baseline = session.baseline.get(&path).cloned();
             if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
@@ -503,24 +692,105 @@ impl Tracker {
         }
     }
 
-    /// Detect which integrated agent (if any) is active for `root`.
-    fn agent_kind_for_root(&self, root: &Path) -> Option<AgentKind> {
-        let shells = self
-            .shells
+    /// PIDs of registered shells rooted under `root`.
+    fn shells_under(&self, root: &Path) -> HashSet<u32> {
+        self.shells
             .iter()
             .filter_map(|(pid, cwd)| cwd.starts_with(root).then_some(*pid))
-            .collect::<HashSet<_>>();
+            .collect()
+    }
+
+    /// Spawn ps once and parse the global process table. The sole spawn site.
+    fn spawn_process_table() -> Vec<ProcessInfo> {
+        #[cfg(test)]
+        PS_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,command="])
+            .output();
+        match output {
+            Ok(output) => parse_process_table(&String::from_utf8_lossy(&output.stdout)),
+            Err(_) => vec![],
+        }
+    }
+
+    /// Classify `root` against a supplied process table — no spawn, no cache.
+    fn classify_root(&self, root: &Path, table: &[ProcessInfo]) -> Option<AgentKind> {
+        let shells = self.shells_under(root);
         if shells.is_empty() {
             return None;
         }
-        let output = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,command="])
-            .output()
-            .ok()?;
-        agent_descendant_kind(
-            &shells,
-            &parse_process_table(&String::from_utf8_lossy(&output.stdout)),
-        )
+        agent_descendant_kind(&shells, table)
+    }
+
+    /// Detect which integrated agent (if any) is active for `root`, spawning a
+    /// fresh (uncached) ps. Retained as the un-deduped baseline the spawn-count
+    /// test measures against; production paths use the shared-table cache.
+    #[cfg(test)]
+    fn agent_kind_for_root(&self, root: &Path) -> Option<AgentKind> {
+        let shells = self.shells_under(root);
+        if shells.is_empty() {
+            return None;
+        }
+        agent_descendant_kind(&shells, &Self::spawn_process_table())
+    }
+
+    /// Ensure the shared process-table cache is fresh (one spawn per TTL window
+    /// across all roots), then classify `root` against it. Only spawns when
+    /// `root` actually has shells, so a session-less root stays free.
+    fn agent_kind_from_shared_table(&mut self, root: &Path) -> Option<AgentKind> {
+        if self.shells_under(root).is_empty() {
+            return None;
+        }
+        let fresh = self
+            .ps_cache
+            .as_ref()
+            .map(|(at, _)| at.elapsed() < KIND_CACHE_TTL)
+            .unwrap_or(false);
+        if !fresh {
+            self.ps_cache = Some((Instant::now(), Self::spawn_process_table()));
+        }
+        let table = self
+            .ps_cache
+            .as_ref()
+            .map(|(_, table)| table.as_slice())
+            .unwrap_or(&[]);
+        self.classify_root(root, table)
+    }
+
+    /// Read-only classification against the shared table cache, never spawning.
+    /// peek uses this so listing idle worktrees can't churn ps; a kind up to
+    /// KIND_CACHE_TTL stale (or None until some poll first fills the cache) is
+    /// acceptable for the sessions panel.
+    fn agent_kind_peek(&self, root: &Path) -> Option<AgentKind> {
+        let table = self
+            .ps_cache
+            .as_ref()
+            .map(|(_, table)| table.as_slice())
+            .unwrap_or(&[]);
+        self.classify_root(root, table)
+    }
+
+    /// Authoritative agent-kind reading: refreshes the shared ps table (one
+    /// spawn per TTL window across all roots) and memoizes the per-root result
+    /// so a piggybacked turn poll can reuse it. Used by the 1.5s agent poll and
+    /// the sessions refresh, which must observe live process state every tick.
+    fn agent_kind_store(&mut self, root: &Path) -> Option<AgentKind> {
+        let kind = self.agent_kind_from_shared_table(root);
+        self.kind_cache
+            .insert(root.to_path_buf(), (Instant::now(), kind));
+        kind
+    }
+
+    /// Reuse the last authoritative reading while still fresh, else take (and
+    /// store) a live one. Lets the turn poll skip a second ps in the common case
+    /// where the agent poll ran microseconds earlier on the same root.
+    fn agent_kind_cached(&mut self, root: &Path) -> Option<AgentKind> {
+        if let Some((at, kind)) = self.kind_cache.get(root) {
+            if at.elapsed() < KIND_CACHE_TTL {
+                return *kind;
+            }
+        }
+        self.agent_kind_store(root)
     }
 
     /// Root of the session that owns `path`: the longest tracked root that is an
@@ -695,8 +965,8 @@ pub fn pending_snapshot(root: &str) -> Vec<(String, Option<Vec<u8>>, bool)> {
 
 /// Detected agent kind ("claude" | "codex") for `root`, when known.
 pub fn detected_agent_kind(root: &str) -> Option<String> {
-    let tracker = TRACKER.lock().unwrap();
-    match tracker.agent_kind_for_root(Path::new(root))? {
+    let mut tracker = TRACKER.lock().unwrap();
+    match tracker.agent_kind_cached(Path::new(root))? {
         AgentKind::Claude => Some("claude".to_string()),
         AgentKind::Codex => Some("codex".to_string()),
     }
@@ -785,15 +1055,34 @@ fn compare_snapshots(
             (Some(_), None) => "D",
             _ => "M",
         };
+        let human_touched = previous
+            .get(&path)
+            .map(|change| change.human_touched)
+            .unwrap_or(false);
+        // Cap bytes per file (mirrors turns.rs MAX_SNAPSHOT_BYTES). The
+        // signature's size comes from file_signature's stat, so an oversized
+        // file is detected without reading it: track it Unsafe (no observed
+        // bytes, no baseline copy) — excluded from revert and flagged in the UI
+        // — instead of holding two full copies and re-reading it every tick.
+        let oversized = before.map(|s| s.size).unwrap_or(0) > MAX_PENDING_BYTES
+            || after.map(|s| s.size).unwrap_or(0) > MAX_PENDING_BYTES;
+        if oversized {
+            changes.insert(
+                path,
+                PendingChange {
+                    status: status.to_string(),
+                    human_touched,
+                    observed: None,
+                    restore: RestoreSource::Unsafe,
+                },
+            );
+            continue;
+        }
         let observed = after.and_then(|_| fs::read(&path).ok());
         let restore = previous
             .get(&path)
             .map(|change| change.restore.clone())
             .unwrap_or_else(|| restore_source_for_change(root, &path, before));
-        let human_touched = previous
-            .get(&path)
-            .map(|change| change.human_touched)
-            .unwrap_or(false);
         changes.insert(
             path,
             PendingChange {
@@ -897,6 +1186,24 @@ fn metadata_mtime_nanos(metadata: &fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
+/// Size-only oversized check: returns a metadata-derived signature (NO read)
+/// only when `path` exceeds MAX_PENDING_BYTES. Lets the Claude report path
+/// (`record_agent_report_inner` / `refresh_pending`) flag a huge file Unsafe
+/// without loading its bytes, mirroring `compare_snapshots`' cap on the
+/// discover path (W4.9). `hash` is a placeholder — oversized files are always
+/// tracked Unsafe, never content-compared.
+fn oversized_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() <= MAX_PENDING_BYTES {
+        return None;
+    }
+    Some(FileSignature {
+        size: metadata.len(),
+        mtime_nanos: metadata_mtime_nanos(&metadata),
+        hash: 0,
+    })
+}
+
 fn signature_for_current_or_bytes(
     path: &Path,
     bytes: &[u8],
@@ -948,6 +1255,23 @@ fn restore_source_for_change(
         }
     }
     RestoreSource::Unsafe
+}
+
+/// Nearest enclosing nested-repo root of `path` strictly between `owner` and
+/// `path`: the closest ancestor dir (excluding `owner` itself) that holds a
+/// `.git` dir/file. `None` when no nested repo intervenes. Mirrors the
+/// nested-repo skip in `scan_workspace` (a `.git` at a subdir's root), so a
+/// file the baseline excludes is routed to its own repo's session instead of
+/// being misclassified against the ancestor.
+fn nested_repo_root(path: &Path, owner: &Path) -> Option<PathBuf> {
+    let mut dir = path.parent()?;
+    while dir.starts_with(owner) && dir != owner {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 fn git_head_bytes(root: &Path, path: &Path) -> Option<Vec<u8>> {
@@ -1178,7 +1502,7 @@ pub fn agent_tracking_poll(
 ) -> Result<AgentTrackingStatus, String> {
     let mut tracker = TRACKER.lock().unwrap();
     let root = Path::new(&root);
-    let kind = tracker.agent_kind_for_root(root);
+    let kind = tracker.agent_kind_store(root);
     let agent_active = kind.is_some();
     let discover = !matches!(kind, Some(AgentKind::Claude));
     tracker.poll(root, agent_active, discover)
@@ -1274,6 +1598,25 @@ mod tests {
         assert!(tracker.sessions.is_empty(), "idle session evicted past threshold");
     }
 
+    // The agent-kind cache must not outlive the session it belongs to, or a
+    // long-lived process leaks one entry per root ever polled.
+    #[test]
+    fn evicting_an_idle_session_drops_its_kind_cache_entry() {
+        let dir = tempdir().unwrap();
+        let mut tracker = tracker_with(idle_session(dir.path()));
+        tracker
+            .kind_cache
+            .insert(dir.path().to_path_buf(), (Instant::now(), Some(AgentKind::Claude)));
+        let now = Instant::now();
+        tracker.evict_idle(now, Duration::ZERO); // stamp
+        tracker.evict_idle(now + Duration::from_secs(1), Duration::ZERO); // evict
+        assert!(tracker.sessions.is_empty(), "idle session evicted");
+        assert!(
+            !tracker.kind_cache.contains_key(dir.path()),
+            "kind cache entry pruned alongside its session"
+        );
+    }
+
     #[test]
     fn sessions_with_pending_or_active_agent_never_evicted() {
         let (_dir, mut tracker, _path) = active_session_with_reported_change(); // pending non-empty
@@ -1285,6 +1628,103 @@ mod tests {
         tracker.evict_idle(now, Duration::ZERO);
         tracker.evict_idle(now + Duration::from_secs(3600), Duration::ZERO);
         assert_eq!(tracker.sessions.len(), 2, "pending/active sessions must survive eviction");
+    }
+
+    // The turn poll reuses the agent poll's kind reading instead of spawning a
+    // second ps. A fresh cache entry is honored even though this tracker has no
+    // registered shells — a live ps-based reading would short-circuit to None —
+    // proving the read never consulted the process table. Once the entry ages
+    // past the TTL the read falls back to a live reading (None here).
+    #[test]
+    fn cached_agent_kind_reused_within_ttl_then_refreshes() {
+        let root = PathBuf::from("/tmp/sutra-kind-cache");
+        let mut tracker = Tracker::default();
+
+        tracker
+            .kind_cache
+            .insert(root.clone(), (Instant::now(), Some(AgentKind::Claude)));
+        assert_eq!(
+            tracker.agent_kind_cached(&root),
+            Some(AgentKind::Claude),
+            "fresh cache entry served without a live ps reading"
+        );
+
+        let stale = Instant::now()
+            .checked_sub(KIND_CACHE_TTL + Duration::from_millis(50))
+            .expect("test host uptime exceeds the cache TTL");
+        tracker
+            .kind_cache
+            .insert(root.clone(), (stale, Some(AgentKind::Claude)));
+        assert_eq!(
+            tracker.agent_kind_cached(&root),
+            None,
+            "expired entry falls through to a live reading (no shells → None)"
+        );
+    }
+
+    fn reset_ps_spawns() {
+        PS_SPAWN_COUNT.with(|count| count.set(0));
+    }
+
+    fn ps_spawns() -> usize {
+        PS_SPAWN_COUNT.with(|count| count.get())
+    }
+
+    // Measurement: count real `ps` execs across one tick's consumers. A shell
+    // rooted in the workspace makes agent_kind_for_root actually spawn ps.
+    // Un-deduped, a tick reads the kind twice (agent poll + turn poll, or
+    // sessions refresh + turn poll) = 2 spawns; the store-then-cached path
+    // collapses that to 1. Thread-local counter → immune to parallel tests.
+    #[test]
+    fn kind_cache_collapses_a_tick_to_one_ps_spawn() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut tracker = Tracker::default();
+        tracker.shells.insert(std::process::id(), root.clone());
+
+        // Baseline (pre-dedup): two independent live readings in one tick.
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_for_root(&root);
+        let _ = tracker.agent_kind_for_root(&root);
+        assert_eq!(ps_spawns(), 2, "un-deduped tick spawns ps twice");
+
+        // Deduped: authoritative store + piggybacked cached read, same tick.
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_store(&root); // agent poll / sessions refresh
+        let _ = tracker.agent_kind_cached(&root); // turn poll piggyback (same tick)
+        assert_eq!(ps_spawns(), 1, "deduped tick spawns ps once");
+    }
+
+    // W4.8: the process table is global, so one ps snapshot classifies every
+    // root. The sessions panel's pass calls the authoritative store for N roots
+    // within one TTL window; the shared ps_cache must collapse that to a single
+    // spawn instead of N. peek must never spawn at all.
+    #[test]
+    fn shared_ps_table_collapses_a_pass_across_roots_to_one_spawn() {
+        let mut tracker = Tracker::default();
+        let r1 = PathBuf::from("/tmp/w4-8-root-1");
+        let r2 = PathBuf::from("/tmp/w4-8-root-2");
+        let r3 = PathBuf::from("/tmp/w4-8-root-3");
+        // Each root has a shell so classification actually consults the table.
+        tracker.shells.insert(1001, r1.clone());
+        tracker.shells.insert(1002, r2.clone());
+        tracker.shells.insert(1003, r3.clone());
+
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_store(&r1);
+        let _ = tracker.agent_kind_store(&r2);
+        let _ = tracker.agent_kind_store(&r3);
+        assert_eq!(
+            ps_spawns(),
+            1,
+            "one ps spawn shared across all roots within a TTL window"
+        );
+
+        // peek must never spawn, even for a root it hasn't classified.
+        reset_ps_spawns();
+        let _ = tracker.peek(&r1);
+        let _ = tracker.peek(&PathBuf::from("/tmp/w4-8-unseen"));
+        assert_eq!(ps_spawns(), 0, "peek is non-spawning");
     }
 
     // refresh() must never create a session (the panel would otherwise spin up
@@ -1452,6 +1892,127 @@ mod tests {
         assert!(!changes.contains_key(&PathBuf::from("same.txt")));
     }
 
+    // W4.9: a file whose size exceeds MAX_PENDING_BYTES must be tracked Unsafe
+    // with no bytes held (observed=None) — never two full copies in memory nor
+    // re-read every reconcile tick — and excluded from bulk revert. The size
+    // check reads the signature (file_signature's stat), so no read of the
+    // oversized file's contents is performed here.
+    #[test]
+    fn compare_snapshots_caps_oversized_file_as_unsafe() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        fs::write(&path, b"small-original").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        // Agent grows the artifact past the cap.
+        fs::write(&path, vec![7u8; (MAX_PENDING_BYTES + 1) as usize]).unwrap();
+        let current = scan_workspace(dir.path(), Some(&baseline)).unwrap();
+
+        let changes = compare_snapshots(dir.path(), &baseline, &current, &BTreeMap::new());
+        let change = &changes[&path];
+        assert_eq!(change.status, "M");
+        // Old code held the full >10MB content here; the cap keeps zero bytes.
+        assert!(change.observed.is_none(), "no bytes retained for oversized file");
+        assert!(matches!(change.restore, RestoreSource::Unsafe));
+
+        // revert_safe_changes must skip it (Unsafe is never bulk-reverted).
+        let mut pending = changes;
+        let result = revert_safe_changes(&mut pending);
+        assert_eq!(
+            result.unsafe_paths,
+            vec![path.to_string_lossy().into_owned()]
+        );
+        assert!(result.reverted_paths.is_empty());
+    }
+
+    // W4.9: the Claude REPORT path (record_agent_report / refresh_pending), not
+    // just compare_snapshots, must cap oversized files — Claude sessions run
+    // report mode, so an uncapped read here reintroduced the same 600MB-resident
+    // blowup the discover-path cap already prevents.
+    #[test]
+    fn record_agent_report_caps_oversized_file_as_unsafe() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let path = dir.path().join("data.bin");
+        fs::write(&path, b"small-original").unwrap();
+        commit_all(&repo, "init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), true, false).unwrap(); // baseline holds small file
+        fs::write(&path, vec![7u8; (MAX_PENDING_BYTES + 1) as usize]).unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+
+        let change = tracker.sessions[dir.path()]
+            .pending
+            .get(&path)
+            .cloned()
+            .expect("oversized reported file must be tracked");
+        assert_eq!(change.status, "M");
+        assert!(
+            change.observed.is_none(),
+            "no bytes retained for an oversized file on the report path"
+        );
+        assert!(matches!(change.restore, RestoreSource::Unsafe));
+
+        // refresh_pending re-runs every tick — must stay Unsafe, still no read.
+        tracker.refresh_pending(dir.path());
+        let after = tracker.sessions[dir.path()]
+            .pending
+            .get(&path)
+            .cloned()
+            .expect("still tracked after refresh");
+        assert!(after.observed.is_none());
+        assert!(matches!(after.restore, RestoreSource::Unsafe));
+
+        let _ = tracker.revert(dir.path());
+        assert!(path.exists(), "oversized Unsafe file must never be bulk-reverted");
+    }
+
+    // W4.1 (non-vacuous companion to the delete-guard test): when the nested
+    // session is lazily bootstrapped, the bootstrap scan captured POST-edit
+    // disk, so without seeding the baseline from git HEAD the agent's edit would
+    // be silently absorbed (no pending entry → invisible, unrevertable). Assert
+    // the edit is actually tracked as "M" and revert restores committed content.
+    #[test]
+    fn record_report_owned_tracks_edited_nested_repo_file_not_absorbed() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("p.txt"), "root file").unwrap();
+        commit_all(&repo, "init");
+
+        let nested = dir.path().join("wt");
+        fs::create_dir(&nested).unwrap();
+        let nested_repo = git2::Repository::init(&nested).unwrap();
+        let edited = nested.join("f.txt");
+        fs::write(&edited, "committed-content").unwrap();
+        commit_all(&nested_repo, "nested init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), false, true).unwrap(); // P's baseline excludes nested
+
+        // Agent edits the nested file, THEN reports it (bootstrap-triggering edit).
+        fs::write(&edited, "agent-edited-content").unwrap();
+        assert!(tracker.record_report_owned(edited.clone(), None));
+
+        let change = tracker
+            .sessions
+            .get(&nested)
+            .and_then(|s| s.pending.get(&edited).cloned())
+            .expect("nested edit must be tracked, not absorbed into a post-edit baseline");
+        assert_eq!(change.status, "M");
+        assert!(
+            !matches!(change.restore, RestoreSource::Delete),
+            "a pre-existing file must never be delete-restored"
+        );
+
+        let _ = tracker.revert(&nested);
+        assert!(edited.exists(), "pre-existing nested file must survive revert");
+        assert_eq!(
+            fs::read(&edited).unwrap(),
+            b"committed-content",
+            "revert restores the nested repo's committed HEAD content"
+        );
+    }
+
     #[test]
     fn safe_revert_restores_bytes_deletes_created_and_keeps_human_touched() {
         let dir = tempdir().unwrap();
@@ -1611,6 +2172,77 @@ mod tests {
             b"outside-agent",
             &tracker.only_session().baseline[&path],
         ));
+    }
+
+    // W1.4: re-ingest (Claude hook /ingest/edit) must not wipe human_touched.
+    // Sequence: agent edits (ht=false) -> human edits the same file in the
+    // editor (ht=true via record_sutra_mutation) -> agent edits again (hook
+    // re-ingest). The re-ingest must preserve ht=true so revert_safe_changes
+    // still refuses to overwrite the human's edit with the pre-agent baseline.
+    #[test]
+    fn record_agent_report_preserves_human_touched_across_reingest() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let mut tracker = tracker_with(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                last_scan: baseline.clone(),
+                baseline,
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: true,
+        });
+
+        // Agent edit #1 (hook ingest).
+        fs::write(&path, "agent-1").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(!tracker.only_session().pending[&path].human_touched);
+
+        // Human edits the same file in the editor.
+        let human_before = capture_paths(&[path.clone()]);
+        fs::write(&path, "human-edit").unwrap();
+        tracker.record_sutra_mutation(human_before, &[path.clone()]);
+        assert!(tracker.only_session().pending[&path].human_touched);
+
+        // Agent edit #2 (hook re-ingest) must NOT reset human_touched.
+        fs::write(&path, "agent-2").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(
+            tracker.only_session().pending[&path].human_touched,
+            "re-ingest must preserve human_touched"
+        );
+
+        // revert_safe_changes must skip (not overwrite) the human-touched file.
+        let result = tracker.revert(dir.path()).unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+        assert!(!result.reverted_paths.contains(&path_str));
+        assert!(result.unsafe_paths.contains(&path_str));
+    }
+
+    // A fresh entry (no prior pending change) must still start human_touched=false.
+    #[test]
+    fn record_agent_report_fresh_entry_starts_not_human_touched() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let mut tracker = tracker_with(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                last_scan: baseline.clone(),
+                baseline,
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: true,
+        });
+
+        fs::write(&path, "agent").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(!tracker.only_session().pending[&path].human_touched);
     }
 
     #[test]
@@ -1912,6 +2544,105 @@ mod tests {
         assert!(!status.changes[0].human_touched);
         // Still present after peek (no mutation).
         assert!(tracker.only_session().pending.contains_key(&path));
+    }
+
+    // W4.1: a pre-existing file inside a NESTED repo (its own .git) under the
+    // primary root's session must never be classified "A"+Delete just because
+    // the primary baseline (scan_workspace deliberately excludes nested repos
+    // from it) has no entry for it — routing it through the ancestor session
+    // would plan a delete of a real, pre-existing file on "Revert all".
+    #[test]
+    fn record_report_owned_routes_nested_repo_file_away_from_ancestor_delete() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("p.txt"), "root file").unwrap();
+        commit_all(&repo, "init");
+
+        // Nested repo W under P, with its own pre-existing committed file.
+        let nested = dir.path().join("wt");
+        fs::create_dir(&nested).unwrap();
+        let nested_repo = git2::Repository::init(&nested).unwrap();
+        let edited = nested.join("f.txt");
+        fs::write(&edited, "pre-existing").unwrap();
+        commit_all(&nested_repo, "nested init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), false, true).unwrap(); // creates P's session
+        assert!(
+            !tracker.sessions[dir.path()].baseline.contains_key(&edited),
+            "P's baseline must exclude the nested repo's files"
+        );
+
+        assert!(tracker.record_report_owned(edited.clone(), None));
+
+        let p_pending = tracker.sessions[dir.path()].pending.get(&edited).cloned();
+        let misclassified_deletable = p_pending
+            .as_ref()
+            .map(|c| c.status == "A" && matches!(c.restore, RestoreSource::Delete))
+            .unwrap_or(false);
+        assert!(
+            !misclassified_deletable,
+            "nested-repo file must not be classified agent-created+delete against the ancestor session"
+        );
+
+        let nested_session_holds_it = tracker
+            .sessions
+            .get(&nested)
+            .map(|s| s.baseline.contains_key(&edited) || s.pending.contains_key(&edited))
+            .unwrap_or(false);
+        let unsafe_in_p = p_pending
+            .map(|c| matches!(c.restore, RestoreSource::Unsafe))
+            .unwrap_or(false);
+        assert!(
+            nested_session_holds_it || unsafe_in_p,
+            "either a W session must be created holding the file, or it must be recorded Unsafe"
+        );
+
+        let _ = tracker.revert(dir.path());
+        let _ = tracker.revert(&nested);
+        assert!(
+            edited.exists(),
+            "revert must never delete a pre-existing nested-repo file"
+        );
+    }
+
+    // W4.2: a workspace opened via a symlinked path (macOS /tmp -> /private/tmp)
+    // means every hook-reported edit arrives canonicalized and misses the
+    // baseline keyed under the frontend (symlinked) form — classifying a
+    // pre-existing file as "A". record_report_owned must map the canonical
+    // reported path back into the owning session's stored form so it lands as a
+    // baseline HIT ("M"), single pending entry.
+    #[test]
+    fn record_report_owned_maps_canonical_path_into_symlinked_session() {
+        let real = tempdir().unwrap();
+        fs::write(real.path().join("f.txt"), "pre-existing").unwrap();
+
+        // Session keyed by the symlinked (frontend) form of the same dir.
+        let link_parent = tempdir().unwrap();
+        let link = link_parent.path().join("proj");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let baseline = scan_workspace(&link, None).unwrap();
+        assert!(baseline.contains_key(&link.join("f.txt")));
+        let mut tracker = tracker_with(TrackingSession {
+            root: link.clone(),
+            head: "head".into(),
+            last_scan: baseline.clone(),
+            baseline,
+            pending: BTreeMap::new(),
+            agent_active: true,
+            settle_polls: 0,
+            report_mode: true,
+        });
+
+        // Hook edits the file, then reports the CANONICAL path form.
+        fs::write(real.path().join("f.txt"), "agent-edited").unwrap();
+        let canonical = fs::canonicalize(link.join("f.txt")).unwrap();
+        assert!(tracker.record_report_owned(canonical, None));
+
+        let session = tracker.only_session();
+        assert_eq!(session.pending.len(), 1, "one file → exactly one pending entry");
+        let entry = session.pending.get(&link.join("f.txt")).expect("keyed by session form");
+        assert_eq!(entry.status, "M", "baseline hit, not a spurious create");
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {

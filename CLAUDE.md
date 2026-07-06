@@ -33,6 +33,7 @@ src/
   palette.ts           Cmd+P command palette | Cmd+T symbol picker | goto-def chooser
   workspace.ts         root folder state, recents, localStorage
   settings.ts          UserSettings model + helpers  |  settings-modal.ts  UI modal
+  about-modal.ts       version pill → What's New / Tutorial / About (bundled RELEASES)
   preview.ts           Markdown/HTML split preview   |  browser.ts  localhost iframe
   search.ts / search-panel.ts  project-wide file search
   gitbar.ts            branch whisper + dropdown  |  git-index.ts  worktree helpers
@@ -78,14 +79,17 @@ tests/  one .test.ts per frontend module (node:test)
 - Preview: `<iframe srcdoc sandbox="">` (null origin, scripts off); Markdown DOMPurified
 - Menu: in-window bar is source of truth; native macOS menu suppressed in `lib.rs`
 - Turn boundaries: `.sutra/turn-signal.jsonl` Stop-hook lines, else 10 s quiet window; snapshots in content-addressed store `.sutra/turns/objects` (10 MB/file cap)
-- Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap)
+- Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap); fs trigger ignores build outputs + hidden dirs (`target`/`node_modules`/`dist`/`.*`) — diag jobs write `target/**` and must never re-trigger themselves
 - Poll cadences: agent tracker + turn poll 1.5 s piggyback; sessions panel polls cheap, full only for active roots
+- Watcher noise filter: fs-changed drops contents of `node_modules`/`target`/`dist` and `.git/objects`+`.git/logs`; keeps dir-itself events, `.git/HEAD`/`index`/`refs/**` (gitbar + gutter refresh after commit/checkout), and all other hidden dirs (open-tab reload, tree)
 
 ## State
-- Version: v2.0.1 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 253 pass; `cargo test` (inside src-tauri/) → 137 pass
-- MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, etc.) via `mcp.rs`
+- Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
+- Tests: `npm test` → 312 pass; `cargo test` (inside src-tauri/) → 186 pass
+- MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, `create_automation`/`list_automations`/`run_automation`, etc.) via `mcp.rs`
+- OS open: `lib.rs` single-instance + `fileAssociations` + macOS `RunEvent::Opened` + cold-start `take_launch_path` → emit `open-path{path,isDir}`; frontend `routeOpenPath`/`resolveOpenPath` (single window, replace root)
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
+- Security (workspace trust): folders opened via OS file-association / CLI / single-instance forward or session restore are **untrusted** — their `.sutra` automations + detected diagnostics (`cargo check` runs build.rs = exec) do NOT auto-run until trusted. Trust granted only by File▸Open dialog or the Trust toast; persisted in `localStorage sutra.trustedRoots`, seeded once from recents (`sutra.trustMigrated`). Gate is `diagnosticsExecDecision` in `diagnostics.ts` (chokepoint `diagRun`); `isWorkspaceTrusted` also guards `onTurnClosed` test-run + MCP `create/run_automation`. `mcp.rs` `host_origin_ok` rejects non-loopback Host/Origin (anti DNS-rebinding). Trust reducers in `workspace.ts`.
 
 ## Best Practices
 - **UI changes:** verify visually with `npm run tauri dev`

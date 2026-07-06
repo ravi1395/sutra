@@ -9,7 +9,7 @@ use tauri::Emitter;
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Diagnostic {
-    pub path: String,      // workspace-relative where possible, else absolute
+    pub path: String,      // always absolute (parser output joined onto the job's cwd)
     pub line: u32,         // 1-based
     pub col: u32,          // 1-based
     pub severity: String,  // "error" | "warning"
@@ -213,20 +213,43 @@ fn normalize_severity(raw: &str) -> String {
     }
 }
 
-/// Dispatch to the parser named by the job.
-fn parse_diagnostics(job: &DiagJob, stdout: &str) -> Vec<Diagnostic> {
-    match job.parser.as_str() {
+/// Join a parser-emitted path onto the job's cwd unless it's already
+/// absolute. Parsers report paths relative to wherever the tool actually ran
+/// — which for cargo is the SUB-CRATE cwd (see `detect()`), not the workspace
+/// root — so the same relative string means different files depending on
+/// which job produced it. Absolute paths make every Diagnostic
+/// self-describing for the problems panel, CM6 squiggle mapping, and MCP
+/// consumers, none of which know a job's cwd.
+fn to_absolute(cwd: &str, path: &str) -> String {
+    if std::path::Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        format!("{}/{}", cwd.trim_end_matches('/'), path)
+    }
+}
+
+/// Dispatch to the parser named by the job, feeding it whichever stream that
+/// tool actually writes findings to: `go vet` writes to stderr (stdout is
+/// empty on a findings run), tsc/ruff/cargo write to stdout, and a
+/// user-defined regex automation gets both streams combined since its
+/// pattern's target stream isn't known ahead of time. Every emitted path is
+/// then absolutized against the job's cwd.
+fn parse_diagnostics(job: &DiagJob, stdout: &str, stderr: &str) -> Vec<Diagnostic> {
+    let mut diags = match job.parser.as_str() {
         "tsc" => parse_tsc(stdout),
         "cargo" => parse_cargo(stdout),
-        "go" => parse_go(stdout),
+        "go" => parse_go(stderr),
         "ruff" => parse_ruff(stdout),
-        "regex" => job
-            .regex
-            .as_deref()
-            .map(|p| parse_regex(stdout, p, &job.source))
-            .unwrap_or_default(),
+        "regex" => job.regex.as_deref().map(|p| {
+            let combined = format!("{stdout}\n{stderr}");
+            parse_regex(&combined, p, &job.source)
+        }).unwrap_or_default(),
         _ => vec![],
+    };
+    for d in &mut diags {
+        d.path = to_absolute(&job.cwd, &d.path);
     }
+    diags
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +602,7 @@ pub async fn diag_run(
 async fn run_jobs_sequentially(root: &str, jobs: Vec<DiagJob>, app: &tauri::AppHandle) {
     for job in jobs {
         let (exit, timed_out, stdout, stderr) = run_job_blocking(&job).await;
-        let diags = parse_diagnostics(&job, &stdout);
+        let diags = parse_diagnostics(&job, &stdout, &stderr);
         // A hung tool that we had to kill is a tool failure, not clean/findings —
         // exit is meaningless once we've killed the process group ourselves.
         let outcome = if timed_out {
@@ -675,10 +698,44 @@ mod tests {
         assert_eq!((d[0].path.as_str(), d[0].line, d[0].col, d[0].severity.as_str()), ("foo.py", 3, 1, "error"));
     }
     #[test]
+    fn parse_diagnostics_makes_paths_absolute_under_job_cwd() {
+        // tsc: relative path joins onto the job's cwd.
+        let job = DiagJob { source: "tsc".into(), command: "tsc".into(), cwd: "/tmp/proj".into(), parser: "tsc".into(), regex: None };
+        let d = parse_diagnostics(&job, "src/foo.ts(12,5): error TS2322: bad.", "");
+        assert_eq!(d[0].path, "/tmp/proj/src/foo.ts");
+
+        // cargo: cwd is the SUB-CRATE dir (see detect()), not the workspace root —
+        // the emitted path must join onto that sub-crate cwd, not some higher root.
+        let cargo_job = DiagJob { source: "cargo".into(), command: "cargo check".into(), cwd: "/tmp/proj/sub".into(), parser: "cargo".into(), regex: None };
+        let cargo_out = r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","spans":[{"file_name":"src/lib.rs","line_start":5,"column_start":3,"is_primary":true}]}}"#;
+        let d2 = parse_diagnostics(&cargo_job, cargo_out, "");
+        assert_eq!(d2[0].path, "/tmp/proj/sub/src/lib.rs");
+
+        // an already-absolute path passes through unchanged (no double-join).
+        let d3 = parse_diagnostics(&job, "/tmp/proj/src/foo.ts(1,1): error TS1: x.", "");
+        assert_eq!(d3[0].path, "/tmp/proj/src/foo.ts");
+    }
+    #[test]
     fn ruff_json_array() {
         let out = r#"[{"filename":"a.py","location":{"row":7,"column":2},"message":"undefined name","code":"F821"}]"#;
         let d = parse_ruff(out);
         assert_eq!((d[0].line, d[0].col), (7, 2));
+    }
+    #[test]
+    fn go_vet_findings_parsed_from_stderr_not_stdout() {
+        // go vet writes findings to stderr; stdout is empty on a real vet run.
+        let job = DiagJob {
+            source: "go".into(),
+            command: "go vet ./...".into(),
+            cwd: ".".into(),
+            parser: "go".into(),
+            regex: None,
+        };
+        let diags = parse_diagnostics(&job, "", "pkg/a.go:12:5: unreachable code\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!((diags[0].line, diags[0].col), (12, 5));
+        // With diags parsed, classify_outcome must report Findings, not ToolFailure.
+        assert_eq!(classify_outcome(1, &diags, "pkg/a.go:12:5: unreachable code\n"), Outcome::Findings);
     }
     #[test]
     fn tool_failure_vs_findings() {

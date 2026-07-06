@@ -44,6 +44,8 @@ export function mountComposer(opts: ComposerOptions): {
   toggle: () => void;
   show: () => void;
   hide: () => void;
+  pausePolling: () => void;
+  resumePolling: () => void;
   dispose: () => void;
 } {
   const { root, container, getFiles, getSelection } = opts;
@@ -78,6 +80,7 @@ export function mountComposer(opts: ComposerOptions): {
   let submit = false;
   let visible = false;
   let pollTimer: number | undefined;
+  let lastAgentsSig = ""; // last polled agent-list signature; skip rebuild if unchanged
   let completeArea: HTMLTextAreaElement | null = null;  // section owning @ / / completion (context, else task)
   let completeId = "context";                           // tag id a picked suggestion inserts into
   let ctxCount: HTMLElement | null = null;
@@ -722,7 +725,15 @@ export function mountComposer(opts: ComposerOptions): {
   function startPoll(): void {
     if (pollTimer !== undefined) return;
     pollTimer = window.setInterval(() => {
-      void ptyListAgents().then((a) => { agents = a; renderTargetPicker(); }).catch(() => {});
+      void ptyListAgents().then((a) => {
+        // Runs every 3 s while the panel is open — skip the <select> rebuild when
+        // the agent list is byte-identical.
+        const sig = a.map((x) => `${x.id}:${x.kind}:${x.cwd ?? ""}:${x.state}`).join("|");
+        if (sig === lastAgentsSig) return;
+        lastAgentsSig = sig;
+        agents = a;
+        renderTargetPicker();
+      }).catch(() => {});
     }, 3000);
   }
 
@@ -756,6 +767,10 @@ export function mountComposer(opts: ComposerOptions): {
     toggle: () => setVisible(!visible),
     show: () => setVisible(true),
     hide: () => setVisible(false),
+    // Window-hidden gate: pause the agent poll without touching visible state,
+    // resume only if the panel is still open.
+    pausePolling: () => stopPoll(),
+    resumePolling: () => { if (visible) startPoll(); },
     dispose,
   };
 }

@@ -72,12 +72,60 @@ pub fn with_auth_token(url: String, token: &str) -> String {
     format!("{url}{sep}token={token}")
 }
 
-/// Reject unauthenticated MCP HTTP requests before they reach rmcp.
+/// Extract the host from an HTTP authority: strip a leading scheme (Origin has
+/// one, Host does not), then drop the port — honoring `[ipv6]:port` bracketing.
+fn host_of_authority(v: &str) -> &str {
+    let authority = v
+        .strip_prefix("http://")
+        .or_else(|| v.strip_prefix("https://"))
+        .unwrap_or(v);
+    if let Some(rest) = authority.strip_prefix('[') {
+        // [::1]:port → ::1
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // host:port → host (bare, un-bracketed IPv6 is not valid in an authority)
+    authority.split(':').next().unwrap_or(authority)
+}
+
+/// True when an HTTP authority points at loopback. Uses EXACT host matching — a
+/// prefix check would accept a DNS-rebinding host like `127.0.0.1.evil.com` or
+/// `localhost.evil.com`. `localhost` (any case) and any address in 127.0.0.0/8
+/// or ::1 count; everything else (foreign hosts, `null`, `0.0.0.0`) does not.
+fn is_loopback_authority(v: &str) -> bool {
+    if v.contains('@') {
+        return false; // userinfo (`loopback@evil` / `evil@loopback`) is never a legit authority here
+    }
+    let host = host_of_authority(v).to_ascii_lowercase();
+    if host == "localhost" {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Host and Origin (when present) must reference a loopback authority. A browser
+/// mounting a DNS-rebinding attack against the loopback MCP server carries a
+/// foreign Host/Origin and is rejected here — defense in depth behind the token,
+/// so a token leak is not the only barrier. Non-browser clients omit Origin
+/// (None → allowed); every well-formed HTTP/1.1 client sends a loopback Host.
+pub fn host_origin_ok(host: Option<&str>, origin: Option<&str>) -> bool {
+    let host_ok = host.map_or(true, is_loopback_authority);
+    let origin_ok = origin.map_or(true, is_loopback_authority);
+    host_ok && origin_ok
+}
+
+/// Reject unauthenticated / cross-origin MCP HTTP requests before they reach rmcp.
 async fn require_auth_token(
     AxumState(token): AxumState<String>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let host = req.headers().get("host").and_then(|v| v.to_str().ok());
+    let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+    if !host_origin_ok(host, origin) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if req.uri().path() == "/ingest/edit" {
         return Ok(next.run(req).await);
     }
@@ -381,6 +429,26 @@ struct RootParam {
     root: Option<String>,
 }
 
+/// Args for create_automation.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateAutomationArgs {
+    /// Short unique display name (max 40 chars), e.g. "Debug app".
+    name: String,
+    /// Shell command to run, e.g. "mvnDebug" or "npm run dev".
+    command: String,
+    /// Kind: "shell" (default, runs in a terminal), "diagnostics", or "test".
+    kind: Option<String>,
+}
+
+/// Args for run_automation: identify the target by name or id.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct RunAutomationArgs {
+    /// Name of the automation to run (case-insensitive). Provide this or `id`.
+    name: Option<String>,
+    /// Id of the automation to run. Provide this or `name`.
+    id: Option<String>,
+}
+
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
 /// session; all clones share the same `AppHandle` and active-root `Arc`.
 #[derive(Clone)]
@@ -467,6 +535,35 @@ impl SutraMcp {
                     pending.remove(&id);
                 }
                 Err(McpError::internal_error("ui state request timed out", None))
+            }
+        }
+    }
+
+    /// Emit a UI action request carrying `params` and await the frontend reply.
+    /// Like `request_ui` but for mutating actions (create/run automation) that pass
+    /// arguments and may touch the filesystem; uses a longer 5s timeout.
+    async fn request_ui_action(
+        &self,
+        query: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        let (tx, rx) = oneshot::channel();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.pending
+            .lock()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .insert(id, tx);
+        let _ = self.app.emit(
+            "sutra://ui/request",
+            serde_json::json!({ "id": id, "query": query, "params": params }),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(value)) => Ok(value),
+            _ => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err(McpError::internal_error("ui action request timed out", None))
             }
         }
     }
@@ -808,6 +905,48 @@ impl SutraMcp {
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
+    }
+
+    #[tool(
+        description = "Create or update a workspace automation — a named shell command runnable from \
+                       Sutra's automation bar — persisted to .sutra/automations.json. Use this after \
+                       inspecting a project's config to save its run/debug command. Returns the new id, \
+                       or a validation error (empty/over-long/duplicate name, empty command)."
+    )]
+    async fn create_automation(
+        &self,
+        Parameters(args): Parameters<CreateAutomationArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let params = serde_json::json!({
+            "name": args.name,
+            "command": args.command,
+            "kind": args.kind,
+        });
+        let value = self.request_ui_action("createAutomation", params).await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(description = "List the current workspace's saved automations (id, name, command, kind).")]
+    async fn list_automations(&self) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action("listAutomations", serde_json::Value::Null)
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Run a saved automation by name or id in a Sutra terminal. Returns whether it started."
+    )]
+    async fn run_automation(
+        &self,
+        Parameters(args): Parameters<RunAutomationArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let params = serde_json::json!({ "name": args.name, "id": args.id });
+        let value = self.request_ui_action("runAutomation", params).await?;
+        Ok(Self::ok_json(value))
     }
 }
 
@@ -1158,5 +1297,33 @@ mod tests {
         assert!(query_has_auth_token(Some("x=1&token=abc"), "abc"));
         assert!(!query_has_auth_token(Some("token=wrong"), "abc"));
         assert!(!query_has_auth_token(None, "abc"));
+    }
+
+    #[test]
+    fn host_origin_ok_allows_loopback_and_rejects_foreign() {
+        // Loopback Host, no Origin (typical non-browser MCP client) → allowed.
+        assert!(host_origin_ok(Some("127.0.0.1:5123"), None));
+        assert!(host_origin_ok(Some("localhost:5123"), None));
+        assert!(host_origin_ok(Some("[::1]:5123"), None));
+        assert!(host_origin_ok(None, None));
+        // Loopback Host + loopback Origin → allowed.
+        assert!(host_origin_ok(Some("127.0.0.1:1"), Some("http://127.0.0.1:1")));
+        // Foreign Host (DNS-rebinding attempt) → rejected even with a token elsewhere.
+        assert!(!host_origin_ok(Some("evil.com:5123"), None));
+        // Loopback Host but foreign Origin (cross-origin browser fetch) → rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("http://evil.com")));
+        // A "null" / opaque Origin is not loopback → rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("null")));
+        // Prefix-match bypass hosts MUST be rejected (exact-host matching).
+        assert!(!host_origin_ok(Some("127.0.0.1.evil.com:5123"), None));
+        assert!(!host_origin_ok(Some("localhost.evil.com:5123"), None));
+        assert!(!host_origin_ok(None, Some("http://127.0.0.1.evil.com")));
+        assert!(!host_origin_ok(Some("0.0.0.0:5123"), None));
+        // Userinfo smuggling: a loopback-looking authority with `@` is rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:80@evil.com"), None));
+        assert!(!host_origin_ok(None, Some("http://evil.com@127.0.0.1")));
+        // Case-insensitive + 127.0.0.0/8 loopback are accepted.
+        assert!(host_origin_ok(Some("LOCALHOST:5123"), None));
+        assert!(host_origin_ok(Some("127.9.9.9:5123"), None));
     }
 }

@@ -41,6 +41,8 @@ import {
   gitCheckout,
   onPreviewOpen,
   onDrive,
+  onOpenPath,
+  takeLaunchPath,
   onUiRequest,
   onPromptRequest,
   mcpUiReply,
@@ -53,15 +55,17 @@ import {
   langIndexInvalidate,
   resolveDebugAdapter,
   turnPoll,
+  turnList,
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
   runnerRun,
+  runnerCancel,
   onRunnerDone,
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, mergeChangedFiles, onTurnClosed, reviewablePaths, setTurnState, turnHeaderEl, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnHeaderEl, whisperText } from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -69,9 +73,13 @@ import {
   diagnosticsExtension,
   initDiagnostics,
   notifyDocChanged,
+  pauseDiagnosticsFsTrigger,
+  resumeDiagnosticsFsTrigger,
+  runDiagnostics,
+  setUntrustedDiagnosticsHandler,
   problemsPanelEl,
 } from "./diagnostics";
-import { aggregateStripEl, initSessions, sessionsPanelEl } from "./sessions";
+import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
 import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
@@ -85,6 +93,7 @@ import {
   validateName,
   validateCommand,
   validateAutomation,
+  prepareCreateAutomation,
   testAutomation,
   type Automation,
   type AutomationBarHandle,
@@ -94,13 +103,17 @@ import { mountUpdater } from "./updater";
 import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import {
   breadcrumbSegments,
+  ensureTrustSeeded,
+  isWorkspaceTrusted,
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
+  resolveOpenPath,
   pruneWorkspaceSession,
   saveRecents,
   saveWorkspaceSession,
   sessionFromTabs,
+  trustWorkspace,
   upsertRecent,
 } from "./workspace";
 import {
@@ -115,6 +128,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
+import { openAboutModal, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -273,6 +287,30 @@ void onDrive((d) => {
   }
 });
 
+// Open a path handed to Sutra by the OS/CLI while it's already running
+// (single-instance forward, macOS "Open With"). Cold-start paths are handled at
+// boot by bootOpen via takeLaunchPath.
+void onOpenPath((p) => void routeOpenPath(p.path, p.isDir));
+
+// Apply the smart open rule (decision in workspace.resolveOpenPath): a folder
+// replaces the workspace root; a file inside the current workspace opens as a tab;
+// a file outside opens its parent folder as the workspace, then the file.
+async function routeOpenPath(path: string, isDir: boolean): Promise<void> {
+  const action = resolveOpenPath(path, isDir, currentRoot);
+  switch (action.kind) {
+    case "workspace":
+      await openWorkspace(action.dir);
+      break;
+    case "fileInRoot":
+      await editor.openFile(action.file);
+      break;
+    case "fileWithParent":
+      await openWorkspace(action.parent);
+      await editor.openFile(action.file);
+      break;
+  }
+}
+
 // Track the origin of the currently active prompt URL so the bridge listener
 // can reject messages from any other source.
 let promptOrigin: string | null = null;
@@ -298,7 +336,16 @@ window.addEventListener("message", (e) => {
 });
 
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
+// Automation actions (create/list/run) are async and route to resolveAutomationUi;
+// the read-only queries resolve synchronously via resolveUiQuery.
 void onUiRequest((r) => {
+  if (r.query === "createAutomation" || r.query === "listAutomations" || r.query === "runAutomation") {
+    void resolveAutomationUi(r.query, r.params).then(
+      (payload) => void mcpUiReply(r.id, payload),
+      (e) => void mcpUiReply(r.id, { error: String(e) }),
+    );
+    return;
+  }
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
@@ -307,12 +354,62 @@ void onUiRequest((r) => {
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
 
+// Handle MCP automation actions from an AI agent/skill: create/list/run automations
+// against the current workspace, reusing the same validation + persistence + bar
+// refresh path as the manual automation drawer. Returns a JSON-serializable result.
+async function resolveAutomationUi(
+  query: "createAutomation" | "listAutomations" | "runAutomation",
+  params: unknown,
+): Promise<unknown> {
+  const root = currentRoot;
+  if (!root) return { error: "No workspace open in Sutra" };
+  const p = (params ?? {}) as { name?: string; command?: string; kind?: string; id?: string };
+
+  if (query === "listAutomations") {
+    return { automations };
+  }
+
+  // Create/run persist or execute a shell command; a prompt-injected agent must not
+  // reach that in an untrusted folder. Listing (read-only) above stays allowed.
+  if (!isWorkspaceTrusted(root)) {
+    return { error: "This folder is not trusted. Trust it in Sutra before creating or running automations." };
+  }
+
+  if (query === "createAutomation") {
+    const prepared = prepareCreateAutomation(automations, p);
+    if ("error" in prepared) return { error: prepared.error };
+    const a = prepared.automation;
+    automations = upsertAutomation(automations, a);
+    try {
+      await saveAutomations(root, automations);
+    } catch (e) {
+      return { error: `Could not save automation: ${e}` };
+    }
+    automationBar.setAutomations(automations);
+    return { ok: true, id: a.id, name: a.name };
+  }
+
+  // runAutomation: match by id first, else by case-insensitive name.
+  const target = p.id
+    ? automations.find((x) => x.id === p.id)
+    : automations.find((x) => x.name.trim().toLowerCase() === (p.name ?? "").trim().toLowerCase());
+  if (!target) return { error: `No automation matching ${p.id ?? p.name ?? "(none)"}` };
+  void runAutomation(target);
+  return { ok: true, started: true, id: target.id, name: target.name };
+}
+
 // Native workspace watcher refreshes the visible tree and git badges after
 // filesystem changes from terminals, external tools, or Finder.
 void onFsChanged((payload) => {
   if (!currentRoot) return;
   const root = currentRoot;
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
+    return;
+  }
+  if (bgPaused) {
+    // Window hidden: defer tree refresh + lang re-index; catch up on re-show.
+    fsChangedWhileHidden = true;
+    for (const p of payload.paths) hiddenFsPaths.add(p);
     return;
   }
   // Inform the lang engine to re-index changed files (gracefully degrades if backend absent).
@@ -583,8 +680,16 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
 editor.saveHandler = saveTab;
 
 // ---- workspace open (single path shared by switcher rows, File menu, dialogs) ----
-async function openWorkspace(dir: string): Promise<void> {
+// `explicit` = the user picked a *fresh* folder via the File▸Open dialog → mark it
+// trusted so its repo-defined commands may run. Only that dialog (and the Trust
+// toast) grant trust. Everything else — OS file-association / CLI / single-instance
+// forward, session restore, and switcher/worktree re-selects of a recents row —
+// passes explicit=false and relies on persisted trust, so re-opening an
+// OS-delivered folder never silently elevates it.
+async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
+  if (explicit) trustWorkspace(dir);
+  hideTrustToast(); // drop any leftover toast from the previous root
   persistWorkspaceSession();
   suppressSessionSave = true;
   try {
@@ -627,7 +732,7 @@ async function openWorkspace(dir: string): Promise<void> {
 
 async function openFolderDialog(): Promise<void> {
   const dir = await open({ directory: true, multiple: false });
-  if (typeof dir === "string") await openWorkspace(dir);
+  if (typeof dir === "string") await openWorkspace(dir, true); // explicit user pick → trusted
 }
 
 async function closeActiveTab(): Promise<void> {
@@ -705,7 +810,27 @@ function renderTurnStrip(root: string): void {
     openRollbackDialog(root, turn, {
       turns,
       onApply: async (paths) => {
+        // The rolled-back turn and any newer turn's code state is about to be
+        // replaced — cancel their in-flight test runs BEFORE restoring so a
+        // long-running suite can't finish against a tree that no longer
+        // matches what it was testing and get recorded as that turn's result.
+        await cancelTurnTestsFrom(root, turn.id);
         const res = await turnRollback(root, rollbackTargetId(turn), paths);
+        // turn_poll is consume-once and never re-delivers a closed turn, so
+        // rolled_back (set server-side on the manifest) would otherwise never
+        // reach turnsByRoot — re-fetch the full list so the strip reflects it
+        // immediately instead of showing a stale live Rollback button.
+        // Optimistically flag the rolled-back turn locally FIRST so the strip
+        // disables its Rollback button even if the authoritative turnList
+        // re-fetch below throws — otherwise an IPC failure would leave a live
+        // button that re-applies into a false-success no-op. A successful
+        // turnList overwrites this with the server truth.
+        markRolledBack(root, turn.id);
+        try {
+          replaceTurns(root, await turnList(root));
+        } catch (e) {
+          console.warn("turnList refresh after rollback failed", e);
+        }
         diffViewer.invalidate();
         void refreshDiffFileList();
         return res;
@@ -716,7 +841,13 @@ function renderTurnStrip(root: string): void {
         ) as Record<string, string>,
     });
   };
-  for (const turn of turns) strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
+  // rollback can itself be undone; they aren't a real agent turn and have no
+  // useful strip entry of their own.
+  for (const turn of turns) {
+    if (turn.boundarySource === "rollback") continue;
+    strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  }
 }
 
 // ---- diff file list ----
@@ -1056,16 +1187,37 @@ function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
+// ---- background-poll idle gate ----
+// macOS charges heavy energy to a backgrounded WebView that keeps polling and
+// repainting. When the window is hidden (occluded/minimized) we disarm every
+// cadence timer and pause CSS animations; on re-show we re-arm and run one
+// catch-up tick. `*Wanted` = the poll should run (feature/workspace on);
+// `bgPaused` = the window is currently hidden.
+let bgPaused = false;
+// Deferred fs-changed work while hidden: tree refresh + lang re-index accumulate
+// and run once on re-show, instead of firing on every background FS event (e.g. a
+// worktree agent editing files while the window is off-screen).
+let fsChangedWhileHidden = false;
+const hiddenFsPaths = new Set<string>();
+
 // ---- integrated-agent workspace tracking ----
 let pollTimer: number | undefined;
+let agentPollWanted = false;
+
+function armAgentPoll(): void {
+  if (pollTimer === undefined && agentPollWanted && !bgPaused) {
+    pollTimer = window.setInterval(pollAgentChanges, 1500);
+  }
+}
 
 function startAgentTrackingPoll(): void {
-  if (pollTimer !== undefined) return;
-  pollTimer = window.setInterval(pollAgentChanges, 1500);
+  agentPollWanted = true;
+  armAgentPoll();
 }
 
 // Halts agent-change polling and clears any whisper text it surfaced.
 function stopAgentTrackingPoll(): void {
+  agentPollWanted = false;
   if (pollTimer !== undefined) {
     clearInterval(pollTimer);
     pollTimer = undefined;
@@ -1079,13 +1231,21 @@ function stopAgentTrackingPoll(): void {
 let gitIndexMtime = 0;
 let gitPollTimer: number | undefined;
 let gitIndexPath: string | null = null;
+let gitPollWanted = false;
+
+function armGitPoll(): void {
+  if (gitPollTimer === undefined && gitPollWanted && !bgPaused) {
+    gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  }
+}
 
 function startGitPoll(): void {
-  if (gitPollTimer !== undefined) return;
-  gitPollTimer = window.setInterval(() => void pollGitIndex(), 10000);
+  gitPollWanted = true;
+  armGitPoll();
 }
 
 function stopGitPoll(): void {
+  gitPollWanted = false;
   if (gitPollTimer !== undefined) {
     clearInterval(gitPollTimer);
     gitPollTimer = undefined;
@@ -1093,6 +1253,40 @@ function stopGitPoll(): void {
     gitIndexPath = null;
   }
 }
+
+// Disarm every cadence timer + pause animations while hidden; re-arm and run a
+// single catch-up tick on re-show. Preserves feature state (no teardown).
+function setBackgroundPaused(hidden: boolean): void {
+  if (hidden === bgPaused) return;
+  bgPaused = hidden;
+  document.body.classList.toggle("app-hidden", hidden);
+  terminals.setBlinkPaused(hidden); // stop xterm's JS blink loop while off-screen
+  if (hidden) {
+    if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
+    if (gitPollTimer !== undefined) { clearInterval(gitPollTimer); gitPollTimer = undefined; }
+    pauseSessionsPolling();
+    composerPanel?.pausePolling();
+    pauseDiagnosticsFsTrigger();
+  } else {
+    armAgentPoll();
+    armGitPoll();
+    resumeSessionsPolling();
+    composerPanel?.resumePolling();
+    resumeDiagnosticsFsTrigger();
+    if (agentPollWanted) void pollAgentChanges();
+    if (gitPollWanted) void pollGitIndex();
+    if (fsChangedWhileHidden && currentRoot) {
+      // One catch-up for FS churn accumulated while hidden.
+      fsChangedWhileHidden = false;
+      const paths = [...hiddenFsPaths];
+      hiddenFsPaths.clear();
+      if (paths.length) void langIndexInvalidate(paths).catch(() => {});
+      scheduleFileSystemRefresh(currentRoot);
+    }
+  }
+}
+
+document.addEventListener("visibilitychange", () => setBackgroundPaused(document.hidden));
 
 /** Resolve the real git index once per workspace, including linked worktrees. */
 async function resolveGitIndexPath(root: string): Promise<string> {
@@ -1152,6 +1346,54 @@ initDiagnostics(() => currentRoot);
 initSessions(() => currentRoot);
 setRollbackEditor(editor);
 
+// ---- workspace-trust toast ----
+// When diagnostics/automations are suppressed for an untrusted folder, offer a
+// one-click Trust affordance. Suppression fires on every fs-settle, so the toast
+// is idempotent per root and stays dismissed for the session once closed.
+let trustToast: HTMLElement | null = null;
+let trustToastRoot: string | null = null;
+const trustDismissed = new Set<string>();
+
+function hideTrustToast(): void {
+  trustToast?.remove();
+  trustToast = null;
+  trustToastRoot = null;
+}
+
+function showTrustToast(root: string): void {
+  if (trustDismissed.has(root)) return; // user closed it this session
+  if (trustToast && trustToastRoot === root) return; // already shown for this root
+  hideTrustToast();
+  trustToastRoot = root;
+
+  const el = document.createElement("div");
+  el.className = "trust-toast";
+  const msg = document.createElement("span");
+  msg.className = "trust-toast-msg";
+  msg.textContent = "Automations & diagnostics are disabled — this folder isn't trusted.";
+  const trustBtn = document.createElement("button");
+  trustBtn.className = "trust-toast-btn";
+  trustBtn.textContent = "Trust folder";
+  trustBtn.onclick = () => {
+    trustWorkspace(root);
+    hideTrustToast();
+    void runDiagnostics(root); // run the now-permitted jobs immediately
+  };
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "trust-toast-close";
+  closeBtn.title = "Dismiss";
+  closeBtn.textContent = "✕";
+  closeBtn.onclick = () => {
+    trustDismissed.add(root);
+    hideTrustToast();
+  };
+  el.append(msg, trustBtn, closeBtn);
+  document.body.appendChild(el);
+  trustToast = el;
+}
+
+setUntrustedDiagnosticsHandler(showTrustToast);
+
 // Diagnostics squiggles are appended per-EditorState: fresh states created on
 // tab open/switch lack the extension, so re-apply whenever tabs change. The
 // marker facet detects states that already carry it.
@@ -1184,6 +1426,7 @@ ensureDiagnosticsExtension();
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
   if (!isTestAutoRunEnabled(root)) return;
+  if (!isWorkspaceTrusted(root)) return; // never auto-run a repo's test command for an untrusted folder
   const test = testAutomation(automations);
   if (!test) return;
   void turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
@@ -1191,9 +1434,33 @@ onTurnClosed((root, turn) => {
     .catch(() => {});
 });
 
+// Runner ids (test:<root>:<turnId>) cancelled by a rollback — consulted by
+// onRunnerDone so the kill triggered below doesn't get misrecorded as that
+// turn's pass/fail once the runner reports the (killed) job done.
+const cancelledTestRunnerIds = new Set<string>();
+
+// Cancel any in-flight turn-test run for `root` whose turn is >= `minTurnId`
+// (the rolled-back turn and every newer one — a rollback is about to replace
+// their code state). Only ids that runner_cancel ACTUALLY killed get added to
+// the suppression set: adding an id unconditionally would poison a turn whose
+// test hasn't started yet (e.g. a still-open newer turn, or when the backend
+// then rejects the rollback) and silently drop that turn's future legitimate
+// pass/fail once it runs for real.
+async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<void> {
+  const ids = getTurns(root)
+    .filter((t) => t.id >= minTurnId)
+    .map((t) => `test:${root}:${t.id}`);
+  for (const id of await suppressibleCancelledIds(ids, runnerCancel)) {
+    cancelledTestRunnerIds.add(id);
+  }
+}
+
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
 void onRunnerDone((p) => {
   if (!p.id.startsWith("test:")) return;
+  // A rollback-driven cancel must not stamp a stale pass/fail for the turn
+  // whose code state it just replaced.
+  if (cancelledTestRunnerIds.delete(p.id)) return;
   const rest = p.id.slice("test:".length);
   const sep = rest.lastIndexOf(":");
   if (sep <= 0) return;
@@ -1216,7 +1483,7 @@ window.addEventListener("sutra:goto", (e) => {
   void editor
     .openFile(path, detail.line)
     .then(() => tree.setActive(path))
-    .catch(() => {});
+    .catch((err) => console.error(`[sutra:goto] failed to open ${path}`, err));
 });
 
 // Panel hosts (index.html) receive the module-owned singleton panel roots.
@@ -1256,17 +1523,27 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
+let lastWhisperSig = "";
 function renderWhisperBar(): void {
+  const dirty = editor.tabs.some((tab) => tab.dirty);
+  const activePath = editor.active?.path ?? null;
+  const agentCopy = whisperText(agentStatus, activePath);
+  const lnText = editor.active ? `ln ${editor.getSelection().line}` : "";
+  // Called every 1.5 s by the agent poll — skip the DOM teardown/rebuild unless
+  // something visible actually changed. diag chip + aggregate strip are singleton
+  // nodes mutated in place elsewhere, so their live textContent is the source of truth.
+  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
+  if (sig === lastWhisperSig) return;
+  lastWhisperSig = sig;
+
   whisperBar.innerHTML = "";
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
-  saveState.className = "whisper-save" + (editor.tabs.some((tab) => tab.dirty) ? " dirty" : "");
-  saveState.textContent = editor.tabs.some((tab) => tab.dirty) ? "unsaved changes" : "all changes saved";
+  saveState.className = "whisper-save" + (dirty ? " dirty" : "");
+  saveState.textContent = dirty ? "unsaved changes" : "all changes saved";
   left.append(saveState);
 
-  const activePath = editor.active?.path ?? null;
-  const agentCopy = whisperText(agentStatus, activePath);
   if (agentCopy) {
     const agent = document.createElement("button");
     agent.className = "whisper-agent";
@@ -1280,10 +1557,7 @@ function renderWhisperBar(): void {
 
   const right = document.createElement("div");
   right.className = "whisper-right";
-  if (editor.active) {
-    const selection = editor.getSelection();
-    right.textContent = `ln ${selection.line}`;
-  }
+  if (lnText) right.textContent = lnText;
   // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
   whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
 }
@@ -1431,6 +1705,10 @@ const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onInfo: (m) => void alertNative(m),
 });
 btnMenu.innerHTML = icon("menu", 17);
+// Version pill → About panel (What's New / Tutorial / About). Label lazily once the runtime version resolves.
+const btnVersion = $("btn-version") as HTMLButtonElement;
+void getVersion().then((v) => (btnVersion.textContent = `v${v}`), () => undefined);
+btnVersion.onclick = () => openAbout();
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
@@ -1475,6 +1753,7 @@ btnMenu.onclick = () => {
       foot.className = "menu-foot";
       el.appendChild(foot);
       mk("settings…", "⌘,", () => openSettings());
+      mk("about sutra…", "", () => openAbout());
     },
     "menu-card",
   );
@@ -1514,7 +1793,7 @@ const actions = {
     $<HTMLInputElement>("browser-url").select();
   },
   recents: () => loadRecents(),
-  switchWorkspace: (path: string) => void openWorkspace(path),
+  switchWorkspace: (path: string) => void openWorkspace(path), // re-open only; trust is persisted, never granted by re-selecting a recents row
   addFolder: () => void openFolderDialog(),
 };
 
@@ -1529,7 +1808,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
 workspaceBar.setCurrentWorkspace(null);
 
 gitBar = createGitBar($("branch-whisper"));
-gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path);
+gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path); // worktree is its own root; re-open only, trust not auto-granted
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
 async function refreshGitState(root: string): Promise<void> {
@@ -1735,6 +2014,8 @@ const paletteCommands: Command[] = [
     search.focus();
   }, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
+  { id: "about", title: "About Sutra", run: () => openAbout() },
+  { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
   { id: "debug-start", title: "Debug: Start", run: () => void startDebugging(), shortcut: "F5" },
   { id: "debug-continue", title: "Debug: Continue", run: () => void debugSession.continue(), shortcut: "F5" },
   { id: "debug-pause", title: "Debug: Pause", run: () => void debugSession.pause(), shortcut: "F6" },
@@ -1777,6 +2058,11 @@ function openSettings(): void {
     version: getVersion(),
     shortcuts: shortcutEntries(),
   });
+}
+
+// Opens the About panel (version pill, app menu, palette). Resolves the runtime version first.
+function openAbout(tab: AboutTab = "What's New"): void {
+  void getVersion().then((v) => openAboutModal(v, tab), () => openAboutModal("", tab));
 }
 
 // ---- quit guard ----
@@ -1823,3 +2109,29 @@ applySettings(settings);
 editor.renderAllTabs();
 renderWhisperBar();
 setTerminal(drawerState.open);
+
+// Reopen the most-recently used folder so a relaunch (incl. after an app update,
+// which preserves localStorage) resumes where the user left off instead of a
+// blank window. Skip silently if the folder was moved/deleted since last run.
+void (async function bootOpen(): Promise<void> {
+  // One-shot on upgrade: seed the trusted set from folders already in recents so
+  // workspaces the user opened deliberately before the trust gate existed are not
+  // re-gated. Must run before any open below, whose watcher can fire the diagnostics
+  // trust check. Idempotent after the first run (sutra.trustMigrated flag).
+  ensureTrustSeeded(loadRecents().map((r) => r.path));
+  // A path handed to Sutra at launch (CLI arg / Finder "Open With") wins over
+  // last-folder restore. Consume it once; on none, fall back to the last workspace.
+  const launch = await takeLaunchPath().catch(() => null);
+  if (launch) {
+    await routeOpenPath(launch.path, launch.isDir);
+    return;
+  }
+  const [last] = loadRecents();
+  if (!last) return; // first run — nothing to restore
+  try {
+    await listDir(last.path); // cheap existence/readability probe
+  } catch {
+    return; // folder gone or unreadable — stay on the blank state
+  }
+  await openWorkspace(last.path);
+})();

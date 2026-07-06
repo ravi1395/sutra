@@ -35,11 +35,16 @@ import {
   filterWorkspaceTabs,
   formatAge,
   pathBelongsToRoot,
+  parentDir,
+  resolveOpenPath,
   pruneWorkspaceSession,
   serializeWorkspaceSession,
   sessionFromTabs,
   upsertRecent,
   workspaceMenuModel,
+  addTrust,
+  pathIsTrusted,
+  seedTrusted,
   type RecentWorkspace,
 } from "../src/workspace";
 import {
@@ -118,6 +123,31 @@ test("upsertRecent dedupes by normalized path and moves to front", () => {
   assert.equal(next.length, 2); // no duplicate row
   assert.equal(next[0].openedAt, 9);
   assert.equal(next[0].name, "b");
+});
+
+test("pathIsTrusted matches the exact folder, normalized, not subtrees or siblings", () => {
+  const list = ["/home/u/repo", "/other"];
+  assert.equal(pathIsTrusted(list, "/home/u/repo"), true);
+  assert.equal(pathIsTrusted(list, "/home/u/repo/"), true); // trailing slash normalizes
+  assert.equal(pathIsTrusted(list, "/home/u/repo/src"), false); // subtree is NOT trusted
+  assert.equal(pathIsTrusted(list, "/home/u/repo-evil"), false); // prefix sibling is NOT trusted
+  assert.equal(pathIsTrusted(list, "/home/u"), false); // parent is NOT trusted
+  assert.equal(pathIsTrusted([], "/home/u/repo"), false);
+});
+
+test("addTrust appends a normalized root and is idempotent on duplicates", () => {
+  const once = addTrust([], "/home/u/repo/");
+  assert.deepEqual(once, ["/home/u/repo"]); // normalized (no trailing slash)
+  const twice = addTrust(once, "/home/u/repo"); // already present
+  assert.deepEqual(twice, ["/home/u/repo"]); // no duplicate row
+  const added = addTrust(once, "/home/u/other");
+  assert.deepEqual(added, ["/home/u/repo", "/home/u/other"]);
+});
+
+test("seedTrusted unions existing trust with normalized recents, deduped", () => {
+  const seeded = seedTrusted(["/keep"], ["/a/", "/keep", "/b"]);
+  assert.deepEqual(seeded, ["/keep", "/a", "/b"]); // existing first, recents normalized + deduped
+  assert.deepEqual(seedTrusted([], []), []);
 });
 
 test("upsertRecent caps the list length", () => {
@@ -358,6 +388,33 @@ test("main uses workspace agent tracking instead of open-tab mtime polling", () 
   assert.match(mainTs, /diffViewer\.renderStatus/);
 });
 
+test("rollback cancels in-flight turn tests before restoring, and onRunnerDone suppresses their record (W3.7)", () => {
+  // main.ts has no exports (pure bootstrap entrypoint) — like the agent-tracking
+  // check above, this asserts against the source text rather than importing it
+  // (importing main.ts executes the whole app bootstrap, which needs a real DOM).
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  // A rollback must cancel this root's suspect turn tests (the rolled-back
+  // turn and any newer one — their code state is about to be replaced) BEFORE
+  // turnRollback runs, and mark them so onRunnerDone doesn't stamp a stale
+  // pass/fail once the killed runner reports back.
+  assert.match(mainTs, /runnerCancel/);
+  assert.match(mainTs, /cancelledTestRunnerIds/);
+  const onApplyIdx = mainTs.indexOf("onApply: async (paths)");
+  const cancelIdx = mainTs.indexOf("cancelTurnTestsFrom", onApplyIdx);
+  const rollbackIdx = mainTs.indexOf("await turnRollback(", onApplyIdx);
+  assert.ok(onApplyIdx >= 0 && cancelIdx >= 0 && rollbackIdx >= 0, "onApply/cancel/rollback all present");
+  assert.ok(cancelIdx < rollbackIdx, "cancellation must happen before turnRollback, not after");
+
+  // onRunnerDone must consult the cancelled set and skip turnTestRecord for a
+  // cancelled id (a kill triggered by rollback must not record a stale result).
+  const onRunnerDoneIdx = mainTs.indexOf("void onRunnerDone(");
+  const deleteCheckIdx = mainTs.indexOf("cancelledTestRunnerIds.delete(p.id)", onRunnerDoneIdx);
+  const recordIdx = mainTs.indexOf("turnTestRecord(root, turnId", onRunnerDoneIdx);
+  assert.ok(onRunnerDoneIdx >= 0 && deleteCheckIdx >= 0 && recordIdx >= 0, "onRunnerDone/cancelled-check/record all present");
+  assert.ok(deleteCheckIdx < recordIdx, "cancelled-id check must gate the record, not follow it");
+});
+
 test("settings modal token sweep uses shared menu heads and tokenized controls", () => {
   const modalTs = readFileSync("src/settings-modal.ts", "utf8");
   const css = readFileSync("src/styles.css", "utf8");
@@ -463,5 +520,40 @@ test("terminal close collapses right group and promotes right-only groups left",
   assert.deepEqual(collapseAfterClose({ left: [], right: [two] }), {
     left: [two],
     right: [],
+  });
+});
+
+// ---- resolveOpenPath (smart open rule for OS/CLI paths) ----
+
+test("parentDir returns the parent for both separators", () => {
+  assert.equal(parentDir("/a/b/c.ts"), "/a/b");
+  assert.equal(parentDir("C:\\a\\b\\c.ts"), "C:\\a\\b");
+  assert.equal(parentDir("bare"), "bare"); // no separator → unchanged
+});
+
+test("resolveOpenPath: a folder replaces the workspace root", () => {
+  assert.deepEqual(resolveOpenPath("/proj", true, "/other"), { kind: "workspace", dir: "/proj" });
+});
+
+test("resolveOpenPath: a file inside the current root opens as a tab", () => {
+  assert.deepEqual(resolveOpenPath("/proj/src/a.ts", false, "/proj"), {
+    kind: "fileInRoot",
+    file: "/proj/src/a.ts",
+  });
+});
+
+test("resolveOpenPath: a file outside the current root opens its parent + the file", () => {
+  assert.deepEqual(resolveOpenPath("/elsewhere/x.ts", false, "/proj"), {
+    kind: "fileWithParent",
+    parent: "/elsewhere",
+    file: "/elsewhere/x.ts",
+  });
+});
+
+test("resolveOpenPath: a file with no current root opens its parent + the file", () => {
+  assert.deepEqual(resolveOpenPath("/a/b/x.ts", false, null), {
+    kind: "fileWithParent",
+    parent: "/a/b",
+    file: "/a/b/x.ts",
   });
 });

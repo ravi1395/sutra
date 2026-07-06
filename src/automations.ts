@@ -102,6 +102,28 @@ export function validateAutomation(a: Automation): string | null {
   return null;
 }
 
+/** Outcome of preparing an agent-supplied automation: the entry to persist, or an error. */
+export type PrepareCreateResult = { automation: Automation } | { error: string };
+
+/** Validate agent-supplied fields (MCP create_automation) and build the entry to persist.
+ *  Pure — mirrors the manual drawer's checks: name (required/short/unique), command required,
+ *  and kind-specific rules. Only known kinds are honored; anything else falls back to shell. */
+export function prepareCreateAutomation(
+  list: readonly Automation[],
+  params: { name?: string; command?: string; kind?: string },
+): PrepareCreateResult {
+  const name = (params.name ?? "").trim();
+  const command = (params.command ?? "").trim();
+  const nameErr = validateName(name, list);
+  const cmdErr = validateCommand(command);
+  if (nameErr || cmdErr) return { error: (nameErr ?? cmdErr) as string };
+  const a = makeAutomation(name, command);
+  if (params.kind === "shell" || params.kind === "diagnostics" || params.kind === "test") a.kind = params.kind;
+  const kindErr = validateAutomation(a);
+  if (kindErr) return { error: kindErr };
+  return { automation: a };
+}
+
 /** Tolerant parse: bad JSON, wrong shape, or junk entries yield a clean list (never throws). */
 export function parseAutomationsFile(raw: string): Automation[] {
   try {

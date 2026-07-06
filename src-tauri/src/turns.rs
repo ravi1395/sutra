@@ -15,6 +15,12 @@ use std::sync::{LazyLock, Mutex};
 use xxhash_rust::xxh3::xxh3_64;
 
 const QUIET_MS: u64 = 10_000;
+/// Fallback close deadline for a hook-covered (Claude) turn whose Stop hook
+/// never fires — SIGKILL, terminal closed, crash. Without it the turn stays
+/// open forever and blocks rollback for the whole root. Long enough to never
+/// pre-empt a live agent between tool calls; the hook still closes normal turns
+/// in milliseconds.
+const HOOK_FALLBACK_MS: u64 = 15 * 60 * 1000;
 const MAX_SNAPSHOT_BYTES: usize = 10 * 1024 * 1024;
 const GC_MAX_TURNS: usize = 50;
 const GC_MAX_BLOB_BYTES: u64 = 200 * 1024 * 1024;
@@ -183,22 +189,27 @@ impl TurnEngine {
     /// Claude hook installed, else it stays open forever and blocks rollback
     /// for the whole root.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Turn> {
+        if self.open.is_none() {
+            return vec![];
+        }
+        let Some(last_change) = self.last_change_at else {
+            return vec![];
+        };
         let hook_covers_open_turn = self.hook_installed
             && self
                 .open
                 .as_ref()
                 .map(|turn| turn.agent_kind == "claude" || turn.agent_kind.is_empty())
                 .unwrap_or(true);
-        if hook_covers_open_turn {
-            return vec![];
-        }
-        let Some(last_change) = self.last_change_at else {
-            return vec![];
+        // A hook-covered turn normally closes only on its Stop signal, so it
+        // uses the long fallback deadline (fires only if the hook never does);
+        // a codex/unknown turn has no hook and keeps the short quiet window.
+        let threshold = if hook_covers_open_turn {
+            HOOK_FALLBACK_MS
+        } else {
+            self.quiet_ms
         };
-        if self.open.is_none() {
-            return vec![];
-        }
-        if now_ms.saturating_sub(last_change) <= self.quiet_ms {
+        if now_ms.saturating_sub(last_change) <= threshold {
             return vec![];
         }
         match self.close_open(now_ms, "quiet") {
@@ -239,32 +250,66 @@ pub struct BlobStore {
     dir: PathBuf,
 }
 
+/// Monotonic per-call counter for BlobStore temp filenames (see `put`).
+static BLOB_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl BlobStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         BlobStore { dir: dir.into() }
     }
 
     /// Store `bytes`, returning its content hash. Skips the write (dedup) when
-    /// an object with the same hash already exists.
+    /// a HEALTHY object with the same hash already exists — verified by
+    /// re-hashing it, not just `path.exists()`, so a truncated object left by a
+    /// crash mid-write (see `get`) gets repaired rather than trusted forever.
     pub fn put(&self, bytes: &[u8]) -> Option<String> {
         if bytes.len() > MAX_SNAPSHOT_BYTES {
             return None;
         }
         let hash = hex_hash(bytes);
         let path = self.object_path(&hash);
-        if !path.exists() {
+        let needs_write = match fs::read(&path) {
+            Ok(existing) => hex_hash(&existing) != hash,
+            Err(_) => true,
+        };
+        if needs_write {
             fs::create_dir_all(&self.dir).ok()?;
-            fs::write(&path, bytes).ok()?;
+            // Write to a temp file then rename: a direct `fs::write` to the
+            // final path is not atomic, so a crash/power-loss mid-write would
+            // leave a truncated object that `path.exists()` alone would trust
+            // forever. Rename within one dir is atomic on macOS/Linux. The temp
+            // name carries a per-call sequence (not just pid) so two concurrent
+            // puts of identical content — safe today only because callers hold
+            // the global ROOTS lock — can never race on the same temp path.
+            let seq = BLOB_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = self
+                .dir
+                .join(format!(".tmp-{hash}-{}-{seq}", std::process::id()));
+            fs::write(&tmp, bytes).ok()?;
+            fs::rename(&tmp, &path).ok()?;
         }
         Some(hash)
     }
 
+    /// Read and verify an object: a hash mismatch (truncated/corrupt write)
+    /// returns `None` rather than the bad bytes, so callers (rollback restore,
+    /// the pre-check in `turn_rollback`) treat it as missing instead of
+    /// silently writing corrupt content into a working file.
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
-        fs::read(self.object_path(hash)).ok()
+        let bytes = fs::read(self.object_path(hash)).ok()?;
+        (hex_hash(&bytes) == hash).then_some(bytes)
     }
 
     fn object_path(&self, hash: &str) -> PathBuf {
         self.dir.join(format!("{hash}.bin"))
+    }
+
+    /// On-disk byte length of the object for `hash` (0 if absent). Feeds the
+    /// GC byte-cap accounting without reading the blob contents.
+    fn object_len(&self, hash: &str) -> u64 {
+        fs::metadata(self.object_path(hash))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
     }
 
     fn total_bytes(&self) -> u64 {
@@ -316,6 +361,8 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
     }
     for path in touched_after {
         let mut last_after_leq_n: Option<Option<String>> = None;
+        let mut contrib_unsafe = false;
+        let mut contrib_snapshotted = true;
         let mut earliest_before: Option<Option<String>> = None;
         let mut earliest_unsafe = false;
         let mut earliest_snapshotted = true;
@@ -331,7 +378,12 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                 if turn.id <= n {
                     // Iterating in ascending id order, so the last assignment
                     // wins → the latest turn id <= n that touched this path.
+                    // Track ITS flags too (not just the earliest turn's) — a
+                    // later turn's after_hash=None can come from the >10MB
+                    // close-time cap, not from genuine deletion.
                     last_after_leq_n = Some(file.after_hash.clone());
+                    contrib_unsafe = file.unsafe_before;
+                    contrib_snapshotted = file.snapshotted;
                 }
                 if turn.id < earliest_id {
                     earliest_id = turn.id;
@@ -341,13 +393,24 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                 }
             }
         }
+        // Whether last_after_leq_n was ever assigned — determines which flags
+        // gate the delete guard below (contributing turn vs earliest-fallback).
+        let contributing_from_leq = last_after_leq_n.is_some();
         let restore_to = last_after_leq_n.unwrap_or_else(|| earliest_before.unwrap_or(None));
+        let (guard_unsafe, guard_snapshotted) = if contributing_from_leq {
+            (contrib_unsafe, contrib_snapshotted)
+        } else {
+            (earliest_unsafe, earliest_snapshotted)
+        };
         // Never plan a delete for a file whose pre-edit content was unrecoverable
         // (unsafe_before) or never snapshotted (>10MB cap): before_hash=None there
         // means "original unknown", not "didn't exist", so deleting would be silent
         // data loss. Exclude such files from rollback entirely (the frontend
-        // surfaces them via TurnFile.unsafe_before / !snapshotted).
-        if restore_to.is_none() && (earliest_unsafe || !earliest_snapshotted) {
+        // surfaces them via TurnFile.unsafe_before / !snapshotted). Guard uses the
+        // CONTRIBUTING turn's flags (the one that produced restore_to), not the
+        // earliest turn's — a live oversized file grown past the cap in a later
+        // turn must not be deleted just because its earliest turn was safe.
+        if restore_to.is_none() && (guard_unsafe || !guard_snapshotted) {
             continue;
         }
         plan.insert(path, restore_to);
@@ -477,6 +540,11 @@ fn settings_has_marker(settings: &serde_json::Value) -> bool {
 struct RootState {
     engine: TurnEngine,
     signal_offset: u64,
+    // Unix-second floor of when this RootState was created. Signals whose ts
+    // predates it are stale history (the append-only signal file is never
+    // truncated) and are ignored, so restarting mid-turn can't replay
+    // yesterday's Stop and instant-close a freshly reopened turn (W4.4).
+    created_second: u64,
     // Fingerprint (before_hash, unsafe_before) of each path in the last observed
     // pending set. Feeds delta observation so a closed turn's still-pending files
     // don't re-open a turn every poll and the quiet window can elapse.
@@ -555,22 +623,10 @@ fn rewrite_manifest(root: &str, turns: &[Turn]) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-/// GC the manifest + blob store for `root`: past the turn-count or blob-size
-/// cap, drop the oldest turns and any blob no remaining turn references.
-fn gc_if_needed(root: &str) {
-    let mut turns = load_manifest(root);
-    let store = blob_store(root);
-    let over_count = turns.len() > GC_MAX_TURNS;
-    let over_size = store.total_bytes() > GC_MAX_BLOB_BYTES;
-    if !over_count && !over_size {
-        return;
-    }
-    if over_count {
-        let drop_n = turns.len() - GC_MAX_TURNS;
-        turns.drain(0..drop_n);
-    }
+/// Hashes any turn in `turns` references (before or after), deduped.
+fn keep_hashes(turns: &[Turn]) -> std::collections::HashSet<String> {
     let mut keep = std::collections::HashSet::new();
-    for turn in &turns {
+    for turn in turns {
         for file in &turn.files {
             if let Some(h) = &file.before_hash {
                 keep.insert(h.clone());
@@ -580,7 +636,46 @@ fn gc_if_needed(root: &str) {
             }
         }
     }
-    store.gc(&keep);
+    keep
+}
+
+/// Total on-disk bytes of the distinct blobs `turns` reference (content
+/// addressing → each shared blob counted once).
+fn referenced_bytes(store: &BlobStore, turns: &[Turn]) -> u64 {
+    keep_hashes(turns)
+        .iter()
+        .map(|h| store.object_len(h))
+        .sum()
+}
+
+/// GC the manifest + blob store for `root`: past the turn-count or blob-size
+/// cap, drop the oldest turns and any blob no remaining turn references.
+fn gc_if_needed(root: &str) {
+    gc_with_caps(root, GC_MAX_TURNS, GC_MAX_BLOB_BYTES);
+}
+
+fn gc_with_caps(root: &str, max_turns: usize, max_bytes: u64) {
+    let mut turns = load_manifest(root);
+    let store = blob_store(root);
+    let over_count = turns.len() > max_turns;
+    let over_size = store.total_bytes() > max_bytes;
+    if !over_count && !over_size {
+        return;
+    }
+    if over_count {
+        let drop_n = turns.len() - max_turns;
+        turns.drain(0..drop_n);
+    }
+    // Enforce the byte cap by dropping oldest turns until the REFERENCED-blob
+    // byte total fits. Orphan removal alone frees nothing when the count is
+    // under cap (the keep-set still covers every referenced blob), so the cap
+    // was previously never approached from above. Never drop the most recent
+    // turn — rollback of the last turn must stay possible — so the cap is soft:
+    // a single huge turn may exceed it.
+    while turns.len() > 1 && referenced_bytes(&store, &turns) > max_bytes {
+        turns.remove(0);
+    }
+    store.gc(&keep_hashes(&turns));
     let _ = rewrite_manifest(root, &turns);
 }
 
@@ -593,13 +688,20 @@ fn gc_if_needed(root: &str) {
 pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
     let mut roots = ROOTS.lock().unwrap();
     let manifest_next_id = load_manifest(&root).last().map(|t| t.id + 1).unwrap_or(1);
+    let now_ms = now_millis();
+    // On first poll of a root, start reading the append-only signal file from
+    // its CURRENT end so stale history (e.g. yesterday's Stop line, since the
+    // file is never truncated) is never replayed against a turn that opens on
+    // this same poll after an app restart mid-turn (W4.4).
+    let initial_offset = fs::metadata(signal_path(&root))
+        .map(|m| m.len())
+        .unwrap_or(0);
     let state = roots.entry(root.clone()).or_insert_with(|| RootState {
         engine: TurnEngine::with_next_id(QUIET_MS, false, manifest_next_id),
-        signal_offset: 0,
+        signal_offset: initial_offset,
+        created_second: now_ms / 1000,
         last_pending: BTreeMap::new(),
     });
-
-    let now_ms = now_millis();
 
     // Refresh hook-installed each poll so the quiet-window heuristic is actually
     // suppressed once the Claude Stop hook is installed (engine is created with
@@ -632,12 +734,30 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
         state.signal_offset = 0; // file shrank/rotated — re-read from start
     }
     let new_bytes = &sig_text[state.signal_offset as usize..];
-    let new_text = String::from_utf8_lossy(new_bytes).into_owned();
-    state.signal_offset = sig_text.len() as u64;
+    // Consume only through the last newline: a torn tail (the hook appending
+    // while we read — the append isn't atomic vs the read) stays unconsumed and
+    // is re-read whole next poll, so a Stop signal split across two reads is
+    // never dropped. Complete-but-corrupt lines are still consumed here and
+    // skipped by parse_signals, so one bad line can't wedge the offset.
+    let consumed = new_bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let new_text = String::from_utf8_lossy(&new_bytes[..consumed]).into_owned();
+    state.signal_offset += consumed as u64;
     let signals = parse_signals(&new_text);
 
     let mut closed = vec![];
+    let created_second = state.created_second;
     for (agent, ts) in &signals {
+        // Belt-and-braces to the offset-init: ignore any signal whose ts
+        // predates this RootState's creation second (a file swapped/rewound
+        // under us). Second granularity matches the hook's `date +%s`, so a
+        // live signal written in the creation second is still honored.
+        if *ts < created_second {
+            continue;
+        }
         // Hook writes `date +%s` (seconds); engine time is ms — convert so
         // closed_at is comparable to opened_at.
         if let Some(turn) = state.engine.observe_signal(ts.saturating_mul(1000), agent) {
@@ -656,16 +776,34 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
         }
         for file in turn.files.iter_mut() {
             let full_path = Path::new(&root).join(&file.path);
-            match fs::read(&full_path).ok() {
-                Some(bytes) => {
-                    if bytes.len() > MAX_SNAPSHOT_BYTES {
+            // Match the read outcome exactly — collapsing every error to "None =
+            // deleted" (snapshotted stays true) let a later rollback TO this
+            // turn resolve restore_to=Some(None) and DELETE a file that still
+            // exists (W1.1's guard trusts snapshotted). Only NotFound is a real
+            // deletion; unreadable/unsnapshottable outcomes set snapshotted=false
+            // so resolve_restore excludes them (same None-conflation family as
+            // W1.1/W1.2).
+            match fs::read(&full_path) {
+                Ok(bytes) if bytes.len() > MAX_SNAPSHOT_BYTES => {
+                    file.snapshotted = false; // grown past the cap → can't snapshot
+                    file.after_hash = None;
+                }
+                Ok(bytes) => match store.put(&bytes) {
+                    Some(hash) => file.after_hash = Some(hash),
+                    None => {
+                        // Small file but the blob write failed → unsnapshottable,
+                        // not a deletion.
                         file.snapshotted = false;
                         file.after_hash = None;
-                    } else {
-                        file.after_hash = store.put(&bytes);
                     }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    file.after_hash = None; // genuine deletion; snapshotted stays true
                 }
-                None => {
+                Err(_) => {
+                    // Unreadable (EACCES, transient lock, IO error) — unknown
+                    // state, must not be treated as a deletion.
+                    file.snapshotted = false;
                     file.after_hash = None;
                 }
             }
@@ -751,13 +889,24 @@ pub fn turn_rollback(root: String, turn_id: u64, paths: Vec<String>) -> Result<R
     };
     for path in plan.keys() {
         let full_path = Path::new(&root).join(path);
-        let current = fs::read(&full_path).ok();
-        let before_hash = current.as_deref().and_then(|bytes| store.put(bytes));
+        // Distinguish "genuinely absent" (NotFound) from "unreadable" (other IO
+        // error) and "unsnapshottable" (put() returned None: >10MB or write
+        // error) — collapsing all three to snapshotted=true let a later
+        // rollback spanning this synthetic turn resolve_restore a delete for a
+        // file that actually exists (see W1.1's guard).
+        let (before_hash, snapshotted) = match fs::read(&full_path) {
+            Ok(bytes) => match store.put(&bytes) {
+                Some(hash) => (Some(hash), true),
+                None => (None, false), // oversized or blob-store write error
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, true), // genuinely absent
+            Err(_) => (None, false), // unreadable (permissions, IO error) — not absent
+        };
         pre_rollback.files.push(TurnFile {
             path: path.clone(),
             before_hash: before_hash.clone(),
             after_hash: before_hash,
-            snapshotted: true,
+            snapshotted,
             unsafe_before: false,
         });
     }
@@ -990,6 +1139,53 @@ mod tests {
         assert!(h.tick(60_000).is_empty());
     }
 
+    // W4.7: when only the byte cap is exceeded (turn count under cap), GC must
+    // drop oldest turns until the REFERENCED-blob byte total fits — orphan
+    // removal alone frees nothing. The newest turn's blobs stay intact.
+    #[test]
+    fn gc_byte_cap_drops_oldest_turns_until_referenced_bytes_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h1 = store.put(&vec![1u8; 100]).unwrap();
+        let h2 = store.put(&vec![2u8; 100]).unwrap();
+        let h3 = store.put(&vec![3u8; 100]).unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("a", None, Some(&h1))])).unwrap();
+        append_manifest(&root, &turn_fixture(2, vec![("b", None, Some(&h2))])).unwrap();
+        append_manifest(&root, &turn_fixture(3, vec![("c", None, Some(&h3))])).unwrap();
+
+        // Cap fits ~one 100-byte blob; count cap generous so only bytes drive it.
+        gc_with_caps(&root, 50, 150);
+
+        let turns = load_manifest(&root);
+        assert_eq!(
+            turns.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![3],
+            "oldest turns dropped until referenced bytes fit; newest retained"
+        );
+        assert!(store.get(&h3).is_some(), "newest turn's blob intact");
+        assert!(store.get(&h1).is_none(), "orphaned oldest blob removed");
+        assert!(store.get(&h2).is_none(), "orphaned oldest blob removed");
+    }
+
+    // W4.6: if a Claude Stop hook never fires (SIGKILL/terminal-closed/crash),
+    // the hook-covered turn must still close via a long fallback deadline so it
+    // doesn't wedge rollback for the whole root. Below the deadline the
+    // suppression is real; past it with no activity/signal the turn closes.
+    #[test]
+    fn hook_covered_turn_closes_after_fallback_deadline() {
+        let mut e = TurnEngine::new(10_000, true); // Claude hook installed
+        e.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
+        // Well past the 10s quiet window but inside the fallback: still open.
+        assert!(e.tick(60_000).is_empty());
+        assert!(e.tick(HOOK_FALLBACK_MS).is_empty());
+        // Past the fallback deadline with no activity/signal: closes.
+        let closed = e.tick(HOOK_FALLBACK_MS + 1);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].boundary_source, "quiet");
+        assert_eq!(closed[0].agent_kind, "claude");
+    }
+
     // A codex/unknown-kind turn has no Stop hook to close it — the quiet
     // window must still apply even when the Claude hook is installed, else
     // the turn stays open forever and blocks rollback for the whole root.
@@ -1024,6 +1220,25 @@ mod tests {
         assert_eq!(plan.get("b"), Some(&None));                    // b did not exist at end of turn1 → delete
     }
 
+    // W1.1: restore_to for a path comes from the LATEST turn id<=n that touched
+    // it (last_after_leq_n), but the never-delete guard must gate on that same
+    // CONTRIBUTING turn's flags — not the earliest turn's. turn1 edits big.bin
+    // while small (snapshotted=true); turn5 grows it past the 10MB cap
+    // (after_hash=None, snapshotted=false); turn7 touches it again. Rolling back
+    // to n=6 must not plan a delete for the still-live oversized file.
+    #[test]
+    fn restore_guard_uses_contributing_turns_flags_not_earliest() {
+        let t1 = turn_fixture(1, vec![("big.bin", Some("h0"), Some("h1"))]);
+        let mut t5 = turn_fixture(5, vec![("big.bin", Some("h1"), None)]);
+        t5.files[0].snapshotted = false; // grown past MAX_SNAPSHOT_BYTES at close
+        let t7 = turn_fixture(7, vec![("big.bin", None, Some("h7"))]);
+        let plan = resolve_restore(&[t1, t5, t7], 6);
+        assert!(
+            !plan.contains_key("big.bin"),
+            "must not plan a delete for a live oversized file"
+        );
+    }
+
     #[test]
     fn rolled_back_turns_excluded_from_resolution() {
         let mut t2 = turn_fixture(2, vec![("a", Some("h1"), Some("h2"))]);
@@ -1039,6 +1254,38 @@ mod tests {
         let h = store.put(b"hello").unwrap();
         assert_eq!(store.get(&h).unwrap(), b"hello");
         assert_eq!(store.put(b"hello").unwrap(), h); // content-addressed dedup
+    }
+
+    // W1.3: a truncated object left by a crash mid-write (non-atomic fs::write)
+    // must never be trusted as "already stored" — put() re-verifies the
+    // existing file's hash before dedup-skipping and repairs it if it doesn't
+    // match, rather than leaving the corruption in place forever.
+    #[test]
+    fn put_repairs_truncated_existing_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(tmp.path());
+        let full = b"the quick brown fox jumps over the lazy dog";
+        let hash = hex_hash(full);
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::write(store.object_path(&hash), b"truncated-garbage").unwrap();
+
+        let returned = store.put(full).unwrap();
+
+        assert_eq!(returned, hash);
+        assert_eq!(store.get(&hash).unwrap(), full);
+    }
+
+    // W1.3: get() must never hand back corrupt bytes — a hash mismatch (the
+    // on-disk object doesn't match its filename hash) is treated as missing,
+    // not restored into a working file.
+    #[test]
+    fn get_rejects_corrupt_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(tmp.path());
+        let hash = store.put(b"hello").unwrap();
+        fs::write(store.object_path(&hash), b"corrupted-not-hello").unwrap();
+
+        assert!(store.get(&hash).is_none());
     }
 
     #[test]
@@ -1205,6 +1452,7 @@ mod tests {
                 RootState {
                     engine,
                     signal_offset: 0,
+                    created_second: 0,
                     last_pending: BTreeMap::new(),
                 },
             );
@@ -1212,6 +1460,237 @@ mod tests {
         let result = turn_rollback(root.clone(), 1, vec!["a.rs".into()]);
         ROOTS.lock().unwrap().remove(&root); // clean the shared static
         assert!(result.is_err());
+    }
+
+    // W1.2: turn_rollback's synthetic pre-rollback turn must not hardcode
+    // snapshotted=true. A file that grew past MAX_SNAPSHOT_BYTES by the time of
+    // rollback can't have its "before" content captured — the synthetic entry
+    // must record snapshotted=false so a later rollback spanning it (via
+    // resolve_restore's W1.1 guard) never plans a delete for it.
+    #[test]
+    fn synthetic_rollback_turn_marks_oversized_current_file_unsnapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let path = "big.bin";
+
+        // Turn 1: a pre-existing small file (h0) edited by the agent (h1).
+        let store = blob_store(&root);
+        let h0 = store.put(b"before-content").unwrap();
+        let h1 = store.put(b"after-content").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![(path, Some(&h0), Some(&h1))])).unwrap();
+
+        // The file grows past the snapshot cap before the rollback is applied.
+        let big = vec![0u8; MAX_SNAPSHOT_BYTES + 1];
+        fs::write(dir.path().join(path), &big).unwrap();
+
+        let result = turn_rollback(root.clone(), 0, vec![path.to_string()]).unwrap();
+        assert_eq!(result.restored, vec![path.to_string()]);
+        assert!(result.failed.is_empty());
+
+        let turns = load_manifest(&root);
+        let synthetic = turns
+            .iter()
+            .find(|t| t.boundary_source == "rollback")
+            .expect("synthetic pre-rollback turn recorded");
+        let file = synthetic.files.iter().find(|f| f.path == path).unwrap();
+        assert!(
+            !file.snapshotted,
+            "oversized current file must not be marked snapshotted"
+        );
+
+        // A later rollback spanning the synthetic turn must not plan a delete.
+        let plan = resolve_restore(&turns, 0);
+        assert!(
+            !plan.contains_key(path),
+            "unsnapshotted synthetic entry must not be deletable"
+        );
+    }
+
+    // W4.5: at close-time finalize, a small file whose blob write fails must be
+    // recorded snapshotted=false (unsnapshottable), NOT after=None with
+    // snapshotted=true — otherwise a later rollback spanning this turn plans a
+    // delete of a live file. Force put() to fail by making the objects path a
+    // file so create_dir_all(objects) errors.
+    #[test]
+    fn close_time_put_failure_marks_small_file_unsnapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // Real turns dir, but its `objects` entry is a FILE → blob puts fail.
+        fs::create_dir_all(turns_dir(&root)).unwrap();
+        fs::write(turns_dir(&root).join("objects"), b"not a dir").unwrap();
+
+        // Small target file on disk at close time.
+        let path = "f.txt";
+        fs::write(dir.path().join(path), b"small-after").unwrap();
+
+        // Open a Claude turn touching f.txt (before captured as small/snapshotted).
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(
+                1_000,
+                &[(path.into(), Some(b"small-before".to_vec()), false)],
+                "claude",
+            );
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0,
+                    created_second: 0,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), "{\"agent\":\"claude\",\"ts\":1}\n").unwrap();
+
+        let poll = turn_poll(root.clone()).unwrap();
+        ROOTS.lock().unwrap().remove(&root);
+        assert_eq!(poll.closed.len(), 1, "signal closed the turn");
+
+        let turns = load_manifest(&root);
+        let closed = turns.iter().find(|t| t.boundary_source == "hook").unwrap();
+        let file = closed.files.iter().find(|f| f.path == path).unwrap();
+        assert!(
+            !file.snapshotted,
+            "blob-put failure on a small file must record snapshotted=false"
+        );
+        assert!(file.after_hash.is_none());
+
+        // A later turn also touches f.txt; rolling back TO the failed turn must
+        // not plan a delete of the still-live file (W1.1 guard, now meaningful
+        // for close-time errors).
+        let mut all = turns.clone();
+        all.push(turn_fixture(closed.id + 5, vec![(path, None, Some("hlater"))]));
+        let plan = resolve_restore(&all, closed.id);
+        assert!(
+            !plan.contains_key(path),
+            "unsnapshottable close-time file must not be deletable on rollback"
+        );
+    }
+
+    // W4.4: the append-only signal file is never truncated, so a restart
+    // mid-turn must not replay yesterday's Stop line and instant-close a turn.
+    // A signal whose ts predates the RootState's creation second is ignored;
+    // a live signal (ts at/after creation) still closes the open turn.
+    #[test]
+    fn stale_signal_does_not_close_a_reopened_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // A stale Stop line (ts:5, i.e. ~1970) already sits in the signal file.
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), "{\"agent\":\"claude\",\"ts\":5}\n").unwrap();
+
+        // A fresh RootState created "now" with an open Claude turn, its
+        // signal_offset already at EOF (as a real first poll would set it) and
+        // created_second stamped to now.
+        let now_s = now_millis() / 1000;
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(now_s * 1000, &[("a.rs".into(), None, false)], "claude");
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0, // force a re-read of the stale line this poll
+                    created_second: now_s,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+
+        let first = turn_poll(root.clone()).unwrap();
+        assert!(
+            first.closed.is_empty(),
+            "stale (pre-creation) signal must not close the open turn"
+        );
+        assert!(
+            ROOTS.lock().unwrap().get(&root).unwrap().engine.open.is_some(),
+            "turn still open after a stale signal"
+        );
+
+        // A live Stop appended after creation still closes the turn.
+        let live_ts = now_s + 1;
+        {
+            use std::io::Write as _;
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(signal_path(&root))
+                .unwrap();
+            writeln!(f, "{{\"agent\":\"claude\",\"ts\":{live_ts}}}").unwrap();
+        }
+        let second = turn_poll(root.clone()).unwrap();
+        assert_eq!(second.closed.len(), 1, "live signal still closes the turn");
+        ROOTS.lock().unwrap().remove(&root);
+    }
+
+    // W4.3: a torn tail line (hook appending while the poll reads — the append
+    // is not atomic vs the read) must not advance signal_offset past the
+    // partial bytes, or the Stop signal split across two reads is lost and the
+    // claude turn stays open forever. The offset lands on the last newline
+    // boundary; the partial line is re-read whole once completed.
+    #[test]
+    fn torn_signal_tail_is_recovered_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        // Install the hook so the quiet-window fallback stays suppressed and
+        // only signals close the (Claude) turn during this test.
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // Seed an open Claude turn with signal_offset at 0.
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(1_000, &[("a.rs".into(), None, false)], "claude");
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0,
+                    created_second: 0,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+
+        let sig1 = "{\"agent\":\"claude\",\"ts\":5}\n";
+        let sig2_head = "{\"agent\":\"claude\",\"ts\":99"; // torn: no newline yet
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), format!("{sig1}{sig2_head}")).unwrap();
+
+        let first = turn_poll(root.clone()).unwrap();
+        assert_eq!(first.closed.len(), 1, "sig1 closes the open turn");
+        assert_eq!(
+            ROOTS.lock().unwrap().get(&root).unwrap().signal_offset,
+            sig1.len() as u64,
+            "offset stops at the newline boundary, leaving the torn tail unconsumed"
+        );
+
+        // Reopen a turn, then complete the torn line; poll must now deliver sig2.
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            roots
+                .get_mut(&root)
+                .unwrap()
+                .engine
+                .observe_changes(1_000, &[("b.rs".into(), None, false)], "claude");
+        }
+        fs::write(signal_path(&root), format!("{sig1}{sig2_head}}}\n")).unwrap();
+
+        let second = turn_poll(root.clone()).unwrap();
+        assert_eq!(second.closed.len(), 1, "completed sig2 now delivered, not lost");
+        assert_eq!(
+            ROOTS.lock().unwrap().get(&root).unwrap().signal_offset,
+            (sig1.len() + sig2_head.len() + 2) as u64,
+            "offset now at EOF"
+        );
+        ROOTS.lock().unwrap().remove(&root);
     }
 
     // M2: merge_stop_hook returns Err (not panic) on well-formed-but-wrong-shape JSON.

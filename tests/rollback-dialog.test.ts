@@ -84,11 +84,17 @@ class FakeElement {
   onmousedown: ((e: { target: unknown }) => void) | null = null;
   children: FakeElement[] = [];
   removed = false;
+  tabIndex = 0;
+  focused = false;
   private text = "";
   private listeners = new Map<string, (e?: unknown) => void>();
 
   constructor(tagName: string) {
     this.tagName = tagName;
+  }
+
+  focus(): void {
+    this.focused = true;
   }
 
   get textContent(): string {
@@ -160,6 +166,24 @@ function setupDom() {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+test("openRollbackDialog: dialog takes focus on open so keystrokes don't reach the editor (W2.3)", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    const onApply = async (paths: string[]): Promise<RollbackResult> => ({ restored: paths, failed: [] });
+    const getDiskHashes = async () => ({ "a.ts": "h1" });
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    const overlay = body.children[body.children.length - 1];
+    const dialog = findByClass(overlay, "rollback-dialog")!;
+    assert.equal(dialog.tabIndex, -1, "dialog must be script-focusable");
+    assert.equal(dialog.focused, true, "dialog must grab focus on open to contain keystrokes");
+    await flush(); // drain the row-resolution chain before tearing down the fake DOM
+    await flush();
+  } finally {
+    restore();
+  }
+});
+
 test("openRollbackDialog: Apply stays disabled while rows load, enables once clean rows resolve", async () => {
   const { body, restore } = setupDom();
   try {
@@ -216,6 +240,40 @@ test("openRollbackDialog: dirty editor buffer blocks Apply (tab paths are absolu
     assert.equal(banner.style.display, "", "dirty banner must be visible");
   } finally {
     setRollbackEditor({ getOpenTabs: () => [] } as unknown as EditorManager);
+    restore();
+  }
+});
+
+// W2.4: refreshGuard's else branch used to enable Apply unconditionally once
+// rows loaded and nothing was dirty — with zero checked paths (common: every
+// row defaults unchecked because human-touched/unsnapshotted) Apply calling
+// onApply([]) restores nothing but still reports success and closes.
+test("openRollbackDialog: Apply disabled with zero checked paths; toggles with checkbox", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "hDIVERGED" }); // human-touched → unchecked by default
+    const onApply = async (paths: string[]): Promise<RollbackResult> => ({ restored: paths, failed: [] });
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    const row = findByClass(overlay, "rollback-file-row")!;
+    const checkbox = row.children.find((c) => c.tagName === "input")!;
+
+    assert.equal(checkbox.checked, false, "human-touched row starts unchecked by default");
+    assert.equal(applyBtn.disabled, true, "Apply must not be clickable with zero checked paths");
+
+    checkbox.checked = true;
+    checkbox.onchange?.();
+    assert.equal(applyBtn.disabled, false, "checking a row enables Apply");
+
+    checkbox.checked = false;
+    checkbox.onchange?.();
+    assert.equal(applyBtn.disabled, true, "unchecking back to zero disables Apply again");
+  } finally {
     restore();
   }
 });
@@ -277,6 +335,111 @@ test("openRollbackDialog: rolling back the newest turn reverts that turn's own f
     applyBtn.onclick?.();
     await flush();
     assert.deepEqual(applied, ["foo.rs"], "Apply must revert the clicked turn's own file");
+  } finally {
+    restore();
+  }
+});
+
+// W2.2: rows are resolved once at open; the workspace (and the checklist's
+// underlying disk state) can change while the dialog sits open. Apply must
+// re-resolve and refuse to fire onApply against stale rows.
+test("openRollbackDialog: apply revalidates rows — drift on a checked path blocks apply", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    let diskHash = "h2"; // matches recorded after-hash at open → clean, checked
+    const getDiskHashes = async () => ({ "a.ts": diskHash });
+    let applyCalled = false;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applyCalled = true;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    assert.equal(applyBtn.disabled, false);
+
+    // Workspace changes underneath the still-open dialog (e.g. an agent turn
+    // closes mid-review): a.ts now diverges from what the checklist showed.
+    diskHash = "hDRIFTED";
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(applyCalled, false, "onApply must not fire against drifted rows");
+    const failuresEl = findByClass(overlay, "rollback-failures")!;
+    assert.match(failuresEl.textContent, /changed/i);
+  } finally {
+    restore();
+  }
+});
+
+// W2.3: the dirty-buffer guard only re-runs on row-load and checkbox change,
+// not at click time. The dialog is a DOM overlay that never takes focus, so
+// keystrokes still land in the editor behind it — a checked path can go dirty
+// after load with no checkbox event to trigger refreshGuard.
+test("openRollbackDialog: apply re-checks the dirty guard — a path gone dirty after load blocks apply", async () => {
+  const { body, restore } = setupDom();
+  try {
+    let tabs: { path: string; name: string; active: boolean; dirty: boolean }[] = [
+      { path: "/r/a.ts", name: "a.ts", active: true, dirty: false },
+    ];
+    setRollbackEditor({ getOpenTabs: () => tabs } as unknown as EditorManager);
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "h2" }); // clean → checked by default
+    let applyCalled = false;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applyCalled = true;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    assert.equal(applyBtn.disabled, false, "clean checked row: Apply starts enabled");
+
+    // A keystroke lands in the unfocused editor behind the dialog — no
+    // checkbox event fires, so refreshGuard never re-runs on its own.
+    tabs = [{ path: "/r/a.ts", name: "a.ts", active: true, dirty: true }];
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(applyCalled, false, "apply must not fire once the checked path went dirty");
+    const banner = findByClass(overlay, "rollback-dirty-banner")!;
+    assert.equal(banner.style.display, "", "dirty banner must show once apply re-checks");
+  } finally {
+    setRollbackEditor({ getOpenTabs: () => [] } as unknown as EditorManager);
+    restore();
+  }
+});
+
+test("openRollbackDialog: apply proceeds when re-resolved rows are unchanged", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "h2" }); // stable across both resolves
+    let applied: string[] | null = null;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applied = paths;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.deepEqual(applied, ["a.ts"]);
   } finally {
     restore();
   }

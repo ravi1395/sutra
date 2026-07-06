@@ -93,8 +93,12 @@ fn debounce_events(
             .unwrap_or(WATCH_DEBOUNCE);
         match event_rx.recv_timeout(timeout) {
             Ok(Ok(event)) => {
-                pending_since.get_or_insert_with(Instant::now);
-                pending.extend(event.paths);
+                // Drop build/dep/.git-internal churn before it reaches the
+                // batch, so pure-noise activity never schedules an emit.
+                pending.extend(event.paths.into_iter().filter(|p| !is_noise_path(p)));
+                if !pending.is_empty() {
+                    pending_since.get_or_insert_with(Instant::now);
+                }
             }
             Ok(Err(_)) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -114,6 +118,34 @@ fn debounce_events(
     }
 }
 
+/// True for build/dependency churn no frontend listener needs: contents of
+/// node_modules/target/dist anywhere in the path, and .git internals
+/// (objects/, logs/) — while keeping .git signals (HEAD, index, refs) that
+/// drive gitbar and diff-gutter refresh after commit/checkout.
+fn is_noise_path(path: &Path) -> bool {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    for (i, &c) in components.iter().enumerate() {
+        let is_final = i == components.len() - 1;
+        // Contents of build/dependency dirs; the dir itself passes so the
+        // tree still sees it appear or vanish.
+        if !is_final && matches!(c, "node_modules" | "target" | "dist") {
+            return true;
+        }
+        // .git internals: objects + logs churn on every commit/fetch and no
+        // listener reads them; HEAD/index/refs pass through.
+        if c == ".git" && matches!(components.get(i + 1), Some(&"objects") | Some(&"logs")) {
+            return true;
+        }
+    }
+    false
+}
+
 fn emit_pending(app: &AppHandle, pending: &mut BTreeSet<PathBuf>) {
     if pending.is_empty() {
         return;
@@ -124,4 +156,68 @@ fn emit_pending(app: &AppHandle, pending: &mut BTreeSet<PathBuf>) {
         .collect::<Vec<_>>();
     pending.clear();
     let _ = app.emit("fs-changed", FsChangedPayload { paths });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noise(p: &str) -> bool {
+        is_noise_path(Path::new(p))
+    }
+
+    #[test]
+    fn drops_build_dir_contents() {
+        assert!(noise("/w/src-tauri/target/debug/build/foo/output"));
+        assert!(noise("/w/node_modules/react/index.js"));
+        assert!(noise("/w/dist/assets/app-abc123.js"));
+        assert!(noise("/w/packages/a/node_modules/.vite/deps/chunk.js"));
+    }
+
+    #[test]
+    fn keeps_build_dir_itself() {
+        // Dir create/delete events must pass so the tree shows the dir appear.
+        assert!(!noise("/w/node_modules"));
+        assert!(!noise("/w/dist"));
+        assert!(!noise("/w/src-tauri/target"));
+    }
+
+    #[test]
+    fn keeps_file_named_like_build_dir() {
+        assert!(!noise("/w/src/dist"));
+        assert!(!noise("/w/scripts/target"));
+    }
+
+    #[test]
+    fn keeps_source_and_hidden_config_paths() {
+        assert!(!noise("/w/src/main.ts"));
+        assert!(!noise("/w/.github/workflows/ci.yml"));
+        assert!(!noise("/w/.claude/settings.json"));
+        assert!(!noise("/w/.sutra/turn-signal.jsonl"));
+    }
+
+    #[test]
+    fn drops_git_internal_churn() {
+        assert!(noise("/w/.git/objects/ab/cdef0123456789"));
+        assert!(noise("/w/.git/objects/pack/pack-abc.idx"));
+        assert!(noise("/w/.git/logs/HEAD"));
+        assert!(noise("/w/.git/logs/refs/heads/main"));
+    }
+
+    #[test]
+    fn keeps_git_signals_for_gitbar_and_gutter() {
+        // Commit touches index + refs; checkout touches HEAD. Gitbar branch
+        // display and diff-gutter baselines refresh off these events.
+        assert!(!noise("/w/.git/HEAD"));
+        assert!(!noise("/w/.git/index"));
+        assert!(!noise("/w/.git/refs/heads/main"));
+        assert!(!noise("/w/.git/packed-refs"));
+        assert!(!noise("/w/.git/MERGE_HEAD"));
+    }
+
+    #[test]
+    fn keeps_non_git_objects_and_logs_dirs() {
+        assert!(!noise("/w/src/objects/mesh.ts"));
+        assert!(!noise("/w/logs/app.log"));
+    }
 }

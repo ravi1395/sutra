@@ -14,6 +14,25 @@ export function pathBelongsToRoot(path: string, root: string): boolean {
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
+/** Parent directory of a path, tolerant of both separators. */
+export function parentDir(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : p;
+}
+
+/** How to open a path handed to Sutra by the OS/CLI. */
+export type OpenPathAction =
+  | { kind: "workspace"; dir: string } // folder → replace the workspace root
+  | { kind: "fileInRoot"; file: string } // file inside current root → open as a tab
+  | { kind: "fileWithParent"; parent: string; file: string }; // outside file → open parent as root + file
+
+/** Decide how to open a path per the smart rule (pure; caller performs the effects). */
+export function resolveOpenPath(path: string, isDir: boolean, currentRoot: string | null): OpenPathAction {
+  if (isDir) return { kind: "workspace", dir: path };
+  if (currentRoot && pathBelongsToRoot(path, currentRoot)) return { kind: "fileInRoot", file: path };
+  return { kind: "fileWithParent", parent: parentDir(path), file: path };
+}
+
 export interface BreadcrumbSegment { label: string; dirPath: string | null; leaf: boolean; }
 
 /** Split an absolute file path into clickable breadcrumb segments relative to root. */
@@ -177,6 +196,85 @@ export function saveRecents(list: readonly RecentWorkspace[]): void {
     localStorage.setItem(RECENTS_KEY, JSON.stringify(list));
   } catch {
     /* storage unavailable / quota — recents are best-effort */
+  }
+}
+
+// ---- workspace trust (gates execution of repo-defined commands) ----
+// A folder is "trusted" only when the user opened it deliberately (in-app File▸Open)
+// or clicked Trust. Folders arriving via OS file-association / CLI / single-instance
+// forward start untrusted; their `.sutra/automations.json` commands are NOT auto-run
+// until trusted. Pure reducers below are unit-tested; the localStorage wrappers are not.
+
+/** True when `root` (normalized) is in the trusted set. Exact folder match — subtrees
+ *  and prefix siblings are not trusted. */
+export function pathIsTrusted(list: readonly string[], root: string): boolean {
+  return list.includes(normalizePath(root));
+}
+
+/** Add `root` (normalized) to the trusted set; idempotent. Pure. */
+export function addTrust(list: readonly string[], root: string): string[] {
+  const normalized = normalizePath(root);
+  return list.includes(normalized) ? [...list] : [...list, normalized];
+}
+
+/** One-shot migration seed: union existing trust with the (normalized) recents list,
+ *  deduped, existing entries first. Callers run this once so pre-upgrade folders the
+ *  user already opened deliberately are not re-gated. Pure. */
+export function seedTrusted(existing: readonly string[], recentPaths: readonly string[]): string[] {
+  const out = existing.map(normalizePath);
+  const seen = new Set(out);
+  for (const p of recentPaths) {
+    const n = normalizePath(p);
+    if (!seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  return out;
+}
+
+const TRUST_KEY = "sutra.trustedRoots";
+const TRUST_MIGRATED_KEY = "sutra.trustMigrated";
+
+/** Load the trusted-root list from localStorage; junk yields []. */
+export function loadTrusted(): string[] {
+  try {
+    const raw = localStorage.getItem(TRUST_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p): p is string => typeof p === "string");
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the trusted-root list (best-effort). */
+export function saveTrusted(list: readonly string[]): void {
+  try {
+    localStorage.setItem(TRUST_KEY, JSON.stringify(list));
+  } catch {
+    /* storage unavailable / quota — trust is best-effort but re-promptable */
+  }
+}
+
+/** True when `root` is trusted to run its repo-defined commands. */
+export function isWorkspaceTrusted(root: string): boolean {
+  return pathIsTrusted(loadTrusted(), root);
+}
+
+/** Mark `root` trusted and persist. */
+export function trustWorkspace(root: string): void {
+  saveTrusted(addTrust(loadTrusted(), root));
+}
+
+/** Once per install: seed the trusted set from the current recents so folders the
+ *  user already opened before the trust gate existed are not re-gated on upgrade.
+ *  Guarded by a localStorage flag so a later untrust is not undone on next launch. */
+export function ensureTrustSeeded(recentPaths: readonly string[]): void {
+  try {
+    if (localStorage.getItem(TRUST_MIGRATED_KEY) === "1") return;
+    saveTrusted(seedTrusted(loadTrusted(), recentPaths));
+    localStorage.setItem(TRUST_MIGRATED_KEY, "1");
+  } catch {
+    /* storage unavailable — seeding is best-effort; falls back to explicit trust */
   }
 }
 

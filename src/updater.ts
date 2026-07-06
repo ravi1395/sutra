@@ -8,9 +8,36 @@
 import { checkForUpdate, installUpdate, relaunchApp, type Update } from "./ipc";
 import { icon } from "./icons";
 
-// Re-check cadence: every 6 hours, plus one check shortly after boot.
+// Re-check cadence: every 6 hours after boot.
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const INITIAL_DELAY_MS = 8_000;
+// Cold-boot schedule: wait 8s (let boot settle) for the first attempt, then on a
+// THROWN failure retry with backoff. Without this a transient early failure
+// (network/updater plugin not ready yet) would swallow the pill until the 6h
+// cadence, so the "Update available" button never appears for the whole session
+// — which looked like it only showed after a folder was later opened.
+const INITIAL_CHECK_DELAYS_MS = [8_000, 5_000, 15_000, 30_000];
+
+// Run the boot update check, retrying ONLY on thrown errors per `delays` (each
+// attempt is preceded by its delay). A definitive result — an update or a clean
+// "up to date" (null) — stops the sequence. Injectable `check`/`sleep` keep it
+// unit-testable and independent of any workspace/folder state.
+export async function checkWithRetry(
+  check: () => Promise<Update | null>,
+  onAvailable: (update: Update) => void,
+  delays: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  for (const delay of delays) {
+    await sleep(delay);
+    try {
+      const update = await check();
+      if (update) onAvailable(update);
+      return; // definitive answer (update or up-to-date) — do not retry
+    } catch (err) {
+      console.warn("[updater] initial check failed, will retry:", err);
+    }
+  }
+}
 
 // Clamp a download fraction to a 0–100 integer percentage. Returns null when
 // the total content length is unknown (indeterminate progress).
@@ -33,8 +60,13 @@ export interface UpdaterHandle {
   checkNow(): Promise<void>;
 }
 
-// Wire the controller to its titlebar button and start the poll loop.
-export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {}): UpdaterHandle {
+// Wire the controller to its titlebar button and start the poll loop. `check`
+// is injectable for tests; production uses the tauri-plugin-updater endpoint.
+export function mountUpdater(
+  button: HTMLButtonElement,
+  opts: UpdaterOptions = {},
+  check: () => Promise<Update | null> = checkForUpdate,
+): UpdaterHandle {
   let pending: Update | null = null; // resolved-but-not-yet-installed update
   let busy = false; // guards against re-entrant clicks/checks during install
 
@@ -63,7 +95,7 @@ export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {
       return;
     }
     try {
-      const update = await checkForUpdate();
+      const update = await check();
       if (update) {
         pending = update;
         showAvailable(update.version);
@@ -119,8 +151,16 @@ export function mountUpdater(button: HTMLButtonElement, opts: UpdaterOptions = {
 
   button.onclick = () => void runInstall();
 
-  // Defer the first check so it doesn't compete with boot, then poll on cadence.
-  window.setTimeout(() => void runCheck(true), INITIAL_DELAY_MS);
+  // Cold-boot check with retry (folder-independent), then poll on the 6h cadence.
+  void checkWithRetry(
+    check,
+    (update) => {
+      pending = update;
+      showAvailable(update.version);
+    },
+    INITIAL_CHECK_DELAYS_MS,
+    (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+  );
   window.setInterval(() => void runCheck(true), CHECK_INTERVAL_MS);
 
   return { checkNow: () => runCheck(false) };
