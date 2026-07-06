@@ -281,3 +281,66 @@ test("openRollbackDialog: rolling back the newest turn reverts that turn's own f
     restore();
   }
 });
+
+// W2.2: rows are resolved once at open; the workspace (and the checklist's
+// underlying disk state) can change while the dialog sits open. Apply must
+// re-resolve and refuse to fire onApply against stale rows.
+test("openRollbackDialog: apply revalidates rows — drift on a checked path blocks apply", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    let diskHash = "h2"; // matches recorded after-hash at open → clean, checked
+    const getDiskHashes = async () => ({ "a.ts": diskHash });
+    let applyCalled = false;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applyCalled = true;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    assert.equal(applyBtn.disabled, false);
+
+    // Workspace changes underneath the still-open dialog (e.g. an agent turn
+    // closes mid-review): a.ts now diverges from what the checklist showed.
+    diskHash = "hDRIFTED";
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(applyCalled, false, "onApply must not fire against drifted rows");
+    const failuresEl = findByClass(overlay, "rollback-failures")!;
+    assert.match(failuresEl.textContent, /changed/i);
+  } finally {
+    restore();
+  }
+});
+
+test("openRollbackDialog: apply proceeds when re-resolved rows are unchanged", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "h2" }); // stable across both resolves
+    let applied: string[] | null = null;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applied = paths;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.deepEqual(applied, ["a.ts"]);
+  } finally {
+    restore();
+  }
+});
