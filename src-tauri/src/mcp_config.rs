@@ -93,6 +93,27 @@ pub fn merge_claude_settings(existing: Option<&str>, command: &str) -> Result<St
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
+/// Drop the `sutra` entry from a claude `.mcp.json`, preserving other servers.
+pub fn remove_mcp_json(existing: &str) -> Result<String, String> {
+    let mut doc: Value =
+        serde_json::from_str(existing).map_err(|e| format!("invalid .mcp.json: {e}"))?;
+    if let Some(servers) = doc.get_mut("mcpServers").and_then(|m| m.as_object_mut()) {
+        servers.remove("sutra");
+    }
+    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+/// Drop `[mcp_servers.sutra]` from a codex `config.toml`, preserving others.
+pub fn remove_codex_toml(existing: &str) -> Result<String, String> {
+    let mut doc: toml::Value = existing
+        .parse()
+        .map_err(|e: toml::de::Error| format!("invalid config.toml: {e}"))?;
+    if let Some(servers) = doc.get_mut("mcp_servers").and_then(|m| m.as_table_mut()) {
+        servers.remove("sutra");
+    }
+    toml::to_string(&doc).map_err(|e| e.to_string())
+}
+
 /// Append any missing `entries` to a `.gitignore`. Returns None when nothing is
 /// missing (no write needed), else the full new file content.
 pub fn ensure_gitignore(existing: Option<&str>, entries: &[&str]) -> Option<String> {
@@ -215,6 +236,34 @@ mod tests {
     #[test]
     fn claude_settings_rejects_malformed() {
         assert!(merge_claude_settings(Some("{ not json"), "/x").is_err());
+    }
+
+    #[test]
+    fn remove_mcp_json_keeps_others() {
+        let existing = r#"{"mcpServers":{"sutra":{"type":"http","url":"http://x/mcp"},"other":{"url":"http://y"}}}"#;
+        let out = remove_mcp_json(existing).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mcpServers"]["sutra"].is_null());
+        assert_eq!(v["mcpServers"]["other"]["url"], "http://y");
+    }
+
+    #[test]
+    fn remove_codex_toml_keeps_others() {
+        let existing = "[mcp_servers.sutra]\nurl=\"http://x\"\n[mcp_servers.other]\nurl=\"http://y\"\n";
+        let out = remove_codex_toml(existing).unwrap();
+        let v: toml::Value = toml::from_str(&out).unwrap();
+        assert!(v.get("mcp_servers").and_then(|m| m.get("sutra")).is_none());
+        assert!(v["mcp_servers"]["other"]["url"].as_str() == Some("http://y"));
+    }
+
+    #[test]
+    fn remove_mcp_json_rejects_malformed() {
+        assert!(remove_mcp_json("{ not json").is_err());
+    }
+
+    #[test]
+    fn remove_codex_toml_rejects_malformed() {
+        assert!(remove_codex_toml("not = = toml").is_err());
     }
 
     #[test]
