@@ -266,7 +266,7 @@ impl Tracker {
     /// instead of being rejected against the active workspace root.
     fn record_report_owned(&mut self, path: PathBuf, active_root: Option<&Path>) -> bool {
         if let Some(owner) = self.owning_root(&path) {
-            self.record_agent_report(&owner, path);
+            self.record_owned_or_nested(owner, path);
             return true;
         }
         let Some(root) = active_root else { return false };
@@ -276,6 +276,32 @@ impl Tracker {
         }
         self.record_agent_report(root, path);
         true
+    }
+
+    /// Route a report to `owner`'s session, unless `path` lies inside a nested
+    /// repo (its own `.git`) between `owner`'s root and `path` — `scan_workspace`
+    /// deliberately excludes nested repos from a baseline (see its nested-repo
+    /// filter), so a pre-existing file there reads as a baseline miss through
+    /// `owner` and gets misclassified "A"+RestoreSource::Delete, which "Revert
+    /// all" would then delete. Prefer lazily creating a session for the nearest
+    /// enclosing nested-repo root (the same bootstrap `agent_tracking_begin`
+    /// uses) and recording there instead; if that bootstrap can't establish one
+    /// (e.g. the nested repo has no HEAD commit yet), fall back to recording
+    /// against `owner` with RestoreSource::Unsafe so the file is still never
+    /// deleted (Unsafe entries are excluded from revert and flagged in the UI).
+    fn record_owned_or_nested(&mut self, owner: PathBuf, path: PathBuf) {
+        let Some(nested_root) = nested_repo_root(&path, &owner) else {
+            self.record_agent_report(&owner, path);
+            return;
+        };
+        if !self.sessions.contains_key(&nested_root) {
+            let _ = self.poll(&nested_root, true, true);
+        }
+        if self.sessions.contains_key(&nested_root) {
+            self.record_agent_report(&nested_root, path);
+        } else {
+            self.record_agent_report_unsafe(&owner, path);
+        }
     }
 
     fn peek(&self, root: &Path) -> AgentTrackingStatus {
@@ -423,6 +449,19 @@ impl Tracker {
     /// Record a path an agent reported editing as an AI change. Drops it if the
     /// file is back at the baseline.
     fn record_agent_report(&mut self, root: &Path, path: PathBuf) {
+        self.record_agent_report_inner(root, path, false);
+    }
+
+    /// Like `record_agent_report`, but a brand-new pending entry (no prior
+    /// entry in `session.pending`) is forced to `RestoreSource::Unsafe` instead
+    /// of the computed source — the W4.1 fallback for a nested-repo file whose
+    /// own session couldn't be bootstrapped: never deletable, even though its
+    /// baseline miss reads as "A".
+    fn record_agent_report_unsafe(&mut self, root: &Path, path: PathBuf) {
+        self.record_agent_report_inner(root, path, true);
+    }
+
+    fn record_agent_report_inner(&mut self, root: &Path, path: PathBuf, force_unsafe: bool) {
         let Some(session) = self.sessions.get_mut(root) else {
             return;
         };
@@ -455,6 +494,7 @@ impl Tracker {
         // edit with the pre-agent baseline.
         let (restore, human_touched) = match session.pending.get(&path) {
             Some(change) => (change.restore.clone(), change.human_touched),
+            None if force_unsafe => (RestoreSource::Unsafe, false),
             None => (
                 restore_source_for_change(&session.root, &path, baseline.as_ref()),
                 false,
@@ -1002,6 +1042,23 @@ fn restore_source_for_change(
         }
     }
     RestoreSource::Unsafe
+}
+
+/// Nearest enclosing nested-repo root of `path` strictly between `owner` and
+/// `path`: the closest ancestor dir (excluding `owner` itself) that holds a
+/// `.git` dir/file. `None` when no nested repo intervenes. Mirrors the
+/// nested-repo skip in `scan_workspace` (a `.git` at a subdir's root), so a
+/// file the baseline excludes is routed to its own repo's session instead of
+/// being misclassified against the ancestor.
+fn nested_repo_root(path: &Path, owner: &Path) -> Option<PathBuf> {
+    let mut dir = path.parent()?;
+    while dir.starts_with(owner) && dir != owner {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 fn git_head_bytes(root: &Path, path: &Path) -> Option<Vec<u8>> {
@@ -2121,6 +2178,66 @@ mod tests {
         assert!(!status.changes[0].human_touched);
         // Still present after peek (no mutation).
         assert!(tracker.only_session().pending.contains_key(&path));
+    }
+
+    // W4.1: a pre-existing file inside a NESTED repo (its own .git) under the
+    // primary root's session must never be classified "A"+Delete just because
+    // the primary baseline (scan_workspace deliberately excludes nested repos
+    // from it) has no entry for it — routing it through the ancestor session
+    // would plan a delete of a real, pre-existing file on "Revert all".
+    #[test]
+    fn record_report_owned_routes_nested_repo_file_away_from_ancestor_delete() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("p.txt"), "root file").unwrap();
+        commit_all(&repo, "init");
+
+        // Nested repo W under P, with its own pre-existing committed file.
+        let nested = dir.path().join("wt");
+        fs::create_dir(&nested).unwrap();
+        let nested_repo = git2::Repository::init(&nested).unwrap();
+        let edited = nested.join("f.txt");
+        fs::write(&edited, "pre-existing").unwrap();
+        commit_all(&nested_repo, "nested init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), false, true).unwrap(); // creates P's session
+        assert!(
+            !tracker.sessions[dir.path()].baseline.contains_key(&edited),
+            "P's baseline must exclude the nested repo's files"
+        );
+
+        assert!(tracker.record_report_owned(edited.clone(), None));
+
+        let p_pending = tracker.sessions[dir.path()].pending.get(&edited).cloned();
+        let misclassified_deletable = p_pending
+            .as_ref()
+            .map(|c| c.status == "A" && matches!(c.restore, RestoreSource::Delete))
+            .unwrap_or(false);
+        assert!(
+            !misclassified_deletable,
+            "nested-repo file must not be classified agent-created+delete against the ancestor session"
+        );
+
+        let nested_session_holds_it = tracker
+            .sessions
+            .get(&nested)
+            .map(|s| s.baseline.contains_key(&edited) || s.pending.contains_key(&edited))
+            .unwrap_or(false);
+        let unsafe_in_p = p_pending
+            .map(|c| matches!(c.restore, RestoreSource::Unsafe))
+            .unwrap_or(false);
+        assert!(
+            nested_session_holds_it || unsafe_in_p,
+            "either a W session must be created holding the file, or it must be recorded Unsafe"
+        );
+
+        let _ = tracker.revert(dir.path());
+        let _ = tracker.revert(&nested);
+        assert!(
+            edited.exists(),
+            "revert must never delete a pre-existing nested-repo file"
+        );
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
