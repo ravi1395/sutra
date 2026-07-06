@@ -1,6 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceUpdate, diagsForPath, chipState, emptyDiagState, settleTrigger, toolFailures, isDiagRelevantPath } from "../src/diagnostics";
+import {
+  reduceUpdate,
+  diagsForPath,
+  chipState,
+  emptyDiagState,
+  settleTrigger,
+  toolFailures,
+  isDiagRelevantPath,
+  runDiagnostics,
+  pauseDiagnosticsFsTrigger,
+  resumeDiagnosticsFsTrigger,
+} from "../src/diagnostics";
+
+// ---- minimal fake `document` so updateChip()'s diagChipEl() singleton doesn't
+// throw under node:test (no real DOM) — mirrors the FakeElement pattern in
+// tests/rollback-dialog.test.ts, trimmed to what the chip element touches. ----
+class FakeChipEl {
+  classList = { add: (..._c: string[]) => {}, remove: (..._c: string[]) => {} };
+  title = "";
+}
+function setupDiagDom(): () => void {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: () => new FakeChipEl() } as unknown as Document;
+  return () => {
+    globalThis.document = previous;
+  };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const d = (path: string, severity: "error" | "warning" = "error") =>
   ({ path, line: 1, col: 1, severity, message: "m", source: "tsc" });
@@ -58,6 +86,70 @@ test("settleTrigger fires only once settle window has elapsed since last fire", 
   assert.equal(settleTrigger(0, null, 1000), true);
   assert.equal(settleTrigger(500, 0, 1000), false);
   assert.equal(settleTrigger(1000, 0, 1000), true);
+});
+
+test("a trigger while a run is in flight schedules exactly one follow-up run (not dropped, not N reruns)", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    let calls = 0;
+    const pending: Array<() => void> = [];
+    const execute = async (_root: string) => {
+      calls++;
+      await new Promise<void>((resolve) => pending.push(resolve));
+    };
+    const run1 = runDiagnostics("/r", execute, () => "/r");
+    await flush();
+    assert.equal(calls, 1); // first call started immediately
+
+    // Three triggers arrive while the first run is still in flight.
+    await runDiagnostics("/r", execute, () => "/r");
+    await runDiagnostics("/r", execute, () => "/r");
+    await runDiagnostics("/r", execute, () => "/r");
+    assert.equal(calls, 1); // still just the one in-flight execution — triggers coalesced, not dropped
+
+    pending[0](); // finish the first execute
+    await flush();
+    assert.equal(calls, 2); // exactly one follow-up run, not three
+
+    pending[1](); // finish the follow-up so run1 settles and the module unlatches
+    await run1;
+    assert.equal(calls, 2); // no further reruns once nothing re-triggered
+  } finally {
+    restoreDom();
+  }
+});
+
+test("no rerun loop when nothing re-triggers during the run", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    let calls = 0;
+    const execute = async (_root: string) => {
+      calls++;
+    };
+    await runDiagnostics("/r", execute, () => "/r");
+    assert.equal(calls, 1);
+  } finally {
+    restoreDom();
+  }
+});
+
+test("resume catch-up run picks up the latest root via getRoot", async () => {
+  const restoreDom = setupDiagDom();
+  try {
+    const seenRoots: string[] = [];
+    const pending: Array<() => void> = [];
+    const execute = async (root: string) => {
+      seenRoots.push(root);
+      await new Promise<void>((resolve) => pending.push(resolve));
+    };
+    const run1 = runDiagnostics("/r-old", execute, () => "/r-new");
+    await flush();
+    assert.deepEqual(seenRoots, ["/r-new"]); // getRoot() wins over the stale root arg
+    pending[0]();
+    await run1;
+  } finally {
+    restoreDom();
+  }
 });
 
 test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {

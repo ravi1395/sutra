@@ -318,18 +318,47 @@ function renderProblemsPanel(): void {
 
 const SETTLE_MS = 1000;
 
-async function runDiagnostics(root: string): Promise<void> {
-  if (inFlight) return;
+/** Gather this root's diagnostics jobs (automations, else detected tsc/cargo/
+ * go/ruff manifests) and run them once. Broken out of runDiagnostics so its
+ * rerun-coalescing loop is unit-testable with a fake `execute`. */
+async function executeDiagnostics(root: string): Promise<void> {
+  const autos = diagnosticsAutomations(await loadAutomations(root));
+  const jobs = autos.length
+    ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
+    : await diagDetect(root);
+  await diagRun(root, jobs);
+}
+
+// Set only by a real trigger arriving while a run is in flight (never by the
+// loop itself) — see runDiagnostics.
+let rerunPending = false;
+
+/** Run diagnostics for `root`. A trigger arriving while a run is already in
+ * flight (cargo/tsc jobs run 30-120s vs. a 1s fs-settle window) is NOT
+ * dropped: it latches exactly one follow-up run — N triggers during one run
+ * still produce only one rerun — re-reading the root via `getRoot` so a
+ * workspace switch mid-run targets the right one. `execute`/`getRoot` are
+ * injectable for unit testing without real IPC; production call sites leave
+ * them at their defaults. */
+export async function runDiagnostics(
+  root: string,
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+  getRoot: () => string | null = () => diagGetRoot?.() ?? currentRoot,
+): Promise<void> {
+  if (inFlight) {
+    rerunPending = true;
+    return;
+  }
   if (!loadSettings().diagnosticsEnabled) return;
   inFlight = true;
   running = true;
   updateChip();
   try {
-    const autos = diagnosticsAutomations(await loadAutomations(root));
-    const jobs = autos.length
-      ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
-      : await diagDetect(root);
-    await diagRun(root, jobs);
+    do {
+      rerunPending = false;
+      const runRoot = getRoot() ?? root;
+      await execute(runRoot);
+    } while (rerunPending);
   } finally {
     running = false;
     inFlight = false;
