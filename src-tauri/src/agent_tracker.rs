@@ -331,13 +331,50 @@ impl Tracker {
             self.record_agent_report(&owner, path);
             return;
         };
-        if !self.sessions.contains_key(&nested_root) {
+        let freshly_created = !self.sessions.contains_key(&nested_root);
+        if freshly_created {
             let _ = self.poll(&nested_root, true, true);
         }
         if self.sessions.contains_key(&nested_root) {
+            if freshly_created {
+                // The bootstrap scan captured POST-edit disk (the edit that
+                // triggered this report already happened), so record_agent_report
+                // would see baseline==current and silently absorb the change —
+                // no pending entry, nothing to review or revert. Seed this path's
+                // baseline from the nested repo's git HEAD (pre-edit truth): a
+                // tracked file then surfaces as "M" (restore to HEAD), a
+                // genuinely new file (absent from HEAD) as "A" (agent-created).
+                self.seed_baseline_from_head(&nested_root, &path);
+            }
             self.record_agent_report(&nested_root, path);
         } else {
             self.record_agent_report_unsafe(&owner, path);
+        }
+    }
+
+    /// Set `path`'s baseline in `root`'s session to its git-HEAD content (or
+    /// remove it when HEAD lacks the file) so a bootstrap-time edit is diffed
+    /// against pre-edit truth rather than the post-edit disk the scan captured.
+    /// Built directly from HEAD bytes (not `file_signature`, which would re-stat
+    /// the post-edit file on disk). See `record_owned_or_nested`.
+    fn seed_baseline_from_head(&mut self, root: &Path, path: &Path) {
+        let Some(session) = self.sessions.get_mut(root) else {
+            return;
+        };
+        match git_head_bytes(root, path) {
+            Some(bytes) => {
+                session.baseline.insert(
+                    path.to_path_buf(),
+                    FileSignature {
+                        size: bytes.len() as u64,
+                        mtime_nanos: 0,
+                        hash: xxh3_64(&bytes),
+                    },
+                );
+            }
+            None => {
+                session.baseline.remove(path);
+            }
         }
     }
 
@@ -503,6 +540,35 @@ impl Tracker {
             return;
         };
         session.report_mode = true;
+        // Cap bytes per file (W4.9): a >MAX_PENDING_BYTES file is tracked Unsafe
+        // (no observed bytes, no baseline copy) — excluded from revert, flagged
+        // in the UI — instead of reading the whole file into memory here and
+        // re-reading it every 1.5s via refresh_pending. Same protection
+        // compare_snapshots gives the discover path; Claude sessions run this
+        // report path, so without this the oversized-artifact blowup persists.
+        if let Some(sig) = oversized_signature(&path) {
+            let human_touched = session
+                .pending
+                .get(&path)
+                .map(|c| c.human_touched)
+                .unwrap_or(false);
+            let status = if session.baseline.contains_key(&path) {
+                "M"
+            } else {
+                "A"
+            };
+            session.pending.insert(
+                path.clone(),
+                PendingChange {
+                    status: status.to_string(),
+                    human_touched,
+                    observed: None,
+                    restore: RestoreSource::Unsafe,
+                },
+            );
+            session.last_scan.insert(path, sig);
+            return;
+        }
         let current = fs::read(&path).ok();
         let baseline = session.baseline.get(&path).cloned();
         if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
@@ -569,6 +635,22 @@ impl Tracker {
             return;
         };
         for path in session.pending.keys().cloned().collect::<Vec<_>>() {
+            // Same oversized cap as record_agent_report_inner (W4.9): never
+            // re-read a >MAX_PENDING_BYTES file every tick; keep it Unsafe.
+            if let Some(sig) = oversized_signature(&path) {
+                let status = if session.baseline.contains_key(&path) {
+                    "M"
+                } else {
+                    "A"
+                };
+                if let Some(change) = session.pending.get_mut(&path) {
+                    change.status = status.to_string();
+                    change.observed = None;
+                    change.restore = RestoreSource::Unsafe;
+                }
+                session.last_scan.insert(path, sig);
+                continue;
+            }
             let current = fs::read(&path).ok();
             let baseline = session.baseline.get(&path).cloned();
             if bytes_option_matches_signature(current.as_deref(), baseline.as_ref()) {
@@ -1102,6 +1184,24 @@ fn metadata_mtime_nanos(metadata: &fs::Metadata) -> u128 {
         .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
+}
+
+/// Size-only oversized check: returns a metadata-derived signature (NO read)
+/// only when `path` exceeds MAX_PENDING_BYTES. Lets the Claude report path
+/// (`record_agent_report_inner` / `refresh_pending`) flag a huge file Unsafe
+/// without loading its bytes, mirroring `compare_snapshots`' cap on the
+/// discover path (W4.9). `hash` is a placeholder — oversized files are always
+/// tracked Unsafe, never content-compared.
+fn oversized_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() <= MAX_PENDING_BYTES {
+        return None;
+    }
+    Some(FileSignature {
+        size: metadata.len(),
+        mtime_nanos: metadata_mtime_nanos(&metadata),
+        hash: 0,
+    })
 }
 
 fn signature_for_current_or_bytes(
@@ -1822,6 +1922,95 @@ mod tests {
             vec![path.to_string_lossy().into_owned()]
         );
         assert!(result.reverted_paths.is_empty());
+    }
+
+    // W4.9: the Claude REPORT path (record_agent_report / refresh_pending), not
+    // just compare_snapshots, must cap oversized files — Claude sessions run
+    // report mode, so an uncapped read here reintroduced the same 600MB-resident
+    // blowup the discover-path cap already prevents.
+    #[test]
+    fn record_agent_report_caps_oversized_file_as_unsafe() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let path = dir.path().join("data.bin");
+        fs::write(&path, b"small-original").unwrap();
+        commit_all(&repo, "init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), true, false).unwrap(); // baseline holds small file
+        fs::write(&path, vec![7u8; (MAX_PENDING_BYTES + 1) as usize]).unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+
+        let change = tracker.sessions[dir.path()]
+            .pending
+            .get(&path)
+            .cloned()
+            .expect("oversized reported file must be tracked");
+        assert_eq!(change.status, "M");
+        assert!(
+            change.observed.is_none(),
+            "no bytes retained for an oversized file on the report path"
+        );
+        assert!(matches!(change.restore, RestoreSource::Unsafe));
+
+        // refresh_pending re-runs every tick — must stay Unsafe, still no read.
+        tracker.refresh_pending(dir.path());
+        let after = tracker.sessions[dir.path()]
+            .pending
+            .get(&path)
+            .cloned()
+            .expect("still tracked after refresh");
+        assert!(after.observed.is_none());
+        assert!(matches!(after.restore, RestoreSource::Unsafe));
+
+        let _ = tracker.revert(dir.path());
+        assert!(path.exists(), "oversized Unsafe file must never be bulk-reverted");
+    }
+
+    // W4.1 (non-vacuous companion to the delete-guard test): when the nested
+    // session is lazily bootstrapped, the bootstrap scan captured POST-edit
+    // disk, so without seeding the baseline from git HEAD the agent's edit would
+    // be silently absorbed (no pending entry → invisible, unrevertable). Assert
+    // the edit is actually tracked as "M" and revert restores committed content.
+    #[test]
+    fn record_report_owned_tracks_edited_nested_repo_file_not_absorbed() {
+        let dir = tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("p.txt"), "root file").unwrap();
+        commit_all(&repo, "init");
+
+        let nested = dir.path().join("wt");
+        fs::create_dir(&nested).unwrap();
+        let nested_repo = git2::Repository::init(&nested).unwrap();
+        let edited = nested.join("f.txt");
+        fs::write(&edited, "committed-content").unwrap();
+        commit_all(&nested_repo, "nested init");
+
+        let mut tracker = Tracker::default();
+        tracker.poll(dir.path(), false, true).unwrap(); // P's baseline excludes nested
+
+        // Agent edits the nested file, THEN reports it (bootstrap-triggering edit).
+        fs::write(&edited, "agent-edited-content").unwrap();
+        assert!(tracker.record_report_owned(edited.clone(), None));
+
+        let change = tracker
+            .sessions
+            .get(&nested)
+            .and_then(|s| s.pending.get(&edited).cloned())
+            .expect("nested edit must be tracked, not absorbed into a post-edit baseline");
+        assert_eq!(change.status, "M");
+        assert!(
+            !matches!(change.restore, RestoreSource::Delete),
+            "a pre-existing file must never be delete-restored"
+        );
+
+        let _ = tracker.revert(&nested);
+        assert!(edited.exists(), "pre-existing nested file must survive revert");
+        assert_eq!(
+            fs::read(&edited).unwrap(),
+            b"committed-content",
+            "revert restores the nested repo's committed HEAD content"
+        );
     }
 
     #[test]
