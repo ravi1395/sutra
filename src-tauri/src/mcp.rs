@@ -92,6 +92,9 @@ fn host_of_authority(v: &str) -> &str {
 /// `localhost.evil.com`. `localhost` (any case) and any address in 127.0.0.0/8
 /// or ::1 count; everything else (foreign hosts, `null`, `0.0.0.0`) does not.
 fn is_loopback_authority(v: &str) -> bool {
+    if v.contains('@') {
+        return false; // userinfo (`loopback@evil` / `evil@loopback`) is never a legit authority here
+    }
     let host = host_of_authority(v).to_ascii_lowercase();
     if host == "localhost" {
         return true;
@@ -1316,6 +1319,9 @@ mod tests {
         assert!(!host_origin_ok(Some("localhost.evil.com:5123"), None));
         assert!(!host_origin_ok(None, Some("http://127.0.0.1.evil.com")));
         assert!(!host_origin_ok(Some("0.0.0.0:5123"), None));
+        // Userinfo smuggling: a loopback-looking authority with `@` is rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:80@evil.com"), None));
+        assert!(!host_origin_ok(None, Some("http://evil.com@127.0.0.1")));
         // Case-insensitive + 127.0.0.0/8 loopback are accepted.
         assert!(host_origin_ok(Some("LOCALHOST:5123"), None));
         assert!(host_origin_ok(Some("127.9.9.9:5123"), None));
