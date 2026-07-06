@@ -15,6 +15,12 @@ use std::sync::{LazyLock, Mutex};
 use xxhash_rust::xxh3::xxh3_64;
 
 const QUIET_MS: u64 = 10_000;
+/// Fallback close deadline for a hook-covered (Claude) turn whose Stop hook
+/// never fires — SIGKILL, terminal closed, crash. Without it the turn stays
+/// open forever and blocks rollback for the whole root. Long enough to never
+/// pre-empt a live agent between tool calls; the hook still closes normal turns
+/// in milliseconds.
+const HOOK_FALLBACK_MS: u64 = 15 * 60 * 1000;
 const MAX_SNAPSHOT_BYTES: usize = 10 * 1024 * 1024;
 const GC_MAX_TURNS: usize = 50;
 const GC_MAX_BLOB_BYTES: u64 = 200 * 1024 * 1024;
@@ -183,22 +189,27 @@ impl TurnEngine {
     /// Claude hook installed, else it stays open forever and blocks rollback
     /// for the whole root.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Turn> {
+        if self.open.is_none() {
+            return vec![];
+        }
+        let Some(last_change) = self.last_change_at else {
+            return vec![];
+        };
         let hook_covers_open_turn = self.hook_installed
             && self
                 .open
                 .as_ref()
                 .map(|turn| turn.agent_kind == "claude" || turn.agent_kind.is_empty())
                 .unwrap_or(true);
-        if hook_covers_open_turn {
-            return vec![];
-        }
-        let Some(last_change) = self.last_change_at else {
-            return vec![];
+        // A hook-covered turn normally closes only on its Stop signal, so it
+        // uses the long fallback deadline (fires only if the hook never does);
+        // a codex/unknown turn has no hook and keeps the short quiet window.
+        let threshold = if hook_covers_open_turn {
+            HOOK_FALLBACK_MS
+        } else {
+            self.quiet_ms
         };
-        if self.open.is_none() {
-            return vec![];
-        }
-        if now_ms.saturating_sub(last_change) <= self.quiet_ms {
+        if now_ms.saturating_sub(last_change) <= threshold {
             return vec![];
         }
         match self.close_open(now_ms, "quiet") {
@@ -1082,6 +1093,24 @@ mod tests {
         let mut h = TurnEngine::new(10_000, true); // hook installed → heuristic suppressed
         h.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
         assert!(h.tick(60_000).is_empty());
+    }
+
+    // W4.6: if a Claude Stop hook never fires (SIGKILL/terminal-closed/crash),
+    // the hook-covered turn must still close via a long fallback deadline so it
+    // doesn't wedge rollback for the whole root. Below the deadline the
+    // suppression is real; past it with no activity/signal the turn closes.
+    #[test]
+    fn hook_covered_turn_closes_after_fallback_deadline() {
+        let mut e = TurnEngine::new(10_000, true); // Claude hook installed
+        e.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
+        // Well past the 10s quiet window but inside the fallback: still open.
+        assert!(e.tick(60_000).is_empty());
+        assert!(e.tick(HOOK_FALLBACK_MS).is_empty());
+        // Past the fallback deadline with no activity/signal: closes.
+        let closed = e.tick(HOOK_FALLBACK_MS + 1);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].boundary_source, "quiet");
+        assert_eq!(closed[0].agent_kind, "claude");
     }
 
     // A codex/unknown-kind turn has no Stop hook to close it — the quiet
