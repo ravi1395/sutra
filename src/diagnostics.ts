@@ -117,16 +117,30 @@ export function settleTrigger(nowMs: number, lastFireMs: number | null, settleMs
 }
 
 // Build outputs the diag jobs themselves write into: `cargo check` touches
-// target/** on every run, so an unfiltered fs trigger re-runs the jobs forever.
-const DIAG_IGNORED_SEGMENTS = new Set(["node_modules", "target", "dist"]);
+// target/** on every run, so an unfiltered fs trigger re-runs the jobs
+// forever. Keep this aligned with runner.rs's EXCLUDED_DIR_NAMES (detect()'s
+// manifest walk) — a name a diag job writes under but this list omits can
+// resurrect the self-retrigger loop.
+const DIAG_IGNORED_SEGMENTS = new Set(["node_modules", "target", "dist", "build", "vendor", "out", "__pycache__"]);
 
 /** True when a changed path should (re)schedule diagnostics: excludes build
  * outputs and hidden dirs (.git/.sutra/.remember/…) so tool self-writes and
- * VCS/state churn can't sustain a spawn loop. Pure; segment match, not substring. */
-export function isDiagRelevantPath(path: string): boolean {
-  return !path
-    .split(/[\\/]/)
-    .some((seg) => DIAG_IGNORED_SEGMENTS.has(seg) || (seg.length > 1 && seg.startsWith(".")));
+ * VCS/state churn can't sustain a spawn loop, and excludes tsc's incremental
+ * *.tsbuildinfo (rewritten on every run — an echo re-trigger otherwise).
+ * Segments are checked only BELOW `root`: the watcher emits absolute paths,
+ * so without stripping root first, an ancestor merely named "target" or a
+ * hidden ancestor dir (~/.dotfiles/proj) would blind every event for that
+ * workspace. A path outside root is never relevant. Pure; segment match, not
+ * substring. */
+export function isDiagRelevantPath(path: string, root: string): boolean {
+  const norm = path.replace(/\\/g, "/");
+  const normRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (norm !== normRoot && !norm.startsWith(`${normRoot}/`)) return false;
+  const rel = norm === normRoot ? "" : norm.slice(normRoot.length + 1);
+  const segments = rel.split("/").filter(Boolean);
+  const base = segments[segments.length - 1] ?? "";
+  if (base.endsWith(".tsbuildinfo")) return false;
+  return !segments.some((seg) => DIAG_IGNORED_SEGMENTS.has(seg) || (seg.length > 1 && seg.startsWith(".")));
 }
 
 // ---- module state (DOM/CM6 layer) ----
@@ -394,7 +408,7 @@ export function onDiagPathsChanged(
   execute: (root: string) => Promise<void> = executeDiagnostics,
 ): void {
   if (!root) return;
-  if (!paths.some(isDiagRelevantPath)) return;
+  if (!paths.some((p) => isDiagRelevantPath(p, root))) return;
   if (diagFsPaused) {
     diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
     return;

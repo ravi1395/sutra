@@ -207,18 +207,41 @@ test("resolveGotoPath: absolute paths pass through; relative ones join onto root
 
 test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {
   // cargo check writes target/** on every run — the original infinite-loop trigger
-  assert.equal(isDiagRelevantPath("/r/src-tauri/target/debug/build/libc-5f4e/output"), false);
-  assert.equal(isDiagRelevantPath("/r/node_modules/typescript/lib/tsc.js"), false);
-  assert.equal(isDiagRelevantPath("/r/dist/bundle.js"), false);
+  assert.equal(isDiagRelevantPath("/r/src-tauri/target/debug/build/libc-5f4e/output", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/node_modules/typescript/lib/tsc.js", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/dist/bundle.js", "/r"), false);
   // hidden state dirs: .git index churn, .sutra turn store, .remember hook logs
-  assert.equal(isDiagRelevantPath("/r/.git/index"), false);
-  assert.equal(isDiagRelevantPath("/r/.sutra/turns/objects/ab"), false);
-  assert.equal(isDiagRelevantPath("/r/.remember/logs/memory.log"), false);
+  assert.equal(isDiagRelevantPath("/r/.git/index", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/.sutra/turns/objects/ab", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/.remember/logs/memory.log", "/r"), false);
   // real source changes still trigger
-  assert.equal(isDiagRelevantPath("/r/src/main.ts"), true);
-  assert.equal(isDiagRelevantPath("/r/src-tauri/src/lib.rs"), true);
+  assert.equal(isDiagRelevantPath("/r/src/main.ts", "/r"), true);
+  assert.equal(isDiagRelevantPath("/r/src-tauri/src/lib.rs", "/r"), true);
   // segment equality, not substring — a source dir merely containing "target" passes
-  assert.equal(isDiagRelevantPath("/r/src/retarget/foo.ts"), true);
+  assert.equal(isDiagRelevantPath("/r/src/retarget/foo.ts", "/r"), true);
   // windows separators
-  assert.equal(isDiagRelevantPath("C:\\r\\node_modules\\x.js"), false);
+  assert.equal(isDiagRelevantPath("C:\\r\\node_modules\\x.js", "C:\\r"), false);
+});
+
+test("isDiagRelevantPath strips the workspace root before segment-splitting (W3.6a: hidden/named ancestors)", () => {
+  // a workspace nested under a hidden ancestor dir must not be blinded —
+  // ".dotfiles" is above root, not below it, so it must not count as a segment.
+  const root = "/Users/x/.dotfiles/proj";
+  assert.equal(isDiagRelevantPath(`${root}/src/main.rs`, root), true);
+  // likewise a root literally named "target"/"dist"/"node_modules" (a worktree
+  // parented under such a dir) must not blind every event below it.
+  const targetRoot = "/Users/x/target/proj";
+  assert.equal(isDiagRelevantPath(`${targetRoot}/src/main.rs`, targetRoot), true);
+  // a path outside root entirely is never relevant.
+  assert.equal(isDiagRelevantPath("/elsewhere/src/main.rs", root), false);
+});
+
+test("isDiagRelevantPath excludes build/vendor/out (aligned with runner.rs EXCLUDED_DIR_NAMES) and *.tsbuildinfo (W3.6b)", () => {
+  assert.equal(isDiagRelevantPath("/r/build/x.o", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/vendor/pkg/mod.go", "/r"), false);
+  assert.equal(isDiagRelevantPath("/r/out/bundle.js", "/r"), false);
+  // tsc incremental writes this at the project root on every run — must not self-retrigger.
+  assert.equal(isDiagRelevantPath("/r/tsconfig.tsbuildinfo", "/r"), false);
+  // a source dir merely containing these names as a substring still passes (segment match).
+  assert.equal(isDiagRelevantPath("/r/src/outline/foo.ts", "/r"), true);
 });
