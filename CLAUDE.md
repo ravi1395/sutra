@@ -85,10 +85,11 @@ tests/  one .test.ts per frontend module (node:test)
 
 ## State
 - Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 308 pass; `cargo test` (inside src-tauri/) → 185 pass
+- Tests: `npm test` → 312 pass; `cargo test` (inside src-tauri/) → 186 pass
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, `create_automation`/`list_automations`/`run_automation`, etc.) via `mcp.rs`
 - OS open: `lib.rs` single-instance + `fileAssociations` + macOS `RunEvent::Opened` + cold-start `take_launch_path` → emit `open-path{path,isDir}`; frontend `routeOpenPath`/`resolveOpenPath` (single window, replace root)
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
+- Security (workspace trust): folders opened via OS file-association / CLI / single-instance forward or session restore are **untrusted** — their `.sutra` automations + detected diagnostics (`cargo check` runs build.rs = exec) do NOT auto-run until trusted. Trust granted only by File▸Open dialog or the Trust toast; persisted in `localStorage sutra.trustedRoots`, seeded once from recents (`sutra.trustMigrated`). Gate is `diagnosticsExecDecision` in `diagnostics.ts` (chokepoint `diagRun`); `isWorkspaceTrusted` also guards `onTurnClosed` test-run + MCP `create/run_automation`. `mcp.rs` `host_origin_ok` rejects non-loopback Host/Origin (anti DNS-rebinding). Trust reducers in `workspace.ts`.
 
 ## Best Practices
 - **UI changes:** verify visually with `npm run tauri dev`

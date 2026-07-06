@@ -128,6 +128,13 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - Sutra runs as a **single window**: launching it again with a path forwards the
   path into the running window and focuses it instead of opening a duplicate.
 - A path handed to Sutra at launch takes precedence over last-folder restore.
+- **Workspace trust.** A folder opened this way (or restored on relaunch) starts
+  **untrusted**: you can browse and edit it, but its saved automations and
+  auto-detected diagnostics/test commands will **not** run until you trust it —
+  so opening a file from a folder you downloaded can't silently execute the
+  repo's commands. A one-click **Trust folder** prompt appears when a command is
+  held back. Folders you pick yourself via **File ▸ Open** are trusted
+  automatically; trust is remembered per folder.
 
 ### About, What's New & Tutorial
 - The **version pill** at the right of the title bar (e.g. `v2.1.0`) opens an
@@ -274,6 +281,10 @@ can be **rolled back** file-by-file from a checklist dialog, and a sessions
 panel aggregates agent activity across the primary root and its git worktrees.
 Diagnostics and per-hunk error badges also appear in the AI review diff list,
 so you can see which agent hunk introduced which error.
+
+Diagnostics and the after-turn test only run automatically for a **trusted**
+workspace (see [Workspace trust](#open-with-sutra-finder--explorer--command-line));
+an untrusted folder holds them back behind a one-click Trust prompt.
 
 Diagnostics and tests are configured as automations (see the automations
 picker) with two new kinds on top of plain `shell`:
@@ -452,7 +463,10 @@ read tools (keyed by request id), so concurrent prompts resolve independently.
 | `list_automations` | — | Lists the workspace's saved automations. |
 | `run_automation` | `name` \| `id` | Runs a saved automation in a Sutra terminal. |
 
-These let an agent set up a project's run/debug commands for you. The bundled
+`create_automation` and `run_automation` require a **trusted** workspace; in an
+untrusted folder they return an error until you trust it (`list_automations`
+stays available). These let an agent set up a project's run/debug commands for
+you. The bundled
 **`sutra-setup-automation`** skill uses them: it inspects the open project
 (any stack — it reads the config markers present), infers a run or **debug**
 command, and saves it as an automation so it becomes a one-click button. Ask
