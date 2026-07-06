@@ -75,6 +75,18 @@ test("recovered tool clears earlier toolfail for same source", () => {
   assert.deepEqual(toolFailures(s, "/r"), [{ source: "tsc", excerpt: "second" }]);
 });
 
+test("transient tool failure keeps last-good diags instead of blanking them", () => {
+  let s = reduceUpdate(emptyDiagState(), "/r", "tsc", [d("a.ts")]); // good run
+  s = reduceUpdate(s, "/r", "tsc:toolfail:network blip", []); // transient failure, empty diags
+  // last-good "tsc" diags must still be present — the invariant is "keeps last-good diags".
+  assert.equal(diagsForPath(s, "a.ts").length, 1);
+  assert.equal(chipState(s, "/r", false), "toolfail"); // chip still reflects the failure
+  // recovery (a fresh good run) still clears the toolfail key — existing behavior.
+  s = reduceUpdate(s, "/r", "tsc", [d("a.ts")]);
+  assert.deepEqual(toolFailures(s, "/r"), []);
+  assert.equal(diagsForPath(s, "a.ts").length, 1);
+});
+
 test("staleness matches across absolute/relative path forms", () => {
   let s = reduceUpdate(emptyDiagState(), "/r", "tsc", [d("src/a.ts")]);
   s.stalePaths.add("/r/src/a.ts"); // doc-change hook passes absolute path

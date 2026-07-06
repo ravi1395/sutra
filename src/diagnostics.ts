@@ -41,15 +41,22 @@ function sourceBase(key: string): string {
   return idx === -1 ? key : key.slice(0, idx);
 }
 
-/** Replace diagnostics for (root, source). Any prior key with the same source base
- * (e.g. an earlier "tsc:toolfail:…" once "tsc" recovers, or a previous excerpt) is
- * dropped, and staleness is cleared for paths present in the fresh batch. */
+/** Replace diagnostics for (root, source). Direction-aware cleanup of prior
+ * same-base keys: a recovering good run (e.g. "tsc") still drops an earlier
+ * "tsc:toolfail:…" (and a repeat failure replaces rather than accumulates
+ * excerpts), but an incoming toolfail must NOT drop the last-good entry for
+ * its base — the documented invariant is "tool failure keeps last-good
+ * diags." Staleness is cleared for paths present in the fresh batch. */
 export function reduceUpdate(s: DiagState, root: string, source: string, diags: Diagnostic[]): DiagState {
   const byRoot = new Map(s.byRoot);
   const bySource = new Map(byRoot.get(root) ?? new Map<string, Diagnostic[]>());
   const base = sourceBase(source);
+  const incomingIsToolfail = source.includes(TOOLFAIL_MARK);
   for (const key of [...bySource.keys()]) {
-    if (key !== source && sourceBase(key) === base) bySource.delete(key);
+    if (key === source || sourceBase(key) !== base) continue;
+    const keyIsToolfail = key.includes(TOOLFAIL_MARK);
+    if (incomingIsToolfail && !keyIsToolfail) continue; // keep last-good on failure
+    bySource.delete(key);
   }
   bySource.set(source, diags);
   byRoot.set(root, bySource);
