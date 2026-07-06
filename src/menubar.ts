@@ -1,6 +1,7 @@
 // Workspace switcher anchored on the #ws-wordmark button and the openPopover
 // primitive used by the app menu. The wordmark label shows the current folder name.
 import { icon } from "./icons";
+import { cliInstall, cliInstallState } from "./ipc";
 import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
 
@@ -78,7 +79,12 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
   async function openWorkspaceMenu(): Promise<void> {
     // Recents are backend-async (shared across windows) — await before
     // building the popover so the row list reflects the live shared state.
-    const recents = current ? await actions.recents() : [];
+    // cliState degrades to "current" (no row) on any failure (non-macOS, IPC
+    // error) so a slow/missing backend never blocks or breaks the menu.
+    const [recents, cliState] = await Promise.all([
+      current ? actions.recents() : Promise.resolve([]),
+      cliInstallState().catch((): "absent" | "current" | "stale" => "current"),
+    ]);
     // Build the workspace selector menu using the shared .menu-card grammar.
     openPopover(wordmark, (el, close) => {
       const items = current ? workspaceMenuModel(current, recents, Date.now()) : [];
@@ -149,6 +155,14 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
 
       mkRow("open folder…", "⌘O", () => actions.openFolder());
       mkRow("new window", "⇧⌘N", () => actions.newWindow());
+      if (cliState !== "current") {
+        mkRow(cliState === "stale" ? "update cli command" : "install cli command", "", () => {
+          void (async () => {
+            const r = await cliInstall().catch((cmd: string) => cmd);
+            if (r !== "installed") await navigator.clipboard?.writeText(r); // copy admin cmd
+          })();
+        });
+      }
       if (actions.openSettings) {
         mkRow("settings…", "⌘,", () => actions.openSettings!());
       }

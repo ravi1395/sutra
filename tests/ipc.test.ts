@@ -12,3 +12,12 @@ test("spawnWindow passes path through to the spawn_window command, defaulting to
   assert.match(ipcTs, /export const spawnWindow = \(path\?: string\) =>/);
   assert.match(ipcTs, /invoke<void>\("spawn_window", \{ path: path \?\? null \}\)/);
 });
+
+test("cliInstallState and cliInstall wrap the matching Tauri commands", () => {
+  const ipcTs = readFileSync("src/ipc.ts", "utf8");
+
+  assert.match(ipcTs, /export const cliInstallState = \(\) =>/);
+  assert.match(ipcTs, /invoke<"absent" \| "current" \| "stale">\("cli_install_state"\)/);
+  assert.match(ipcTs, /export const cliInstall = \(\) =>/);
+  assert.match(ipcTs, /invoke<string>\("cli_install"\)/);
+});
