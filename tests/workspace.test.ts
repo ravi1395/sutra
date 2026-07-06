@@ -42,6 +42,9 @@ import {
   sessionFromTabs,
   upsertRecent,
   workspaceMenuModel,
+  addTrust,
+  pathIsTrusted,
+  seedTrusted,
   type RecentWorkspace,
 } from "../src/workspace";
 import {
@@ -120,6 +123,31 @@ test("upsertRecent dedupes by normalized path and moves to front", () => {
   assert.equal(next.length, 2); // no duplicate row
   assert.equal(next[0].openedAt, 9);
   assert.equal(next[0].name, "b");
+});
+
+test("pathIsTrusted matches the exact folder, normalized, not subtrees or siblings", () => {
+  const list = ["/home/u/repo", "/other"];
+  assert.equal(pathIsTrusted(list, "/home/u/repo"), true);
+  assert.equal(pathIsTrusted(list, "/home/u/repo/"), true); // trailing slash normalizes
+  assert.equal(pathIsTrusted(list, "/home/u/repo/src"), false); // subtree is NOT trusted
+  assert.equal(pathIsTrusted(list, "/home/u/repo-evil"), false); // prefix sibling is NOT trusted
+  assert.equal(pathIsTrusted(list, "/home/u"), false); // parent is NOT trusted
+  assert.equal(pathIsTrusted([], "/home/u/repo"), false);
+});
+
+test("addTrust appends a normalized root and is idempotent on duplicates", () => {
+  const once = addTrust([], "/home/u/repo/");
+  assert.deepEqual(once, ["/home/u/repo"]); // normalized (no trailing slash)
+  const twice = addTrust(once, "/home/u/repo"); // already present
+  assert.deepEqual(twice, ["/home/u/repo"]); // no duplicate row
+  const added = addTrust(once, "/home/u/other");
+  assert.deepEqual(added, ["/home/u/repo", "/home/u/other"]);
+});
+
+test("seedTrusted unions existing trust with normalized recents, deduped", () => {
+  const seeded = seedTrusted(["/keep"], ["/a/", "/keep", "/b"]);
+  assert.deepEqual(seeded, ["/keep", "/a", "/b"]); // existing first, recents normalized + deduped
+  assert.deepEqual(seedTrusted([], []), []);
 });
 
 test("upsertRecent caps the list length", () => {
