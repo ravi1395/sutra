@@ -11,7 +11,9 @@ import {
   runDiagnostics,
   pauseDiagnosticsFsTrigger,
   resumeDiagnosticsFsTrigger,
+  onDiagPathsChanged,
 } from "../src/diagnostics";
+import { mock } from "node:test";
 
 // ---- minimal fake `document` so updateChip()'s diagChipEl() singleton doesn't
 // throw under node:test (no real DOM) — mirrors the FakeElement pattern in
@@ -150,6 +152,36 @@ test("resume catch-up run picks up the latest root via getRoot", async () => {
   } finally {
     restoreDom();
   }
+});
+
+test("pause clears an armed settle timer but marks a hidden catch-up pending; resume runs it exactly once", async () => {
+  const restoreDom = setupDiagDom();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let calls = 0;
+    const execute = async (_root: string) => {
+      calls++;
+    };
+    onDiagPathsChanged(["/r/src/main.ts"], "/r", execute); // arms the settle timer
+    pauseDiagnosticsFsTrigger(); // hides the window before the 1s settle fires
+    mock.timers.tick(1000); // even if the cleared timer somehow fired, prove no run happened
+    assert.equal(calls, 0);
+    resumeDiagnosticsFsTrigger(execute, () => "/r");
+    assert.equal(calls, 1); // the armed-but-cleared trigger is not lost
+  } finally {
+    mock.timers.reset();
+    restoreDom();
+  }
+});
+
+test("pause with no armed timer and nothing changed while hidden produces no catch-up on resume", () => {
+  let calls = 0;
+  const execute = async (_root: string) => {
+    calls++;
+  };
+  pauseDiagnosticsFsTrigger(); // nothing armed, no fs event
+  resumeDiagnosticsFsTrigger(execute);
+  assert.equal(calls, 0);
 });
 
 test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {

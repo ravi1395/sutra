@@ -366,6 +366,30 @@ export async function runDiagnostics(
   }
 }
 
+/** Handle one fs-changed batch: if any path is diagnostics-relevant for
+ * `root`, (re)arm the 1s settle timer — or, while paused, latch a pending
+ * catch-up instead of arming a timer that would just get cleared unseen.
+ * Exported for unit testing; `execute` is injectable, `initDiagnostics` wires
+ * this to the real onFsChanged listener. */
+export function onDiagPathsChanged(
+  paths: string[],
+  root: string | null,
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+): void {
+  if (!root) return;
+  if (!paths.some(isDiagRelevantPath)) return;
+  if (diagFsPaused) {
+    diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
+    return;
+  }
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    const runRoot = diagGetRoot?.() ?? root;
+    if (runRoot) void runDiagnostics(runRoot, execute);
+  }, SETTLE_MS);
+}
+
 /** Wire the diagnostics trigger loop to the active workspace root. */
 export function initDiagnostics(getRoot: () => string | null): void {
   currentRoot = getRoot();
@@ -376,18 +400,7 @@ export function initDiagnostics(getRoot: () => string | null): void {
   });
 
   void onFsChanged(({ paths }) => {
-    const relevant = paths.some(isDiagRelevantPath);
-    if (!relevant) return;
-    if (diagFsPaused) {
-      diagFsPendingWhileHidden = true; // defer the tsc/cargo job to re-show
-      return;
-    }
-    if (settleTimer) clearTimeout(settleTimer);
-    settleTimer = setTimeout(() => {
-      settleTimer = null;
-      currentRoot = getRoot();
-      if (currentRoot) void runDiagnostics(currentRoot);
-    }, SETTLE_MS);
+    onDiagPathsChanged(paths, getRoot());
   });
 }
 
@@ -396,19 +409,27 @@ export function initDiagnostics(getRoot: () => string | null): void {
 export function pauseDiagnosticsFsTrigger(): void {
   diagFsPaused = true;
   if (settleTimer) {
+    // An armed timer means a real trigger already fired — clearing it
+    // without recording the pending flag would drop that edit's
+    // diagnostics forever (nothing else re-arms the timer while hidden).
     clearTimeout(settleTimer);
     settleTimer = null;
+    diagFsPendingWhileHidden = true;
   }
 }
 
 // Re-arm on re-show; run one catch-up job if anything changed while hidden.
-export function resumeDiagnosticsFsTrigger(): void {
+// `execute`/`getRoot` are injectable for unit testing.
+export function resumeDiagnosticsFsTrigger(
+  execute: (root: string) => Promise<void> = executeDiagnostics,
+  getRoot: () => string | null = () => diagGetRoot?.() ?? currentRoot,
+): void {
   diagFsPaused = false;
   if (!diagFsPendingWhileHidden) return;
   diagFsPendingWhileHidden = false;
-  const root = diagGetRoot?.() ?? currentRoot;
+  const root = getRoot();
   if (root) {
     currentRoot = root;
-    void runDiagnostics(root);
+    void runDiagnostics(root, execute);
   }
 }
