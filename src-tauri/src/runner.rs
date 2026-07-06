@@ -213,18 +213,21 @@ fn normalize_severity(raw: &str) -> String {
     }
 }
 
-/// Dispatch to the parser named by the job.
-fn parse_diagnostics(job: &DiagJob, stdout: &str) -> Vec<Diagnostic> {
+/// Dispatch to the parser named by the job, feeding it whichever stream that
+/// tool actually writes findings to: `go vet` writes to stderr (stdout is
+/// empty on a findings run), tsc/ruff/cargo write to stdout, and a
+/// user-defined regex automation gets both streams combined since its
+/// pattern's target stream isn't known ahead of time.
+fn parse_diagnostics(job: &DiagJob, stdout: &str, stderr: &str) -> Vec<Diagnostic> {
     match job.parser.as_str() {
         "tsc" => parse_tsc(stdout),
         "cargo" => parse_cargo(stdout),
-        "go" => parse_go(stdout),
+        "go" => parse_go(stderr),
         "ruff" => parse_ruff(stdout),
-        "regex" => job
-            .regex
-            .as_deref()
-            .map(|p| parse_regex(stdout, p, &job.source))
-            .unwrap_or_default(),
+        "regex" => job.regex.as_deref().map(|p| {
+            let combined = format!("{stdout}\n{stderr}");
+            parse_regex(&combined, p, &job.source)
+        }).unwrap_or_default(),
         _ => vec![],
     }
 }
@@ -579,7 +582,7 @@ pub async fn diag_run(
 async fn run_jobs_sequentially(root: &str, jobs: Vec<DiagJob>, app: &tauri::AppHandle) {
     for job in jobs {
         let (exit, timed_out, stdout, stderr) = run_job_blocking(&job).await;
-        let diags = parse_diagnostics(&job, &stdout);
+        let diags = parse_diagnostics(&job, &stdout, &stderr);
         // A hung tool that we had to kill is a tool failure, not clean/findings —
         // exit is meaningless once we've killed the process group ourselves.
         let outcome = if timed_out {
@@ -679,6 +682,22 @@ mod tests {
         let out = r#"[{"filename":"a.py","location":{"row":7,"column":2},"message":"undefined name","code":"F821"}]"#;
         let d = parse_ruff(out);
         assert_eq!((d[0].line, d[0].col), (7, 2));
+    }
+    #[test]
+    fn go_vet_findings_parsed_from_stderr_not_stdout() {
+        // go vet writes findings to stderr; stdout is empty on a real vet run.
+        let job = DiagJob {
+            source: "go".into(),
+            command: "go vet ./...".into(),
+            cwd: ".".into(),
+            parser: "go".into(),
+            regex: None,
+        };
+        let diags = parse_diagnostics(&job, "", "pkg/a.go:12:5: unreachable code\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!((diags[0].line, diags[0].col), (12, 5));
+        // With diags parsed, classify_outcome must report Findings, not ToolFailure.
+        assert_eq!(classify_outcome(1, &diags, "pkg/a.go:12:5: unreachable code\n"), Outcome::Findings);
     }
     #[test]
     fn tool_failure_vs_findings() {
