@@ -72,16 +72,33 @@ pub fn with_auth_token(url: String, token: &str) -> String {
     format!("{url}{sep}token={token}")
 }
 
-/// True when an HTTP authority (Host value, or an Origin with its scheme stripped)
-/// points at loopback. Used to reject cross-origin / DNS-rebinding requests.
-fn is_loopback_authority(v: &str) -> bool {
+/// Extract the host from an HTTP authority: strip a leading scheme (Origin has
+/// one, Host does not), then drop the port — honoring `[ipv6]:port` bracketing.
+fn host_of_authority(v: &str) -> &str {
     let authority = v
         .strip_prefix("http://")
         .or_else(|| v.strip_prefix("https://"))
         .unwrap_or(v);
-    authority.starts_with("127.0.0.1")
-        || authority.starts_with("localhost")
-        || authority.starts_with("[::1]")
+    if let Some(rest) = authority.strip_prefix('[') {
+        // [::1]:port → ::1
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // host:port → host (bare, un-bracketed IPv6 is not valid in an authority)
+    authority.split(':').next().unwrap_or(authority)
+}
+
+/// True when an HTTP authority points at loopback. Uses EXACT host matching — a
+/// prefix check would accept a DNS-rebinding host like `127.0.0.1.evil.com` or
+/// `localhost.evil.com`. `localhost` (any case) and any address in 127.0.0.0/8
+/// or ::1 count; everything else (foreign hosts, `null`, `0.0.0.0`) does not.
+fn is_loopback_authority(v: &str) -> bool {
+    let host = host_of_authority(v).to_ascii_lowercase();
+    if host == "localhost" {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Host and Origin (when present) must reference a loopback authority. A browser
@@ -1294,5 +1311,13 @@ mod tests {
         assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("http://evil.com")));
         // A "null" / opaque Origin is not loopback → rejected.
         assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("null")));
+        // Prefix-match bypass hosts MUST be rejected (exact-host matching).
+        assert!(!host_origin_ok(Some("127.0.0.1.evil.com:5123"), None));
+        assert!(!host_origin_ok(Some("localhost.evil.com:5123"), None));
+        assert!(!host_origin_ok(None, Some("http://127.0.0.1.evil.com")));
+        assert!(!host_origin_ok(Some("0.0.0.0:5123"), None));
+        // Case-insensitive + 127.0.0.0/8 loopback are accepted.
+        assert!(host_origin_ok(Some("LOCALHOST:5123"), None));
+        assert!(host_origin_ok(Some("127.9.9.9:5123"), None));
     }
 }

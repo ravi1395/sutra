@@ -680,10 +680,12 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
 editor.saveHandler = saveTab;
 
 // ---- workspace open (single path shared by switcher rows, File menu, dialogs) ----
-// `explicit` = the user deliberately chose this folder in-app (File▸Open, switcher,
-// worktree pick) → mark it trusted so its repo-defined commands may run. Folders
-// arriving via OS file-association / CLI / single-instance forward or session
-// restore pass explicit=false and stay untrusted until the user clicks Trust.
+// `explicit` = the user picked a *fresh* folder via the File▸Open dialog → mark it
+// trusted so its repo-defined commands may run. Only that dialog (and the Trust
+// toast) grant trust. Everything else — OS file-association / CLI / single-instance
+// forward, session restore, and switcher/worktree re-selects of a recents row —
+// passes explicit=false and relies on persisted trust, so re-opening an
+// OS-delivered folder never silently elevates it.
 async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
   if (explicit) trustWorkspace(dir);
@@ -1424,6 +1426,7 @@ ensureDiagnosticsExtension();
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
   if (!isTestAutoRunEnabled(root)) return;
+  if (!isWorkspaceTrusted(root)) return; // never auto-run a repo's test command for an untrusted folder
   const test = testAutomation(automations);
   if (!test) return;
   void turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
@@ -1790,7 +1793,7 @@ const actions = {
     $<HTMLInputElement>("browser-url").select();
   },
   recents: () => loadRecents(),
-  switchWorkspace: (path: string) => void openWorkspace(path, true), // explicit switcher pick → trusted
+  switchWorkspace: (path: string) => void openWorkspace(path), // re-open only; trust is persisted, never granted by re-selecting a recents row
   addFolder: () => void openFolderDialog(),
 };
 
@@ -1805,7 +1808,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
 workspaceBar.setCurrentWorkspace(null);
 
 gitBar = createGitBar($("branch-whisper"));
-gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path, true); // explicit worktree pick → trusted
+gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path); // worktree is its own root; re-open only, trust not auto-granted
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
 async function refreshGitState(root: string): Promise<void> {
