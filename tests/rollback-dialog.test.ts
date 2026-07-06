@@ -84,11 +84,17 @@ class FakeElement {
   onmousedown: ((e: { target: unknown }) => void) | null = null;
   children: FakeElement[] = [];
   removed = false;
+  tabIndex = 0;
+  focused = false;
   private text = "";
   private listeners = new Map<string, (e?: unknown) => void>();
 
   constructor(tagName: string) {
     this.tagName = tagName;
+  }
+
+  focus(): void {
+    this.focused = true;
   }
 
   get textContent(): string {
@@ -159,6 +165,24 @@ function setupDom() {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("openRollbackDialog: dialog takes focus on open so keystrokes don't reach the editor (W2.3)", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    const onApply = async (paths: string[]): Promise<RollbackResult> => ({ restored: paths, failed: [] });
+    const getDiskHashes = async () => ({ "a.ts": "h1" });
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    const overlay = body.children[body.children.length - 1];
+    const dialog = findByClass(overlay, "rollback-dialog")!;
+    assert.equal(dialog.tabIndex, -1, "dialog must be script-focusable");
+    assert.equal(dialog.focused, true, "dialog must grab focus on open to contain keystrokes");
+    await flush(); // drain the row-resolution chain before tearing down the fake DOM
+    await flush();
+  } finally {
+    restore();
+  }
+});
 
 test("openRollbackDialog: Apply stays disabled while rows load, enables once clean rows resolve", async () => {
   const { body, restore } = setupDom();
