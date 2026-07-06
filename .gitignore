@@ -47,3 +47,6 @@ sutra.key.pub
 # Harness v2 turn ledger (snapshots + agent turn signals)
 .sutra/turns/
 .sutra/turn-signal.jsonl
+.claude/
+.gitignore
+CODEMAP.md
