@@ -360,6 +360,33 @@ test("main uses workspace agent tracking instead of open-tab mtime polling", () 
   assert.match(mainTs, /diffViewer\.renderStatus/);
 });
 
+test("rollback cancels in-flight turn tests before restoring, and onRunnerDone suppresses their record (W3.7)", () => {
+  // main.ts has no exports (pure bootstrap entrypoint) — like the agent-tracking
+  // check above, this asserts against the source text rather than importing it
+  // (importing main.ts executes the whole app bootstrap, which needs a real DOM).
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  // A rollback must cancel this root's suspect turn tests (the rolled-back
+  // turn and any newer one — their code state is about to be replaced) BEFORE
+  // turnRollback runs, and mark them so onRunnerDone doesn't stamp a stale
+  // pass/fail once the killed runner reports back.
+  assert.match(mainTs, /runnerCancel/);
+  assert.match(mainTs, /cancelledTestRunnerIds/);
+  const onApplyIdx = mainTs.indexOf("onApply: async (paths)");
+  const cancelIdx = mainTs.indexOf("cancelTurnTestsFrom", onApplyIdx);
+  const rollbackIdx = mainTs.indexOf("await turnRollback(", onApplyIdx);
+  assert.ok(onApplyIdx >= 0 && cancelIdx >= 0 && rollbackIdx >= 0, "onApply/cancel/rollback all present");
+  assert.ok(cancelIdx < rollbackIdx, "cancellation must happen before turnRollback, not after");
+
+  // onRunnerDone must consult the cancelled set and skip turnTestRecord for a
+  // cancelled id (a kill triggered by rollback must not record a stale result).
+  const onRunnerDoneIdx = mainTs.indexOf("void onRunnerDone(");
+  const deleteCheckIdx = mainTs.indexOf("cancelledTestRunnerIds.delete(p.id)", onRunnerDoneIdx);
+  const recordIdx = mainTs.indexOf("turnTestRecord(root, turnId", onRunnerDoneIdx);
+  assert.ok(onRunnerDoneIdx >= 0 && deleteCheckIdx >= 0 && recordIdx >= 0, "onRunnerDone/cancelled-check/record all present");
+  assert.ok(deleteCheckIdx < recordIdx, "cancelled-id check must gate the record, not follow it");
+});
+
 test("settings modal token sweep uses shared menu heads and tokenized controls", () => {
   const modalTs = readFileSync("src/settings-modal.ts", "utf8");
   const css = readFileSync("src/styles.css", "utf8");

@@ -60,6 +60,7 @@ import {
   turnRollback,
   turnDiskHashes,
   runnerRun,
+  runnerCancel,
   onRunnerDone,
   type AgentTrackingStatus,
   type Turn,
@@ -790,6 +791,11 @@ function renderTurnStrip(root: string): void {
     openRollbackDialog(root, turn, {
       turns,
       onApply: async (paths) => {
+        // The rolled-back turn and any newer turn's code state is about to be
+        // replaced — cancel their in-flight test runs BEFORE restoring so a
+        // long-running suite can't finish against a tree that no longer
+        // matches what it was testing and get recorded as that turn's result.
+        await cancelTurnTestsFrom(root, turn.id);
         const res = await turnRollback(root, rollbackTargetId(turn), paths);
         // turn_poll is consume-once and never re-delivers a closed turn, so
         // rolled_back (set server-side on the manifest) would otherwise never
@@ -1354,9 +1360,36 @@ onTurnClosed((root, turn) => {
     .catch(() => {});
 });
 
+// Runner ids (test:<root>:<turnId>) cancelled by a rollback — consulted by
+// onRunnerDone so the kill triggered below doesn't get misrecorded as that
+// turn's pass/fail once the runner reports the (killed) job done.
+const cancelledTestRunnerIds = new Set<string>();
+
+// Cancel any in-flight turn-test run for `root` whose turn is >= `minTurnId`
+// (the rolled-back turn and every newer one — a rollback is about to replace
+// their code state). runner_cancel is a no-op for an id with nothing running,
+// so calling it for turns without a live test is harmless.
+async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<void> {
+  const suspects = getTurns(root).filter((t) => t.id >= minTurnId);
+  await Promise.all(
+    suspects.map(async (t) => {
+      const id = `test:${root}:${t.id}`;
+      cancelledTestRunnerIds.add(id);
+      try {
+        await runnerCancel(id);
+      } catch {
+        // no live process for this id — nothing to do.
+      }
+    }),
+  );
+}
+
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
 void onRunnerDone((p) => {
   if (!p.id.startsWith("test:")) return;
+  // A rollback-driven cancel must not stamp a stale pass/fail for the turn
+  // whose code state it just replaced.
+  if (cancelledTestRunnerIds.delete(p.id)) return;
   const rest = p.id.slice("test:".length);
   const sep = rest.lastIndexOf(":");
   if (sep <= 0) return;
