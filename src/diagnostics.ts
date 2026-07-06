@@ -296,18 +296,27 @@ export function diagChipEl(): HTMLElement {
   return diagChip;
 }
 
+/** Resolve a diagnostic's path for the problems-panel "go to" dispatch:
+ * absolute paths pass through; a workspace-relative one joins onto `root`.
+ * Belt-and-braces — runner.rs emits absolute Diagnostic.path at the source,
+ * but a user-defined regex automation could still report a relative one. */
+export function resolveGotoPath(path: string, root: string): string {
+  return path.startsWith("/") ? path : `${root}/${path}`;
+}
+
 function renderProblemsPanel(): void {
   const panel = problemsPanelEl();
   panel.innerHTML = "";
   if (!currentRoot) return;
+  const root = currentRoot; // narrow for the row closures below (currentRoot is a mutable module let)
   // Tool failures render first as banner rows so a broken tool is never a silent empty state.
-  for (const f of toolFailures(state, currentRoot)) {
+  for (const f of toolFailures(state, root)) {
     const row = document.createElement("div");
     row.className = "problem-row problem-row--toolfail";
     row.textContent = `${f.source} failed: ${f.excerpt}`;
     panel.appendChild(row);
   }
-  const bySource = state.byRoot.get(currentRoot);
+  const bySource = state.byRoot.get(root);
   if (!bySource) return;
   for (const [source, diags] of bySource) {
     if (source.includes(TOOLFAIL_MARK)) continue;
@@ -316,7 +325,8 @@ function renderProblemsPanel(): void {
       row.className = "problem-row";
       row.textContent = `${diag.severity} ${diag.path}:${diag.line}:${diag.col} ${diag.message}`;
       row.onclick = () => {
-        window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path: diag.path, line: diag.line, col: diag.col } }));
+        const path = resolveGotoPath(diag.path, root);
+        window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path, line: diag.line, col: diag.col } }));
       };
       panel.appendChild(row);
     }

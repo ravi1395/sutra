@@ -1379,7 +1379,7 @@ window.addEventListener("sutra:goto", (e) => {
   void editor
     .openFile(path, detail.line)
     .then(() => tree.setActive(path))
-    .catch(() => {});
+    .catch((err) => console.error(`[sutra:goto] failed to open ${path}`, err));
 });
 
 // Panel hosts (index.html) receive the module-owned singleton panel roots.

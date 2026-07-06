@@ -8,6 +8,7 @@ import {
   settleTrigger,
   toolFailures,
   isDiagRelevantPath,
+  resolveGotoPath,
   runDiagnostics,
   pauseDiagnosticsFsTrigger,
   resumeDiagnosticsFsTrigger,
@@ -194,6 +195,14 @@ test("pause with no armed timer and nothing changed while hidden produces no cat
   pauseDiagnosticsFsTrigger(); // nothing armed, no fs event
   resumeDiagnosticsFsTrigger(execute);
   assert.equal(calls, 0);
+});
+
+test("resolveGotoPath: absolute paths pass through; relative ones join onto root (belt-and-braces)", () => {
+  // runner.rs now emits absolute Diagnostic.path at the source (W3.5) — this
+  // is only a defensive fallback for a relative path slipping through (e.g. a
+  // user regex automation).
+  assert.equal(resolveGotoPath("/abs/src/a.ts", "/r"), "/abs/src/a.ts");
+  assert.equal(resolveGotoPath("src/a.ts", "/r"), "/r/src/a.ts");
 });
 
 test("isDiagRelevantPath ignores build outputs and hidden dirs (diag jobs must not re-trigger themselves)", () => {
