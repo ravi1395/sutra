@@ -60,6 +60,8 @@ mod assets;
 #[cfg(target_os = "macos")]
 mod cli_install;
 mod debug;
+#[cfg(target_os = "macos")]
+mod dock_menu;
 mod focus;
 mod fs_cmds;
 mod git;
@@ -221,6 +223,11 @@ pub fn run() {
                 );
             }
             app.manage(ClaimedRoot(Mutex::new(claimed_root.clone())));
+
+            #[cfg(target_os = "macos")]
+            {
+                crate::dock_menu::install(&app.handle());
+            }
 
             // Stash a cold-start path (CLI arg / OS file-open on launch) for the
             // frontend to consume on boot via `take_launch_path`.
