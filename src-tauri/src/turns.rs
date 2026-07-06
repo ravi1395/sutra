@@ -721,16 +721,34 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
         }
         for file in turn.files.iter_mut() {
             let full_path = Path::new(&root).join(&file.path);
-            match fs::read(&full_path).ok() {
-                Some(bytes) => {
-                    if bytes.len() > MAX_SNAPSHOT_BYTES {
+            // Match the read outcome exactly — collapsing every error to "None =
+            // deleted" (snapshotted stays true) let a later rollback TO this
+            // turn resolve restore_to=Some(None) and DELETE a file that still
+            // exists (W1.1's guard trusts snapshotted). Only NotFound is a real
+            // deletion; unreadable/unsnapshottable outcomes set snapshotted=false
+            // so resolve_restore excludes them (same None-conflation family as
+            // W1.1/W1.2).
+            match fs::read(&full_path) {
+                Ok(bytes) if bytes.len() > MAX_SNAPSHOT_BYTES => {
+                    file.snapshotted = false; // grown past the cap → can't snapshot
+                    file.after_hash = None;
+                }
+                Ok(bytes) => match store.put(&bytes) {
+                    Some(hash) => file.after_hash = Some(hash),
+                    None => {
+                        // Small file but the blob write failed → unsnapshottable,
+                        // not a deletion.
                         file.snapshotted = false;
                         file.after_hash = None;
-                    } else {
-                        file.after_hash = store.put(&bytes);
                     }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    file.after_hash = None; // genuine deletion; snapshotted stays true
                 }
-                None => {
+                Err(_) => {
+                    // Unreadable (EACCES, transient lock, IO error) — unknown
+                    // state, must not be treated as a deletion.
+                    file.snapshotted = false;
                     file.after_hash = None;
                 }
             }
@@ -1383,6 +1401,72 @@ mod tests {
         assert!(
             !plan.contains_key(path),
             "unsnapshotted synthetic entry must not be deletable"
+        );
+    }
+
+    // W4.5: at close-time finalize, a small file whose blob write fails must be
+    // recorded snapshotted=false (unsnapshottable), NOT after=None with
+    // snapshotted=true — otherwise a later rollback spanning this turn plans a
+    // delete of a live file. Force put() to fail by making the objects path a
+    // file so create_dir_all(objects) errors.
+    #[test]
+    fn close_time_put_failure_marks_small_file_unsnapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // Real turns dir, but its `objects` entry is a FILE → blob puts fail.
+        fs::create_dir_all(turns_dir(&root)).unwrap();
+        fs::write(turns_dir(&root).join("objects"), b"not a dir").unwrap();
+
+        // Small target file on disk at close time.
+        let path = "f.txt";
+        fs::write(dir.path().join(path), b"small-after").unwrap();
+
+        // Open a Claude turn touching f.txt (before captured as small/snapshotted).
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(
+                1_000,
+                &[(path.into(), Some(b"small-before".to_vec()), false)],
+                "claude",
+            );
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0,
+                    created_second: 0,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), "{\"agent\":\"claude\",\"ts\":1}\n").unwrap();
+
+        let poll = turn_poll(root.clone()).unwrap();
+        ROOTS.lock().unwrap().remove(&root);
+        assert_eq!(poll.closed.len(), 1, "signal closed the turn");
+
+        let turns = load_manifest(&root);
+        let closed = turns.iter().find(|t| t.boundary_source == "hook").unwrap();
+        let file = closed.files.iter().find(|f| f.path == path).unwrap();
+        assert!(
+            !file.snapshotted,
+            "blob-put failure on a small file must record snapshotted=false"
+        );
+        assert!(file.after_hash.is_none());
+
+        // A later turn also touches f.txt; rolling back TO the failed turn must
+        // not plan a delete of the still-live file (W1.1 guard, now meaningful
+        // for close-time errors).
+        let mut all = turns.clone();
+        all.push(turn_fixture(closed.id + 5, vec![(path, None, Some("hlater"))]));
+        let plan = resolve_restore(&all, closed.id);
+        assert!(
+            !plan.contains_key(path),
+            "unsnapshottable close-time file must not be deletable on rollback"
         );
     }
 
