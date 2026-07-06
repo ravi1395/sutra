@@ -295,6 +295,14 @@ impl BlobStore {
         self.dir.join(format!("{hash}.bin"))
     }
 
+    /// On-disk byte length of the object for `hash` (0 if absent). Feeds the
+    /// GC byte-cap accounting without reading the blob contents.
+    fn object_len(&self, hash: &str) -> u64 {
+        fs::metadata(self.object_path(hash))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    }
+
     fn total_bytes(&self) -> u64 {
         fs::read_dir(&self.dir)
             .map(|entries| {
@@ -606,22 +614,10 @@ fn rewrite_manifest(root: &str, turns: &[Turn]) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-/// GC the manifest + blob store for `root`: past the turn-count or blob-size
-/// cap, drop the oldest turns and any blob no remaining turn references.
-fn gc_if_needed(root: &str) {
-    let mut turns = load_manifest(root);
-    let store = blob_store(root);
-    let over_count = turns.len() > GC_MAX_TURNS;
-    let over_size = store.total_bytes() > GC_MAX_BLOB_BYTES;
-    if !over_count && !over_size {
-        return;
-    }
-    if over_count {
-        let drop_n = turns.len() - GC_MAX_TURNS;
-        turns.drain(0..drop_n);
-    }
+/// Hashes any turn in `turns` references (before or after), deduped.
+fn keep_hashes(turns: &[Turn]) -> std::collections::HashSet<String> {
     let mut keep = std::collections::HashSet::new();
-    for turn in &turns {
+    for turn in turns {
         for file in &turn.files {
             if let Some(h) = &file.before_hash {
                 keep.insert(h.clone());
@@ -631,7 +627,46 @@ fn gc_if_needed(root: &str) {
             }
         }
     }
-    store.gc(&keep);
+    keep
+}
+
+/// Total on-disk bytes of the distinct blobs `turns` reference (content
+/// addressing → each shared blob counted once).
+fn referenced_bytes(store: &BlobStore, turns: &[Turn]) -> u64 {
+    keep_hashes(turns)
+        .iter()
+        .map(|h| store.object_len(h))
+        .sum()
+}
+
+/// GC the manifest + blob store for `root`: past the turn-count or blob-size
+/// cap, drop the oldest turns and any blob no remaining turn references.
+fn gc_if_needed(root: &str) {
+    gc_with_caps(root, GC_MAX_TURNS, GC_MAX_BLOB_BYTES);
+}
+
+fn gc_with_caps(root: &str, max_turns: usize, max_bytes: u64) {
+    let mut turns = load_manifest(root);
+    let store = blob_store(root);
+    let over_count = turns.len() > max_turns;
+    let over_size = store.total_bytes() > max_bytes;
+    if !over_count && !over_size {
+        return;
+    }
+    if over_count {
+        let drop_n = turns.len() - max_turns;
+        turns.drain(0..drop_n);
+    }
+    // Enforce the byte cap by dropping oldest turns until the REFERENCED-blob
+    // byte total fits. Orphan removal alone frees nothing when the count is
+    // under cap (the keep-set still covers every referenced blob), so the cap
+    // was previously never approached from above. Never drop the most recent
+    // turn — rollback of the last turn must stay possible — so the cap is soft:
+    // a single huge turn may exceed it.
+    while turns.len() > 1 && referenced_bytes(&store, &turns) > max_bytes {
+        turns.remove(0);
+    }
+    store.gc(&keep_hashes(&turns));
     let _ = rewrite_manifest(root, &turns);
 }
 
@@ -1093,6 +1128,35 @@ mod tests {
         let mut h = TurnEngine::new(10_000, true); // hook installed → heuristic suppressed
         h.observe_changes(0, &[("a.rs".into(), None, false)], "claude");
         assert!(h.tick(60_000).is_empty());
+    }
+
+    // W4.7: when only the byte cap is exceeded (turn count under cap), GC must
+    // drop oldest turns until the REFERENCED-blob byte total fits — orphan
+    // removal alone frees nothing. The newest turn's blobs stay intact.
+    #[test]
+    fn gc_byte_cap_drops_oldest_turns_until_referenced_bytes_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h1 = store.put(&vec![1u8; 100]).unwrap();
+        let h2 = store.put(&vec![2u8; 100]).unwrap();
+        let h3 = store.put(&vec![3u8; 100]).unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("a", None, Some(&h1))])).unwrap();
+        append_manifest(&root, &turn_fixture(2, vec![("b", None, Some(&h2))])).unwrap();
+        append_manifest(&root, &turn_fixture(3, vec![("c", None, Some(&h3))])).unwrap();
+
+        // Cap fits ~one 100-byte blob; count cap generous so only bytes drive it.
+        gc_with_caps(&root, 50, 150);
+
+        let turns = load_manifest(&root);
+        assert_eq!(
+            turns.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![3],
+            "oldest turns dropped until referenced bytes fit; newest retained"
+        );
+        assert!(store.get(&h3).is_some(), "newest turn's blob intact");
+        assert!(store.get(&h1).is_none(), "orphaned oldest blob removed");
+        assert!(store.get(&h2).is_none(), "orphaned oldest blob removed");
     }
 
     // W4.6: if a Claude Stop hook never fires (SIGKILL/terminal-closed/crash),
