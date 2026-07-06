@@ -243,6 +243,13 @@ export function openRollbackDialog(
     // manually) so a concurrent re-resolve can't race the initial load's
     // in-flight getDiskHashes call.
     if (!rowsLoaded) return;
+    // The dirty-buffer guard only re-runs on row-load and checkbox change; the
+    // dialog never takes DOM focus (see below), so a keystroke reaching the
+    // editor behind it goes unnoticed until now. Re-run it at the moment of
+    // apply and bail if it now blocks — the banner stays visible, explaining
+    // why nothing happened.
+    refreshGuard();
+    if (applyBtn.disabled) return;
     failuresEl.textContent = "";
     applyBtn.disabled = true;
     const paths = checkedPaths();
@@ -294,6 +301,13 @@ export function openRollbackDialog(
 
   refreshGuard();
   document.body.appendChild(overlay);
+  // Focus containment: the overlay is a plain DOM node, not a native <dialog>,
+  // so without this the CM6 editor behind it keeps focus and keystrokes keep
+  // landing in the buffer while the dialog is open (see the dirty re-check
+  // above). tabIndex -1 makes it focusable via script without adding it to
+  // the tab order.
+  dialog.tabIndex = -1;
+  dialog.focus?.();
 
   void resolveRollbackChecklist(root, opts.turns, rollbackTargetId(turn), opts.getDiskHashes).then(renderRows, renderError);
 }

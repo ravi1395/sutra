@@ -319,6 +319,48 @@ test("openRollbackDialog: apply revalidates rows — drift on a checked path blo
   }
 });
 
+// W2.3: the dirty-buffer guard only re-runs on row-load and checkbox change,
+// not at click time. The dialog is a DOM overlay that never takes focus, so
+// keystrokes still land in the editor behind it — a checked path can go dirty
+// after load with no checkbox event to trigger refreshGuard.
+test("openRollbackDialog: apply re-checks the dirty guard — a path gone dirty after load blocks apply", async () => {
+  const { body, restore } = setupDom();
+  try {
+    let tabs: { path: string; name: string; active: boolean; dirty: boolean }[] = [
+      { path: "/r/a.ts", name: "a.ts", active: true, dirty: false },
+    ];
+    setRollbackEditor({ getOpenTabs: () => tabs } as unknown as EditorManager);
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "h2" }); // clean → checked by default
+    let applyCalled = false;
+    const onApply = async (paths: string[]): Promise<RollbackResult> => {
+      applyCalled = true;
+      return { restored: paths, failed: [] };
+    };
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    assert.equal(applyBtn.disabled, false, "clean checked row: Apply starts enabled");
+
+    // A keystroke lands in the unfocused editor behind the dialog — no
+    // checkbox event fires, so refreshGuard never re-runs on its own.
+    tabs = [{ path: "/r/a.ts", name: "a.ts", active: true, dirty: true }];
+    applyBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(applyCalled, false, "apply must not fire once the checked path went dirty");
+    const banner = findByClass(overlay, "rollback-dirty-banner")!;
+    assert.equal(banner.style.display, "", "dirty banner must show once apply re-checks");
+  } finally {
+    setRollbackEditor({ getOpenTabs: () => [] } as unknown as EditorManager);
+    restore();
+  }
+});
+
 test("openRollbackDialog: apply proceeds when re-resolved rows are unchanged", async () => {
   const { body, restore } = setupDom();
   try {
