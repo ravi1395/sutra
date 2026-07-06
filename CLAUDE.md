@@ -68,6 +68,11 @@ src-tauri/src/
   lang/symbol_index.rs workspace symbol index  |  lang/registry.rs  language registry
   lang/features/       symbols.rs  hover.rs  completion.rs  navigation.rs
   lang/queries/<lang>/ symbols.scm  scopes.scm  members.scm
+  window_registry.rs   cross-process root registry: canonical-root claim/lookup/GC, pid+start+exe liveness
+  focus.rs             loopback focus IPC: warm caller → live owner raise-window + open-path, token-guarded
+  launcher.rs          launch-arg resolution (path→root/untitled), cold-claim + warm focus-or-spawn funnel
+  app_state.rs         disk-backed cross-process state (recents/trust/settings/ui), atomic temp+rename writes
+  cli_install.rs       macOS-only `sutra` CLI shim install/state (/usr/local/bin/sutra), explicit user-triggered
 
 tests/  one .test.ts per frontend module (node:test)
 ```
@@ -84,8 +89,9 @@ tests/  one .test.ts per frontend module (node:test)
 - Watcher noise filter: fs-changed drops contents of `node_modules`/`target`/`dist` and `.git/objects`+`.git/logs`; keeps dir-itself events, `.git/HEAD`/`index`/`refs/**` (gitbar + gutter refresh after commit/checkout), and all other hidden dirs (open-tab reload, tree)
 
 ## State
-- Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 312 pass; `cargo test` (inside src-tauri/) → 186 pass
+- Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump. **v2.2.0 bump pending GUI verification of multi-window** (`feat/multi-window` branch: multi-process windows are code-complete + unit-tested, but process-spawn/focus-IPC/Dock behavior needs a manual app smoke pass via `sutra-verify` before the version moves — see "done = behavior observed").
+- Multi-window/CLI (`feat/multi-window`): one process per canonical root (`window_registry.rs` + `launcher.rs`), cross-process focus via loopback IPC (`focus.rs`), disk-backed recents/trust/settings/ui (`app_state.rs`), macOS `sutra` CLI shim (`cli_install.rs`); this **supersedes** the "single window, replace root" OS-open note below once merged. Dock menu (`dock_menu.rs`) is a separate in-progress spike — planned, not shipped.
+- Tests: `npm test` → 320 pass; `cargo test` (inside src-tauri/) → 209 pass
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, `create_automation`/`list_automations`/`run_automation`, etc.) via `mcp.rs`
 - OS open: `lib.rs` single-instance + `fileAssociations` + macOS `RunEvent::Opened` + cold-start `take_launch_path` → emit `open-path{path,isDir}`; frontend `routeOpenPath`/`resolveOpenPath` (single window, replace root)
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
