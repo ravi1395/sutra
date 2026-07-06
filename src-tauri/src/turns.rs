@@ -316,6 +316,8 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
     }
     for path in touched_after {
         let mut last_after_leq_n: Option<Option<String>> = None;
+        let mut contrib_unsafe = false;
+        let mut contrib_snapshotted = true;
         let mut earliest_before: Option<Option<String>> = None;
         let mut earliest_unsafe = false;
         let mut earliest_snapshotted = true;
@@ -331,7 +333,12 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                 if turn.id <= n {
                     // Iterating in ascending id order, so the last assignment
                     // wins → the latest turn id <= n that touched this path.
+                    // Track ITS flags too (not just the earliest turn's) — a
+                    // later turn's after_hash=None can come from the >10MB
+                    // close-time cap, not from genuine deletion.
                     last_after_leq_n = Some(file.after_hash.clone());
+                    contrib_unsafe = file.unsafe_before;
+                    contrib_snapshotted = file.snapshotted;
                 }
                 if turn.id < earliest_id {
                     earliest_id = turn.id;
@@ -341,13 +348,24 @@ pub fn resolve_restore(turns: &[Turn], n: u64) -> BTreeMap<String, Option<String
                 }
             }
         }
+        // Whether last_after_leq_n was ever assigned — determines which flags
+        // gate the delete guard below (contributing turn vs earliest-fallback).
+        let contributing_from_leq = last_after_leq_n.is_some();
         let restore_to = last_after_leq_n.unwrap_or_else(|| earliest_before.unwrap_or(None));
+        let (guard_unsafe, guard_snapshotted) = if contributing_from_leq {
+            (contrib_unsafe, contrib_snapshotted)
+        } else {
+            (earliest_unsafe, earliest_snapshotted)
+        };
         // Never plan a delete for a file whose pre-edit content was unrecoverable
         // (unsafe_before) or never snapshotted (>10MB cap): before_hash=None there
         // means "original unknown", not "didn't exist", so deleting would be silent
         // data loss. Exclude such files from rollback entirely (the frontend
-        // surfaces them via TurnFile.unsafe_before / !snapshotted).
-        if restore_to.is_none() && (earliest_unsafe || !earliest_snapshotted) {
+        // surfaces them via TurnFile.unsafe_before / !snapshotted). Guard uses the
+        // CONTRIBUTING turn's flags (the one that produced restore_to), not the
+        // earliest turn's — a live oversized file grown past the cap in a later
+        // turn must not be deleted just because its earliest turn was safe.
+        if restore_to.is_none() && (guard_unsafe || !guard_snapshotted) {
             continue;
         }
         plan.insert(path, restore_to);
@@ -1022,6 +1040,25 @@ mod tests {
         let plan = resolve_restore(&turns, 1);
         assert_eq!(plan.get("a"), Some(&Some("h1".to_string()))); // back to turn1's after
         assert_eq!(plan.get("b"), Some(&None));                    // b did not exist at end of turn1 → delete
+    }
+
+    // W1.1: restore_to for a path comes from the LATEST turn id<=n that touched
+    // it (last_after_leq_n), but the never-delete guard must gate on that same
+    // CONTRIBUTING turn's flags — not the earliest turn's. turn1 edits big.bin
+    // while small (snapshotted=true); turn5 grows it past the 10MB cap
+    // (after_hash=None, snapshotted=false); turn7 touches it again. Rolling back
+    // to n=6 must not plan a delete for the still-live oversized file.
+    #[test]
+    fn restore_guard_uses_contributing_turns_flags_not_earliest() {
+        let t1 = turn_fixture(1, vec![("big.bin", Some("h0"), Some("h1"))]);
+        let mut t5 = turn_fixture(5, vec![("big.bin", Some("h1"), None)]);
+        t5.files[0].snapshotted = false; // grown past MAX_SNAPSHOT_BYTES at close
+        let t7 = turn_fixture(7, vec![("big.bin", None, Some("h7"))]);
+        let plan = resolve_restore(&[t1, t5, t7], 6);
+        assert!(
+            !plan.contains_key("big.bin"),
+            "must not plan a delete for a live oversized file"
+        );
     }
 
     #[test]
