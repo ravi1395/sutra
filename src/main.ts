@@ -39,6 +39,7 @@ import {
   movePath,
   gitChangedFiles,
   gitCheckout,
+  spawnWindow,
   onPreviewOpen,
   onDrive,
   onOpenPath,
@@ -1622,7 +1623,8 @@ window.addEventListener("keydown", (e) => {
   // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
   if (mod && e.code === "KeyN") {
     e.preventDefault();
-    editor.newUntitled();
+    if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
+    else editor.newUntitled(); // ⌘N New File
   } else if (mod && e.code === "KeyO") {
     e.preventDefault();
     void openFolderDialog();
@@ -1795,6 +1797,7 @@ const actions = {
   recents: () => loadRecents(),
   switchWorkspace: (path: string) => void openWorkspace(path), // re-open only; trust is persisted, never granted by re-selecting a recents row
   addFolder: () => void openFolderDialog(),
+  newWindow: () => void spawnWindow(),
 };
 
 workspaceBar = mountWorkspaceBar($("titlebar"), {
@@ -1802,6 +1805,7 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   switchWorkspace: actions.switchWorkspace,
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
+  newWindow: actions.newWindow,
   openSettings: () => openSettings(),
   checkForUpdates: () => void updater.checkNow(),
 });

@@ -26,6 +26,8 @@ export const deletePath = (path: string) => invoke<void>("delete_path", { path }
 export const createDir = (path: string) => invoke<void>("create_dir", { path });
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
+// New Window: no path → fresh untitled child; a path with a live owner focuses it.
+export const spawnWindow = (path?: string) => invoke<void>("spawn_window", { path: path ?? null });
 
 export interface GitStatusEntry {
   path: string;

@@ -45,6 +45,13 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
     Some(serde_json::json!({ "path": raw, "isDir": p.is_dir() }))
 }
 
+/// Frontend New Window. `None` → fresh untitled child. A path with a live
+/// owner focuses that owner (one-owner invariant); else spawns a child.
+#[tauri::command]
+fn spawn_window(path: Option<String>) {
+    crate::launcher::warm_launch(path.as_deref(), true);
+}
+
 // agent_tracker/runner/turns are pub: their contract fns are stubbed for the
 // harness-v2 wave and consumed cross-module (kept out of dead_code until wired).
 pub mod agent_tracker;
@@ -303,6 +310,7 @@ pub fn run() {
             watcher::watch_start,
             watcher::watch_stop,
             take_launch_path,
+            spawn_window,
             #[cfg(target_os = "macos")]
             cli_install::cli_install_state,
             #[cfg(target_os = "macos")]

@@ -9,6 +9,7 @@ export interface WorkspaceActions {
   switchWorkspace(path: string): void;
   addFolder(): void;
   openFolder(): void;
+  newWindow(): void;
   /** Optional: open the settings modal (⌘,). */
   openSettings?: () => void;
   /** Optional: run a user-initiated update check that reports its outcome. */
@@ -145,6 +146,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       };
 
       mkRow("open folder…", "⌘O", () => actions.openFolder());
+      mkRow("new window", "⇧⌘N", () => actions.newWindow());
       if (actions.openSettings) {
         mkRow("settings…", "⌘,", () => actions.openSettings!());
       }
