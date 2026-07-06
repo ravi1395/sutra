@@ -42,6 +42,7 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
 pub mod agent_tracker;
 mod assets;
 mod debug;
+mod focus;
 mod fs_cmds;
 mod git;
 mod lang;
