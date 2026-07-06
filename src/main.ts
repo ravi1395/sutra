@@ -65,7 +65,7 @@ import {
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, turnHeaderEl, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnHeaderEl, whisperText } from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -801,6 +801,12 @@ function renderTurnStrip(root: string): void {
         // rolled_back (set server-side on the manifest) would otherwise never
         // reach turnsByRoot — re-fetch the full list so the strip reflects it
         // immediately instead of showing a stale live Rollback button.
+        // Optimistically flag the rolled-back turn locally FIRST so the strip
+        // disables its Rollback button even if the authoritative turnList
+        // re-fetch below throws — otherwise an IPC failure would leave a live
+        // button that re-applies into a false-success no-op. A successful
+        // turnList overwrites this with the server truth.
+        markRolledBack(root, turn.id);
         try {
           replaceTurns(root, await turnList(root));
         } catch (e) {
@@ -1367,21 +1373,18 @@ const cancelledTestRunnerIds = new Set<string>();
 
 // Cancel any in-flight turn-test run for `root` whose turn is >= `minTurnId`
 // (the rolled-back turn and every newer one — a rollback is about to replace
-// their code state). runner_cancel is a no-op for an id with nothing running,
-// so calling it for turns without a live test is harmless.
+// their code state). Only ids that runner_cancel ACTUALLY killed get added to
+// the suppression set: adding an id unconditionally would poison a turn whose
+// test hasn't started yet (e.g. a still-open newer turn, or when the backend
+// then rejects the rollback) and silently drop that turn's future legitimate
+// pass/fail once it runs for real.
 async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<void> {
-  const suspects = getTurns(root).filter((t) => t.id >= minTurnId);
-  await Promise.all(
-    suspects.map(async (t) => {
-      const id = `test:${root}:${t.id}`;
-      cancelledTestRunnerIds.add(id);
-      try {
-        await runnerCancel(id);
-      } catch {
-        // no live process for this id — nothing to do.
-      }
-    }),
-  );
+  const ids = getTurns(root)
+    .filter((t) => t.id >= minTurnId)
+    .map((t) => `test:${root}:${t.id}`);
+  for (const id of await suppressibleCancelledIds(ids, runnerCancel)) {
+    cancelledTestRunnerIds.add(id);
+  }
 }
 
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).

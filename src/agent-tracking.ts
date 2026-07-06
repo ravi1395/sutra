@@ -86,6 +86,37 @@ export function isRollbackable(turn: Turn, allTurns: Turn[]): boolean {
   return !turn.rolledBack && !allTurns.some((t) => t.boundarySource === "open");
 }
 
+/** Optimistically mark `turnId` rolled back in the local cache. Fallback for
+ * when the authoritative turnList re-fetch after a rollback fails (IPC error):
+ * without it the strip keeps a live Rollback button and re-applying no-ops into
+ * a false success. A later successful replaceTurns overwrites this. */
+export function markRolledBack(root: string, turnId: number): void {
+  const turns = turnsByRoot.get(root);
+  const turn = turns?.find((t) => t.id === turnId);
+  if (turn) turn.rolledBack = true;
+}
+
+/** Of `ids`, the turn-test runner ids a cancel actually KILLED (returned true).
+ * Only these may be suppressed in onRunnerDone — poisoning an id with nothing
+ * running (cancel → false, e.g. a still-open newer turn whose test hasn't
+ * started, or a rollback the backend then rejects) would silently drop that
+ * turn's future *legitimate* test result. */
+export async function suppressibleCancelledIds(
+  ids: string[],
+  cancel: (id: string) => Promise<boolean>,
+): Promise<string[]> {
+  const results = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        return (await cancel(id)) ? id : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return results.filter((id): id is string => id !== null);
+}
+
 /** Subscribe to turn-closed events; multiple subscribers allowed. */
 export function onTurnClosed(cb: (root: string, turn: Turn) => void): void {
   turnClosedSubscribers.push(cb);

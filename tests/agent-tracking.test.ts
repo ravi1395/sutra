@@ -66,9 +66,11 @@ import {
   groupHunksByTurn,
   hunkDiagBadge,
   isRollbackable,
+  markRolledBack,
   onTurnClosed,
   replaceTurns,
   setTurnState,
+  suppressibleCancelledIds,
   turnChipClass,
   type ReviewFile,
 } from "../src/agent-tracking";
@@ -151,4 +153,29 @@ test("isRollbackable: rolled-back turns and turns while any turn is open are not
   assert.equal(isRollbackable(rolledBack, [t1, rolledBack]), false);
   const openTurn = { ...turnFixture(3, ["c.ts"]), boundarySource: "open" as const };
   assert.equal(isRollbackable(t1, [t1, openTurn]), false);
+});
+
+test("markRolledBack flags the turn locally (W2.1 fallback when turnList refetch fails)", () => {
+  setTurnState("/rootD", { openTurn: null, closed: [turnFixture(1, ["a.ts"]), turnFixture(2, ["b.ts"])] });
+  markRolledBack("/rootD", 2);
+  assert.equal(getTurns("/rootD").find((t) => t.id === 2)?.rolledBack, true);
+  assert.equal(getTurns("/rootD").find((t) => t.id === 1)?.rolledBack, false);
+  markRolledBack("/rootD", 99); // unknown id → no throw, no effect
+});
+
+test("suppressibleCancelledIds suppresses only ids a cancel actually killed (W3.7)", async () => {
+  // A rollback of turn 5 with a still-open turn 6: runner_cancel returns false
+  // for turn 6 (nothing running) — its id must NOT be suppressed, else turn 6's
+  // future legitimate test result would be silently dropped.
+  const ids = ["test:/r:5", "test:/r:6"];
+  const killed: Record<string, boolean> = { "test:/r:5": true, "test:/r:6": false };
+  const out = await suppressibleCancelledIds(ids, async (id) => killed[id] ?? false);
+  assert.deepEqual(out, ["test:/r:5"]);
+});
+
+test("suppressibleCancelledIds swallows a cancel that throws (W3.7)", async () => {
+  const out = await suppressibleCancelledIds(["test:/r:1"], async () => {
+    throw new Error("ipc down");
+  });
+  assert.deepEqual(out, []);
 });
