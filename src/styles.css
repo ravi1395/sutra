@@ -2715,6 +2715,46 @@ button:hover {
   cursor: pointer;
   white-space: nowrap;
 }
+/* Workspace-trust toast: offered when an untrusted folder's diagnostics/automations are suppressed. */
+.trust-toast {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  max-width: 90vw;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  z-index: 9000;
+}
+.trust-toast-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trust-toast-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  background: var(--em-dim);
+  color: var(--bg);
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.trust-toast-close {
+  background: none;
+  border: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  flex: 0 0 auto;
+}
 .cmp-template-bar {
   display: flex;
   flex-wrap: wrap;

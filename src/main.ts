@@ -75,6 +75,8 @@ import {
   notifyDocChanged,
   pauseDiagnosticsFsTrigger,
   resumeDiagnosticsFsTrigger,
+  runDiagnostics,
+  setUntrustedDiagnosticsHandler,
   problemsPanelEl,
 } from "./diagnostics";
 import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
@@ -678,6 +680,7 @@ editor.saveHandler = saveTab;
 async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
   if (explicit) trustWorkspace(dir);
+  hideTrustToast(); // drop any leftover toast from the previous root
   persistWorkspaceSession();
   suppressSessionSave = true;
   try {
@@ -1333,6 +1336,54 @@ async function pollAgentChanges(): Promise<void> {
 initDiagnostics(() => currentRoot);
 initSessions(() => currentRoot);
 setRollbackEditor(editor);
+
+// ---- workspace-trust toast ----
+// When diagnostics/automations are suppressed for an untrusted folder, offer a
+// one-click Trust affordance. Suppression fires on every fs-settle, so the toast
+// is idempotent per root and stays dismissed for the session once closed.
+let trustToast: HTMLElement | null = null;
+let trustToastRoot: string | null = null;
+const trustDismissed = new Set<string>();
+
+function hideTrustToast(): void {
+  trustToast?.remove();
+  trustToast = null;
+  trustToastRoot = null;
+}
+
+function showTrustToast(root: string): void {
+  if (trustDismissed.has(root)) return; // user closed it this session
+  if (trustToast && trustToastRoot === root) return; // already shown for this root
+  hideTrustToast();
+  trustToastRoot = root;
+
+  const el = document.createElement("div");
+  el.className = "trust-toast";
+  const msg = document.createElement("span");
+  msg.className = "trust-toast-msg";
+  msg.textContent = "Automations & diagnostics are disabled — this folder isn't trusted.";
+  const trustBtn = document.createElement("button");
+  trustBtn.className = "trust-toast-btn";
+  trustBtn.textContent = "Trust folder";
+  trustBtn.onclick = () => {
+    trustWorkspace(root);
+    hideTrustToast();
+    void runDiagnostics(root); // run the now-permitted jobs immediately
+  };
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "trust-toast-close";
+  closeBtn.title = "Dismiss";
+  closeBtn.textContent = "✕";
+  closeBtn.onclick = () => {
+    trustDismissed.add(root);
+    hideTrustToast();
+  };
+  el.append(msg, trustBtn, closeBtn);
+  document.body.appendChild(el);
+  trustToast = el;
+}
+
+setUntrustedDiagnosticsHandler(showTrustToast);
 
 // Diagnostics squiggles are appended per-EditorState: fresh states created on
 // tab open/switch lack the extension, so re-apply whenever tabs change. The
