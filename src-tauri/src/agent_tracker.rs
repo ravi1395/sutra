@@ -108,6 +108,12 @@ const SESSION_IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
 /// within a single tick.
 const KIND_CACHE_TTL: Duration = Duration::from_millis(1200);
 
+/// Cap on the bytes the tracker will read or retain for one pending change.
+/// Mirrors turns.rs MAX_SNAPSHOT_BYTES (10 MB). Above it, a file is tracked
+/// Unsafe with observed=None — never held in memory (a Bytes restore + observed
+/// copy is two full copies per file) and never re-read every reconcile tick.
+const MAX_PENDING_BYTES: u64 = 10 * 1024 * 1024;
+
 // Single process-wide tracker instance. Tauri manages `AgentTrackerState` as a
 // unit handle so command signatures keep `State<'_, AgentTrackerState>`, but the
 // real state lives here so free functions (pending_snapshot, detected_agent_kind,
@@ -967,15 +973,34 @@ fn compare_snapshots(
             (Some(_), None) => "D",
             _ => "M",
         };
+        let human_touched = previous
+            .get(&path)
+            .map(|change| change.human_touched)
+            .unwrap_or(false);
+        // Cap bytes per file (mirrors turns.rs MAX_SNAPSHOT_BYTES). The
+        // signature's size comes from file_signature's stat, so an oversized
+        // file is detected without reading it: track it Unsafe (no observed
+        // bytes, no baseline copy) — excluded from revert and flagged in the UI
+        // — instead of holding two full copies and re-reading it every tick.
+        let oversized = before.map(|s| s.size).unwrap_or(0) > MAX_PENDING_BYTES
+            || after.map(|s| s.size).unwrap_or(0) > MAX_PENDING_BYTES;
+        if oversized {
+            changes.insert(
+                path,
+                PendingChange {
+                    status: status.to_string(),
+                    human_touched,
+                    observed: None,
+                    restore: RestoreSource::Unsafe,
+                },
+            );
+            continue;
+        }
         let observed = after.and_then(|_| fs::read(&path).ok());
         let restore = previous
             .get(&path)
             .map(|change| change.restore.clone())
             .unwrap_or_else(|| restore_source_for_change(root, &path, before));
-        let human_touched = previous
-            .get(&path)
-            .map(|change| change.human_touched)
-            .unwrap_or(false);
         changes.insert(
             path,
             PendingChange {
@@ -1765,6 +1790,38 @@ mod tests {
         assert_eq!(changes[&PathBuf::from("deleted.txt")].status, "D");
         assert_eq!(changes[&PathBuf::from("modified.txt")].status, "M");
         assert!(!changes.contains_key(&PathBuf::from("same.txt")));
+    }
+
+    // W4.9: a file whose size exceeds MAX_PENDING_BYTES must be tracked Unsafe
+    // with no bytes held (observed=None) — never two full copies in memory nor
+    // re-read every reconcile tick — and excluded from bulk revert. The size
+    // check reads the signature (file_signature's stat), so no read of the
+    // oversized file's contents is performed here.
+    #[test]
+    fn compare_snapshots_caps_oversized_file_as_unsafe() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        fs::write(&path, b"small-original").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        // Agent grows the artifact past the cap.
+        fs::write(&path, vec![7u8; (MAX_PENDING_BYTES + 1) as usize]).unwrap();
+        let current = scan_workspace(dir.path(), Some(&baseline)).unwrap();
+
+        let changes = compare_snapshots(dir.path(), &baseline, &current, &BTreeMap::new());
+        let change = &changes[&path];
+        assert_eq!(change.status, "M");
+        // Old code held the full >10MB content here; the cap keeps zero bytes.
+        assert!(change.observed.is_none(), "no bytes retained for oversized file");
+        assert!(matches!(change.restore, RestoreSource::Unsafe));
+
+        // revert_safe_changes must skip it (Unsafe is never bulk-reverted).
+        let mut pending = changes;
+        let result = revert_safe_changes(&mut pending);
+        assert_eq!(
+            result.unsafe_paths,
+            vec![path.to_string_lossy().into_owned()]
+        );
+        assert!(result.reverted_paths.is_empty());
     }
 
     #[test]
