@@ -250,6 +250,9 @@ pub struct BlobStore {
     dir: PathBuf,
 }
 
+/// Monotonic per-call counter for BlobStore temp filenames (see `put`).
+static BLOB_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl BlobStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         BlobStore { dir: dir.into() }
@@ -274,8 +277,14 @@ impl BlobStore {
             // Write to a temp file then rename: a direct `fs::write` to the
             // final path is not atomic, so a crash/power-loss mid-write would
             // leave a truncated object that `path.exists()` alone would trust
-            // forever. Rename within one dir is atomic on macOS/Linux.
-            let tmp = self.dir.join(format!(".tmp-{hash}-{}", std::process::id()));
+            // forever. Rename within one dir is atomic on macOS/Linux. The temp
+            // name carries a per-call sequence (not just pid) so two concurrent
+            // puts of identical content — safe today only because callers hold
+            // the global ROOTS lock — can never race on the same temp path.
+            let seq = BLOB_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = self
+                .dir
+                .join(format!(".tmp-{hash}-{}-{seq}", std::process::id()));
             fs::write(&tmp, bytes).ok()?;
             fs::rename(&tmp, &path).ok()?;
         }
