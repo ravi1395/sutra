@@ -265,17 +265,42 @@ impl Tracker {
     /// path. Lets background worktree agents report to their own session
     /// instead of being rejected against the active workspace root.
     fn record_report_owned(&mut self, path: PathBuf, active_root: Option<&Path>) -> bool {
-        if let Some(owner) = self.owning_root(&path) {
-            self.record_owned_or_nested(owner, path);
+        // Match sessions by canonical form and map the reported path back into
+        // the owning session's STORED (frontend) form, so a symlinked-root
+        // workspace (macOS /tmp -> /private/tmp) doesn't split one file across
+        // a canonical ingest key and a frontend baseline key (→ spurious "A" +
+        // duplicate pending entry). Exactly one path form circulates per root.
+        if let Some((owner, mapped)) = self.owning_root_mapped(&path) {
+            self.record_owned_or_nested(owner, mapped);
             return true;
         }
         let Some(root) = active_root else { return false };
         let Ok(root_canon) = fs::canonicalize(root) else { return false };
-        if !path.starts_with(&root_canon) {
+        let Ok(rel) = path
+            .strip_prefix(&root_canon)
+            .or_else(|_| path.strip_prefix(root))
+        else {
             return false;
-        }
-        self.record_agent_report(root, path);
+        };
+        self.record_agent_report(root, root.join(rel));
         true
+    }
+
+    /// Owning session for a possibly-canonicalized `path`: the longest tracked
+    /// root (by canonical or stored prefix) that contains it, paired with the
+    /// path re-expressed in that root's STORED form. See `record_report_owned`.
+    fn owning_root_mapped(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
+        self.sessions
+            .keys()
+            .filter_map(|root| {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    return Some((root.clone(), root.join(rel)));
+                }
+                let canon = fs::canonicalize(root).ok()?;
+                let rel = path.strip_prefix(&canon).ok()?;
+                Some((root.clone(), root.join(rel)))
+            })
+            .max_by_key(|(root, _)| root.as_os_str().len())
     }
 
     /// Route a report to `owner`'s session, unless `path` lies inside a nested
@@ -2238,6 +2263,45 @@ mod tests {
             edited.exists(),
             "revert must never delete a pre-existing nested-repo file"
         );
+    }
+
+    // W4.2: a workspace opened via a symlinked path (macOS /tmp -> /private/tmp)
+    // means every hook-reported edit arrives canonicalized and misses the
+    // baseline keyed under the frontend (symlinked) form — classifying a
+    // pre-existing file as "A". record_report_owned must map the canonical
+    // reported path back into the owning session's stored form so it lands as a
+    // baseline HIT ("M"), single pending entry.
+    #[test]
+    fn record_report_owned_maps_canonical_path_into_symlinked_session() {
+        let real = tempdir().unwrap();
+        fs::write(real.path().join("f.txt"), "pre-existing").unwrap();
+
+        // Session keyed by the symlinked (frontend) form of the same dir.
+        let link_parent = tempdir().unwrap();
+        let link = link_parent.path().join("proj");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let baseline = scan_workspace(&link, None).unwrap();
+        assert!(baseline.contains_key(&link.join("f.txt")));
+        let mut tracker = tracker_with(TrackingSession {
+            root: link.clone(),
+            head: "head".into(),
+            last_scan: baseline.clone(),
+            baseline,
+            pending: BTreeMap::new(),
+            agent_active: true,
+            settle_polls: 0,
+            report_mode: true,
+        });
+
+        // Hook edits the file, then reports the CANONICAL path form.
+        fs::write(real.path().join("f.txt"), "agent-edited").unwrap();
+        let canonical = fs::canonicalize(link.join("f.txt")).unwrap();
+        assert!(tracker.record_report_owned(canonical, None));
+
+        let session = tracker.only_session();
+        assert_eq!(session.pending.len(), 1, "one file → exactly one pending entry");
+        let entry = session.pending.get(&link.join("f.txt")).expect("keyed by session form");
+        assert_eq!(entry.status, "M", "baseline hit, not a spurious create");
     }
 
     fn commit_all(repo: &git2::Repository, message: &str) -> String {
