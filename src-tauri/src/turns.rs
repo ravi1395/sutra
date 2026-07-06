@@ -245,22 +245,39 @@ impl BlobStore {
     }
 
     /// Store `bytes`, returning its content hash. Skips the write (dedup) when
-    /// an object with the same hash already exists.
+    /// a HEALTHY object with the same hash already exists — verified by
+    /// re-hashing it, not just `path.exists()`, so a truncated object left by a
+    /// crash mid-write (see `get`) gets repaired rather than trusted forever.
     pub fn put(&self, bytes: &[u8]) -> Option<String> {
         if bytes.len() > MAX_SNAPSHOT_BYTES {
             return None;
         }
         let hash = hex_hash(bytes);
         let path = self.object_path(&hash);
-        if !path.exists() {
+        let needs_write = match fs::read(&path) {
+            Ok(existing) => hex_hash(&existing) != hash,
+            Err(_) => true,
+        };
+        if needs_write {
             fs::create_dir_all(&self.dir).ok()?;
-            fs::write(&path, bytes).ok()?;
+            // Write to a temp file then rename: a direct `fs::write` to the
+            // final path is not atomic, so a crash/power-loss mid-write would
+            // leave a truncated object that `path.exists()` alone would trust
+            // forever. Rename within one dir is atomic on macOS/Linux.
+            let tmp = self.dir.join(format!(".tmp-{hash}-{}", std::process::id()));
+            fs::write(&tmp, bytes).ok()?;
+            fs::rename(&tmp, &path).ok()?;
         }
         Some(hash)
     }
 
+    /// Read and verify an object: a hash mismatch (truncated/corrupt write)
+    /// returns `None` rather than the bad bytes, so callers (rollback restore,
+    /// the pre-check in `turn_rollback`) treat it as missing instead of
+    /// silently writing corrupt content into a working file.
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
-        fs::read(self.object_path(hash)).ok()
+        let bytes = fs::read(self.object_path(hash)).ok()?;
+        (hex_hash(&bytes) == hash).then_some(bytes)
     }
 
     fn object_path(&self, hash: &str) -> PathBuf {
@@ -1087,6 +1104,38 @@ mod tests {
         let h = store.put(b"hello").unwrap();
         assert_eq!(store.get(&h).unwrap(), b"hello");
         assert_eq!(store.put(b"hello").unwrap(), h); // content-addressed dedup
+    }
+
+    // W1.3: a truncated object left by a crash mid-write (non-atomic fs::write)
+    // must never be trusted as "already stored" — put() re-verifies the
+    // existing file's hash before dedup-skipping and repairs it if it doesn't
+    // match, rather than leaving the corruption in place forever.
+    #[test]
+    fn put_repairs_truncated_existing_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(tmp.path());
+        let full = b"the quick brown fox jumps over the lazy dog";
+        let hash = hex_hash(full);
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::write(store.object_path(&hash), b"truncated-garbage").unwrap();
+
+        let returned = store.put(full).unwrap();
+
+        assert_eq!(returned, hash);
+        assert_eq!(store.get(&hash).unwrap(), full);
+    }
+
+    // W1.3: get() must never hand back corrupt bytes — a hash mismatch (the
+    // on-disk object doesn't match its filename hash) is treated as missing,
+    // not restored into a working file.
+    #[test]
+    fn get_rejects_corrupt_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(tmp.path());
+        let hash = store.put(b"hello").unwrap();
+        fs::write(store.object_path(&hash), b"corrupted-not-hello").unwrap();
+
+        assert!(store.get(&hash).is_none());
     }
 
     #[test]
