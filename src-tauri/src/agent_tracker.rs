@@ -90,6 +90,12 @@ struct Tracker {
     // same tick; the authoritative pollers store here so the turn poll reads it
     // back within KIND_CACHE_TTL instead of spawning a second ps.
     kind_cache: HashMap<PathBuf, (Instant, Option<AgentKind>)>,
+    // The process table is GLOBAL — only the per-root shells filter differs — so
+    // one ps snapshot classifies every root. The sessions panel's 3s pass calls
+    // refresh for N roots; caching the raw table for one TTL window collapses
+    // that to a single spawn per pass instead of N. peek reads it without ever
+    // spawning.
+    ps_cache: Option<(Instant, Vec<ProcessInfo>)>,
 }
 
 /// Sessions idle past this with nothing pending are dropped (poll re-creates
@@ -330,7 +336,7 @@ impl Tracker {
     }
 
     fn peek(&self, root: &Path) -> AgentTrackingStatus {
-        let agent_active = self.agent_kind_for_root(root).is_some();
+        let agent_active = self.agent_kind_peek(root).is_some();
         match self.sessions.get(root) {
             Some(session) => {
                 let mut status = session_status(session);
@@ -598,33 +604,90 @@ impl Tracker {
         }
     }
 
-    /// Detect which integrated agent (if any) is active for `root`.
-    fn agent_kind_for_root(&self, root: &Path) -> Option<AgentKind> {
-        let shells = self
-            .shells
+    /// PIDs of registered shells rooted under `root`.
+    fn shells_under(&self, root: &Path) -> HashSet<u32> {
+        self.shells
             .iter()
             .filter_map(|(pid, cwd)| cwd.starts_with(root).then_some(*pid))
-            .collect::<HashSet<_>>();
-        if shells.is_empty() {
-            return None;
-        }
+            .collect()
+    }
+
+    /// Spawn ps once and parse the global process table. The sole spawn site.
+    fn spawn_process_table() -> Vec<ProcessInfo> {
         #[cfg(test)]
         PS_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
         let output = Command::new("ps")
             .args(["-axo", "pid=,ppid=,command="])
-            .output()
-            .ok()?;
-        agent_descendant_kind(
-            &shells,
-            &parse_process_table(&String::from_utf8_lossy(&output.stdout)),
-        )
+            .output();
+        match output {
+            Ok(output) => parse_process_table(&String::from_utf8_lossy(&output.stdout)),
+            Err(_) => vec![],
+        }
     }
 
-    /// Authoritative agent-kind reading: spawns ps and memoizes the result so a
-    /// piggybacked turn poll can reuse it. Used by the 1.5s agent poll and the
-    /// sessions refresh, which must observe live process state every tick.
+    /// Classify `root` against a supplied process table — no spawn, no cache.
+    fn classify_root(&self, root: &Path, table: &[ProcessInfo]) -> Option<AgentKind> {
+        let shells = self.shells_under(root);
+        if shells.is_empty() {
+            return None;
+        }
+        agent_descendant_kind(&shells, table)
+    }
+
+    /// Detect which integrated agent (if any) is active for `root`, spawning a
+    /// fresh (uncached) ps. Retained as the un-deduped baseline the spawn-count
+    /// test measures against; production paths use the shared-table cache.
+    #[cfg(test)]
+    fn agent_kind_for_root(&self, root: &Path) -> Option<AgentKind> {
+        let shells = self.shells_under(root);
+        if shells.is_empty() {
+            return None;
+        }
+        agent_descendant_kind(&shells, &Self::spawn_process_table())
+    }
+
+    /// Ensure the shared process-table cache is fresh (one spawn per TTL window
+    /// across all roots), then classify `root` against it. Only spawns when
+    /// `root` actually has shells, so a session-less root stays free.
+    fn agent_kind_from_shared_table(&mut self, root: &Path) -> Option<AgentKind> {
+        if self.shells_under(root).is_empty() {
+            return None;
+        }
+        let fresh = self
+            .ps_cache
+            .as_ref()
+            .map(|(at, _)| at.elapsed() < KIND_CACHE_TTL)
+            .unwrap_or(false);
+        if !fresh {
+            self.ps_cache = Some((Instant::now(), Self::spawn_process_table()));
+        }
+        let table = self
+            .ps_cache
+            .as_ref()
+            .map(|(_, table)| table.as_slice())
+            .unwrap_or(&[]);
+        self.classify_root(root, table)
+    }
+
+    /// Read-only classification against the shared table cache, never spawning.
+    /// peek uses this so listing idle worktrees can't churn ps; a kind up to
+    /// KIND_CACHE_TTL stale (or None until some poll first fills the cache) is
+    /// acceptable for the sessions panel.
+    fn agent_kind_peek(&self, root: &Path) -> Option<AgentKind> {
+        let table = self
+            .ps_cache
+            .as_ref()
+            .map(|(_, table)| table.as_slice())
+            .unwrap_or(&[]);
+        self.classify_root(root, table)
+    }
+
+    /// Authoritative agent-kind reading: refreshes the shared ps table (one
+    /// spawn per TTL window across all roots) and memoizes the per-root result
+    /// so a piggybacked turn poll can reuse it. Used by the 1.5s agent poll and
+    /// the sessions refresh, which must observe live process state every tick.
     fn agent_kind_store(&mut self, root: &Path) -> Option<AgentKind> {
-        let kind = self.agent_kind_for_root(root);
+        let kind = self.agent_kind_from_shared_table(root);
         self.kind_cache
             .insert(root.to_path_buf(), (Instant::now(), kind));
         kind
@@ -1505,6 +1568,38 @@ mod tests {
         let _ = tracker.agent_kind_store(&root); // agent poll / sessions refresh
         let _ = tracker.agent_kind_cached(&root); // turn poll piggyback (same tick)
         assert_eq!(ps_spawns(), 1, "deduped tick spawns ps once");
+    }
+
+    // W4.8: the process table is global, so one ps snapshot classifies every
+    // root. The sessions panel's pass calls the authoritative store for N roots
+    // within one TTL window; the shared ps_cache must collapse that to a single
+    // spawn instead of N. peek must never spawn at all.
+    #[test]
+    fn shared_ps_table_collapses_a_pass_across_roots_to_one_spawn() {
+        let mut tracker = Tracker::default();
+        let r1 = PathBuf::from("/tmp/w4-8-root-1");
+        let r2 = PathBuf::from("/tmp/w4-8-root-2");
+        let r3 = PathBuf::from("/tmp/w4-8-root-3");
+        // Each root has a shell so classification actually consults the table.
+        tracker.shells.insert(1001, r1.clone());
+        tracker.shells.insert(1002, r2.clone());
+        tracker.shells.insert(1003, r3.clone());
+
+        reset_ps_spawns();
+        let _ = tracker.agent_kind_store(&r1);
+        let _ = tracker.agent_kind_store(&r2);
+        let _ = tracker.agent_kind_store(&r3);
+        assert_eq!(
+            ps_spawns(),
+            1,
+            "one ps spawn shared across all roots within a TTL window"
+        );
+
+        // peek must never spawn, even for a root it hasn't classified.
+        reset_ps_spawns();
+        let _ = tracker.peek(&r1);
+        let _ = tracker.peek(&PathBuf::from("/tmp/w4-8-unseen"));
+        assert_eq!(ps_spawns(), 0, "peek is non-spawning");
     }
 
     // refresh() must never create a session (the panel would otherwise spin up
