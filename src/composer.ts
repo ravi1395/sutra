@@ -20,12 +20,15 @@ import {
 import { icon } from "./icons";
 import { mountTagManager } from "./tag-manager";
 import { IS_MAC } from "./shortcuts";
+import { readUiState, patchUiState } from "./terminal-groups";
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
-// Drawer height is a UI preference shared across roots/panels.
-const DRAWER_H_KEY = "composer-drawer-h";
-const DRAWER_H_DEFAULT = 220;
+// Drawer height is a UI preference shared across roots/panels, persisted in
+// the backend ui-state store (composerDrawerH field, see terminal-groups.ts).
+// This legacy localStorage key is only read once, at app boot (main.ts), to
+// seed that store.
+export const LEGACY_DRAWER_H_KEY = "composer-drawer-h";
 const DRAWER_H_MIN = 120;
 
 export interface ComposerOptions {
@@ -186,7 +189,7 @@ export function mountComposer(opts: ComposerOptions): {
   void init();
 
   async function init(): Promise<void> {
-    applyDrawerHeight();
+    await applyDrawerHeight();
     await Promise.all([reloadConfig(), refreshAgents(), refreshAssets()]);
     const saved = loadDraft(root);
     if (saved) applyDraft(saved);
@@ -440,13 +443,9 @@ export function mountComposer(opts: ComposerOptions): {
   }
 
   // ── drawers (preview / history) ────────────────────────────────────────────────
-  function drawerHeight(): number {
-    const v = parseInt(localStorage.getItem(DRAWER_H_KEY) ?? "", 10);
-    return Number.isFinite(v) ? v : DRAWER_H_DEFAULT;
-  }
-
-  function applyDrawerHeight(): void {
-    const h = `${drawerHeight()}px`;
+  async function applyDrawerHeight(): Promise<void> {
+    const ui = await readUiState();
+    const h = `${ui.composerDrawerH}px`;
     prevPeek.style.height = h;
     histPeek.style.height = h;
   }
@@ -520,9 +519,9 @@ export function mountComposer(opts: ComposerOptions): {
   function onDrawerUp(): void {
     if (dragEl) {
       const h = parseInt(dragEl.style.height, 10);
-      if (Number.isFinite(h)) localStorage.setItem(DRAWER_H_KEY, String(h));
+      if (Number.isFinite(h)) void patchUiState({ composerDrawerH: h }).catch(() => {});
       dragEl.classList.remove("cmp-peek-dragging");
-      applyDrawerHeight(); // keep both drawers in sync
+      void applyDrawerHeight(); // keep both drawers in sync
       dragEl = null;
     }
     window.removeEventListener("pointermove", onDrawerMove);

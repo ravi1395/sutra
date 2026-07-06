@@ -383,7 +383,7 @@ async function executeDiagnostics(root: string): Promise<void> {
   const jobs = autos.length
     ? autos.map((a) => ({ source: a.id, command: a.command, cwd: root, parser: a.parser ?? "regex", regex: a.regex }))
     : await diagDetect(root);
-  if (diagnosticsExecDecision(jobs.length, isWorkspaceTrusted(root)) === "suppress-untrusted") {
+  if (diagnosticsExecDecision(jobs.length, await isWorkspaceTrusted(root)) === "suppress-untrusted") {
     onUntrustedDiagnostics?.(root);
     return;
   }
@@ -410,7 +410,7 @@ export async function runDiagnostics(
     rerunPending = true;
     return;
   }
-  if (!loadSettings().diagnosticsEnabled) return;
+  if (!(await loadSettings()).diagnosticsEnabled) return;
   inFlight = true;
   running = true;
   updateChip();

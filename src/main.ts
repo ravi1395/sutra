@@ -63,6 +63,7 @@ import {
   runnerRun,
   runnerCancel,
   onRunnerDone,
+  recentsPush,
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
@@ -111,11 +112,11 @@ import {
   pathBelongsToRoot,
   resolveOpenPath,
   pruneWorkspaceSession,
-  saveRecents,
   saveWorkspaceSession,
+  seedRecentsFromLocalStorage,
   sessionFromTabs,
   trustWorkspace,
-  upsertRecent,
+  type RecentWorkspace,
 } from "./workspace";
 import {
   DEFAULT_SETTINGS,
@@ -127,10 +128,10 @@ import {
   type UserSettings,
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
-import { mountComposer } from "./composer";
+import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, type AboutTab } from "./about-modal";
-import { DRAWER_KEY, clampDrawerState, loadDrawerState, type DrawerState } from "./terminal-groups";
+import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -372,7 +373,7 @@ async function resolveAutomationUi(
 
   // Create/run persist or execute a shell command; a prompt-injected agent must not
   // reach that in an untrusted folder. Listing (read-only) above stays allowed.
-  if (!isWorkspaceTrusted(root)) {
+  if (!(await isWorkspaceTrusted(root))) {
     return { error: "This folder is not trusted. Trust it in Sutra before creating or running automations." };
   }
 
@@ -431,7 +432,14 @@ let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
 let suppressSessionSave = false;
-let settings: UserSettings = loadSettings();
+// Real value loaded async at boot (settings now live in the shared backend
+// store); this placeholder is only visible for the instant before boot()'s
+// `await loadSettings()` resolves.
+let settings: UserSettings = DEFAULT_SETTINGS;
+// Synchronous snapshot of the shared recents list for the command palette,
+// whose builder callback must stay synchronous — refreshed at boot and after
+// every recentsPush (loadRecents() itself is now backend-async).
+let recentsCache: RecentWorkspace[] = [];
 
 // ---- tabs (each pane renders its own strip; main wires cross-cutting hooks) ----
 // Render the loom-bar breadcrumb for the active file; dir segments reveal in the tree.
@@ -636,7 +644,7 @@ function applySettings(next: UserSettings): void {
 
 function persistSettings(next: UserSettings): void {
   applySettings(next);
-  saveSettings(settings);
+  void saveSettings(settings);
 }
 
 async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
@@ -689,7 +697,7 @@ editor.saveHandler = saveTab;
 // OS-delivered folder never silently elevates it.
 async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
-  if (explicit) trustWorkspace(dir);
+  if (explicit) await trustWorkspace(dir);
   hideTrustToast(); // drop any leftover toast from the previous root
   persistWorkspaceSession();
   suppressSessionSave = true;
@@ -715,7 +723,8 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   await terminals.reset(dir, drawerState.open);
-  saveRecents(upsertRecent(loadRecents(), dir, Date.now()));
+  await recentsPush(dir, basename(dir));
+  void loadRecents().then((r) => { recentsCache = r; });
   void refreshGitState(dir);
   automations = await loadAutomations(dir);
   automationBar.setAutomations(automations);
@@ -748,7 +757,9 @@ async function closeActiveTab(): Promise<void> {
 const termArea = $("terminal-area");
 const hres = $("hresizer");
 const btnTerm = $("btn-term");
-let drawerState: DrawerState = loadDrawerState(localStorage.getItem(DRAWER_KEY));
+// Real value loaded async at boot (see boot() below); this placeholder
+// (closed, default height) is only visible for the instant before then.
+let drawerState: DrawerState = clampDrawerState(null);
 const terminalSeam = document.createElement("button");
 terminalSeam.id = "terminal-seam";
 terminalSeam.type = "button";
@@ -757,7 +768,7 @@ termArea.prepend(terminalSeam);
 
 function saveDrawerState(next: DrawerState): void {
   drawerState = clampDrawerState(next);
-  localStorage.setItem(DRAWER_KEY, JSON.stringify(drawerState));
+  void patchUiState({ terminalDrawer: drawerState }).catch(() => {});
 }
 
 function renderTerminalSeam(): void {
@@ -1376,9 +1387,11 @@ function showTrustToast(root: string): void {
   trustBtn.className = "trust-toast-btn";
   trustBtn.textContent = "Trust folder";
   trustBtn.onclick = () => {
-    trustWorkspace(root);
-    hideTrustToast();
-    void runDiagnostics(root); // run the now-permitted jobs immediately
+    void (async () => {
+      await trustWorkspace(root); // must land before the trust re-check below
+      hideTrustToast();
+      void runDiagnostics(root); // run the now-permitted jobs immediately
+    })();
   };
   const closeBtn = document.createElement("button");
   closeBtn.className = "trust-toast-close";
@@ -1426,13 +1439,15 @@ ensureDiagnosticsExtension();
 
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
-  if (!isTestAutoRunEnabled(root)) return;
-  if (!isWorkspaceTrusted(root)) return; // never auto-run a repo's test command for an untrusted folder
-  const test = testAutomation(automations);
-  if (!test) return;
-  void turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
-    .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
-    .catch(() => {});
+  void (async () => {
+    if (!isTestAutoRunEnabled(root)) return;
+    if (!(await isWorkspaceTrusted(root))) return; // never auto-run a repo's test command for an untrusted folder
+    const test = testAutomation(automations);
+    if (!test) return;
+    await turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
+      .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
+      .catch(() => {});
+  })();
 });
 
 // Runner ids (test:<root>:<turnId>) cancelled by a rollback — consulted by
@@ -2030,7 +2045,10 @@ const paletteCommands: Command[] = [
 ];
 
 function recentPaletteCommands(): Command[] {
-  return loadRecents()
+  // mountPalette's builder must stay synchronous — read the cached snapshot
+  // rather than loadRecents() (backend-async). Refreshed at boot and after
+  // every recentsPush.
+  return recentsCache
     .filter((recent) => recent.path !== currentRoot)
     .slice(0, 5)
     .map((recent) => ({
@@ -2109,20 +2127,37 @@ editor.onDocChanged = () => {
 };
 
 // ---- boot ----
-applySettings(settings);
 editor.renderAllTabs();
 renderWhisperBar();
-setTerminal(drawerState.open);
 
-// Reopen the most-recently used folder so a relaunch (incl. after an app update,
-// which preserves localStorage) resumes where the user left off instead of a
-// blank window. Skip silently if the folder was moved/deleted since last run.
-void (async function bootOpen(): Promise<void> {
-  // One-shot on upgrade: seed the trusted set from folders already in recents so
-  // workspaces the user opened deliberately before the trust gate existed are not
-  // re-gated. Must run before any open below, whose watcher can fire the diagnostics
-  // trust check. Idempotent after the first run (sutra.trustMigrated flag).
-  ensureTrustSeeded(loadRecents().map((r) => r.path));
+// Settings/ui-state/recents/trust now live in the shared backend store (all
+// windows + the Dock menu read the same files), so their initial load is
+// async — everything that depends on them is deferred into this one boot
+// sequence. Reopens the most-recently used folder so a relaunch resumes where
+// the user left off instead of a blank window; skips silently if the folder
+// was moved/deleted since last run.
+void (async function boot(): Promise<void> {
+  settings = await loadSettings();
+  applySettings(settings);
+
+  const ui = await readUiState({
+    drawerRaw: localStorage.getItem(DRAWER_KEY),
+    composerHRaw: localStorage.getItem(LEGACY_DRAWER_H_KEY),
+  });
+  drawerState = ui.terminalDrawer;
+  setTerminal(drawerState.open);
+
+  // One-shot on upgrade: port pre-migration recents/trustedRoots into the
+  // backend, then seed the trusted set from folders already in recents so
+  // workspaces the user opened deliberately before the trust gate existed are
+  // not re-gated. Must run before any open below, whose watcher can fire the
+  // diagnostics trust check. Idempotent after the first run (backend
+  // trustMigrated flag).
+  await seedRecentsFromLocalStorage();
+  const recents = await loadRecents();
+  recentsCache = recents;
+  await ensureTrustSeeded(recents.map((r) => r.path));
+
   // A path handed to Sutra at launch (CLI arg / Finder "Open With") wins over
   // last-folder restore. Consume it once; on none, fall back to the last workspace.
   const launch = await takeLaunchPath().catch(() => null);
@@ -2130,7 +2165,7 @@ void (async function bootOpen(): Promise<void> {
     await routeOpenPath(launch.path, launch.isDir);
     return;
   }
-  const [last] = loadRecents();
+  const [last] = recents;
   if (!last) return; // first run — nothing to restore
   try {
     await listDir(last.path); // cheap existence/readability probe

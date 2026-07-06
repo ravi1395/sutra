@@ -5,7 +5,7 @@ import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
 
 export interface WorkspaceActions {
-  recents(): RecentWorkspace[];
+  recents(): Promise<RecentWorkspace[]>;
   switchWorkspace(path: string): void;
   addFolder(): void;
   openFolder(): void;
@@ -75,10 +75,12 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     anchor.classList.add("open");
   }
 
-  function openWorkspaceMenu(): void {
+  async function openWorkspaceMenu(): Promise<void> {
+    // Recents are backend-async (shared across windows) — await before
+    // building the popover so the row list reflects the live shared state.
+    const recents = current ? await actions.recents() : [];
     // Build the workspace selector menu using the shared .menu-card grammar.
     openPopover(wordmark, (el, close) => {
-      const recents = actions.recents();
       const items = current ? workspaceMenuModel(current, recents, Date.now()) : [];
 
       for (const item of items) {
@@ -165,7 +167,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       `<span class="wm-chev">${icon("chevronDown", 11, 2.4)}</span>`;
   }
   renderWordmark();
-  wordmark.onclick = () => openWorkspaceMenu();
+  wordmark.onclick = () => void openWorkspaceMenu();
 
   // ---- global dismissers ----
   document.addEventListener("mousedown", (e) => {

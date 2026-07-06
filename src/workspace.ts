@@ -1,3 +1,8 @@
+import {
+  recentsList, recentsPush, trustList, trustAdd, trustMigrated, trustSetMigrated,
+  type RecentBk,
+} from "./ipc";
+
 export interface WorkspaceTab {
   path: string | null;
 }
@@ -171,31 +176,61 @@ export function upsertRecent(
   return [entry, ...without].slice(0, cap);
 }
 
+// Legacy localStorage key — read once (seedRecentsFromLocalStorage) to port a
+// pre-migration list into the shared backend store, then never written again.
 const RECENTS_KEY = "sutra.recents";
 
-export function loadRecents(): RecentWorkspace[] {
+export interface RecentsBackend {
+  list: () => Promise<RecentBk[]>;
+  push: (path: string, name: string) => Promise<void>;
+}
+const defaultRecentsBackend: RecentsBackend = { list: recentsList, push: recentsPush };
+
+/** Load the shared recents list from the backend (every window sees the same list). */
+export async function loadRecents(backend: RecentsBackend = defaultRecentsBackend): Promise<RecentWorkspace[]> {
   try {
-    const raw = localStorage.getItem(RECENTS_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is RecentWorkspace =>
-        !!r &&
-        typeof r.path === "string" &&
-        typeof r.name === "string" &&
-        typeof r.openedAt === "number",
-    );
+    const list = await backend.list();
+    return list.map((r) => ({ path: r.path, name: r.name, openedAt: r.opened_at }));
   } catch {
     return [];
   }
 }
 
-export function saveRecents(list: readonly RecentWorkspace[]): void {
+/** One-shot: port a pre-migration `sutra.recents` localStorage blob into the
+ *  backend store. Guarded by the backend itself being empty — recents only
+ *  grows via `recentsPush`, so an empty backend list reliably means "not yet
+ *  migrated" (or a genuine first run, where there's nothing to port anyway).
+ *  Safe to call on every boot. */
+export async function seedRecentsFromLocalStorage(backend: RecentsBackend = defaultRecentsBackend): Promise<void> {
+  let current: RecentWorkspace[];
   try {
-    localStorage.setItem(RECENTS_KEY, JSON.stringify(list));
+    current = await loadRecents(backend);
   } catch {
-    /* storage unavailable / quota — recents are best-effort */
+    return;
+  }
+  if (current.length > 0) return;
+  let legacy: RecentWorkspace[] = [];
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        legacy = parsed.filter(
+          (r): r is RecentWorkspace =>
+            !!r &&
+            typeof r.path === "string" &&
+            typeof r.name === "string" &&
+            typeof r.openedAt === "number",
+        );
+      }
+    }
+  } catch {
+    /* junk localStorage value — nothing to port */
+  }
+  // Oldest first: recentsPush prepends, so pushing oldest→newest reproduces the
+  // original recency order in the backend list.
+  for (const r of [...legacy].reverse()) {
+    await backend.push(r.path, r.name).catch(() => {});
   }
 }
 
@@ -203,7 +238,8 @@ export function saveRecents(list: readonly RecentWorkspace[]): void {
 // A folder is "trusted" only when the user opened it deliberately (in-app File▸Open)
 // or clicked Trust. Folders arriving via OS file-association / CLI / single-instance
 // forward start untrusted; their `.sutra/automations.json` commands are NOT auto-run
-// until trusted. Pure reducers below are unit-tested; the localStorage wrappers are not.
+// until trusted. Pure reducers below are unit-tested; the backend-backed wrappers are
+// not. Trust state is shared across every open Sutra window via the backend store.
 
 /** True when `root` (normalized) is in the trusted set. Exact folder match — subtrees
  *  and prefix siblings are not trusted. */
@@ -230,51 +266,86 @@ export function seedTrusted(existing: readonly string[], recentPaths: readonly s
   return out;
 }
 
+// Legacy localStorage key — read once (seedTrustedRootsFromLocalStorage) to
+// port a pre-migration trusted-root list into the shared backend store.
 const TRUST_KEY = "sutra.trustedRoots";
-const TRUST_MIGRATED_KEY = "sutra.trustMigrated";
 
-/** Load the trusted-root list from localStorage; junk yields []. */
-export function loadTrusted(): string[] {
+export interface TrustBackend {
+  list: () => Promise<string[]>;
+  add: (path: string) => Promise<void>;
+  migrated: () => Promise<boolean>;
+  setMigrated: () => Promise<void>;
+}
+const defaultTrustBackend: TrustBackend = {
+  list: trustList, add: trustAdd, migrated: trustMigrated, setMigrated: trustSetMigrated,
+};
+
+/** Load the trusted-root list from the shared backend store. */
+export async function loadTrusted(backend: TrustBackend = defaultTrustBackend): Promise<string[]> {
   try {
-    const raw = localStorage.getItem(TRUST_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((p): p is string => typeof p === "string");
+    return await backend.list();
   } catch {
     return [];
   }
 }
 
-/** Persist the trusted-root list (best-effort). */
-export function saveTrusted(list: readonly string[]): void {
+/** One-shot: port a pre-migration `sutra.trustedRoots` localStorage blob into
+ *  the backend store. Guarded the same way as recents — an empty backend list
+ *  means "not yet migrated" (trust is never bulk-cleared once granted). Safe
+ *  to call on every boot. */
+export async function seedTrustedRootsFromLocalStorage(backend: TrustBackend = defaultTrustBackend): Promise<void> {
+  let current: string[];
   try {
-    localStorage.setItem(TRUST_KEY, JSON.stringify(list));
+    current = await backend.list();
   } catch {
-    /* storage unavailable / quota — trust is best-effort but re-promptable */
+    return;
+  }
+  if (current.length > 0) return;
+  let legacy: string[] = [];
+  try {
+    const raw = localStorage.getItem(TRUST_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) legacy = parsed.filter((p): p is string => typeof p === "string");
+    }
+  } catch {
+    /* junk localStorage value — nothing to port */
+  }
+  for (const root of legacy) {
+    await backend.add(root).catch(() => {});
   }
 }
 
 /** True when `root` is trusted to run its repo-defined commands. */
-export function isWorkspaceTrusted(root: string): boolean {
-  return pathIsTrusted(loadTrusted(), root);
+export async function isWorkspaceTrusted(root: string, backend: TrustBackend = defaultTrustBackend): Promise<boolean> {
+  return pathIsTrusted(await loadTrusted(backend), root);
 }
 
-/** Mark `root` trusted and persist. */
-export function trustWorkspace(root: string): void {
-  saveTrusted(addTrust(loadTrusted(), root));
+/** Mark `root` trusted and persist to the shared backend. Callers must only
+ *  invoke this from the explicit File▸Open dialog or the Trust toast — never
+ *  from a recents re-select or any other open path. */
+export async function trustWorkspace(root: string, backend: TrustBackend = defaultTrustBackend): Promise<void> {
+  await backend.add(normalizePath(root));
 }
 
-/** Once per install: seed the trusted set from the current recents so folders the
- *  user already opened before the trust gate existed are not re-gated on upgrade.
- *  Guarded by a localStorage flag so a later untrust is not undone on next launch. */
-export function ensureTrustSeeded(recentPaths: readonly string[]): void {
+/** Once per install (shared by every window via the backend `trustMigrated`
+ *  flag): port a pre-migration trusted-root list, then — as before — seed the
+ *  trusted set from the current recents so folders the user already opened
+ *  before the trust gate existed are not re-gated on upgrade. Guarded so a
+ *  later untrust is not undone on next launch. */
+export async function ensureTrustSeeded(
+  recentPaths: readonly string[],
+  backend: TrustBackend = defaultTrustBackend,
+): Promise<void> {
   try {
-    if (localStorage.getItem(TRUST_MIGRATED_KEY) === "1") return;
-    saveTrusted(seedTrusted(loadTrusted(), recentPaths));
-    localStorage.setItem(TRUST_MIGRATED_KEY, "1");
+    await seedTrustedRootsFromLocalStorage(backend);
+    if (await backend.migrated()) return;
+    for (const p of recentPaths) {
+      await backend.add(normalizePath(p));
+    }
+    await backend.setMigrated();
   } catch {
-    /* storage unavailable — seeding is best-effort; falls back to explicit trust */
+    /* backend unavailable — seeding is best-effort; falls back to explicit trust */
   }
 }
 
