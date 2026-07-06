@@ -79,13 +79,13 @@ tests/  one .test.ts per frontend module (node:test)
 - Preview: `<iframe srcdoc sandbox="">` (null origin, scripts off); Markdown DOMPurified
 - Menu: in-window bar is source of truth; native macOS menu suppressed in `lib.rs`
 - Turn boundaries: `.sutra/turn-signal.jsonl` Stop-hook lines, else 10 s quiet window; snapshots in content-addressed store `.sutra/turns/objects` (10 MB/file cap)
-- Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap)
+- Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap); fs trigger ignores build outputs + hidden dirs (`target`/`node_modules`/`dist`/`.*`) — diag jobs write `target/**` and must never re-trigger themselves
 - Poll cadences: agent tracker + turn poll 1.5 s piggyback; sessions panel polls cheap, full only for active roots
 - Watcher noise filter: fs-changed drops contents of `node_modules`/`target`/`dist` and `.git/objects`+`.git/logs`; keeps dir-itself events, `.git/HEAD`/`index`/`refs/**` (gitbar + gutter refresh after commit/checkout), and all other hidden dirs (open-tab reload, tree)
 
 ## State
 - Version: v2.1.0 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump.
-- Tests: `npm test` → 288 pass; `cargo test` (inside src-tauri/) → 166 pass
+- Tests: `npm test` → 308 pass; `cargo test` (inside src-tauri/) → 185 pass
 - MCP server: exposes `sutra` tools (`get_annotations`, `navigate_browser`, `prompt_user`, `open_file`, `create_automation`/`list_automations`/`run_automation`, etc.) via `mcp.rs`
 - OS open: `lib.rs` single-instance + `fileAssociations` + macOS `RunEvent::Opened` + cold-start `take_launch_path` → emit `open-path{path,isDir}`; frontend `routeOpenPath`/`resolveOpenPath` (single window, replace root)
 - Security: postMessage listeners must validate `e.origin` against preview server URL (see `src/main.ts`)
