@@ -63,6 +63,9 @@ export const gitWorktrees = (root: string) =>
 export interface BranchInfo {
   name: string;
   is_current: boolean;
+  // HEAD of a worktree other than the current root — cannot be checked out here;
+  // the branch picker filters these out (they live in the worktrees section).
+  in_other_worktree: boolean;
 }
 export const gitBranches = (root: string) =>
   invoke<BranchInfo[]>("git_branches", { root });
