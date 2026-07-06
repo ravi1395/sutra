@@ -52,6 +52,10 @@ tree-sitter-json = "0.24"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.23"
 tree-sitter-md = "0.3"
+sysinfo = "0.32"
+sha2 = "0.10"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
 
 # Desktop-only plugins (no Android/iOS bundle target): self-updater +
 # single-instance (forwards an opened path into the running window).

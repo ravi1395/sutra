@@ -54,6 +54,7 @@ pub mod runner;
 mod search;
 pub mod turns;
 mod watcher;
+mod window_registry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
