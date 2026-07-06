@@ -1,11 +1,18 @@
+use std::path::Path;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 /// Holds a file/folder path handed to Sutra at launch (CLI arg or OS file-open),
 /// consumed once by the frontend on boot via `take_launch_path`. Warm opens
 /// (second instance, macOS "Open With" while running) emit `open-path` directly.
 #[derive(Default)]
 struct LaunchPath(Mutex<Option<String>>);
+
+/// The canonical root key (or `untitled:<uuid>`) this process claimed at boot,
+/// if any. `None` only if the cold-child decision itself panicked before
+/// assignment — in practice always `Some`. Read by the close handler to
+/// release the registry lock and tear down this root's MCP config.
+struct ClaimedRoot(Mutex<Option<String>>);
 
 /// First argv entry after the exe that is not a flag and names an existing path.
 fn first_path_arg(argv: &[String]) -> Option<String> {
@@ -15,17 +22,18 @@ fn first_path_arg(argv: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// Emit an `open-path` event tagging whether `raw` is a directory. No-op for a
-/// path that doesn't exist (guards against stray argv/flags).
-fn emit_open_path(app: &tauri::AppHandle, raw: &str) {
-    let p = std::path::Path::new(raw);
-    if !p.exists() {
-        return;
+/// A lock with `focus_port`/`token` left blank; reserves a root atomically
+/// during the cold-child claim. `.setup()` overwrites it via `write_lock`
+/// once the focus listener is bound.
+fn placeholder_lock(pid: u32, start: u64, exe: &str, root: &str) -> window_registry::Lock {
+    window_registry::Lock {
+        pid,
+        process_start: start,
+        exe: exe.to_string(),
+        focus_port: 0,
+        token: String::new(),
+        root: root.to_string(),
     }
-    let _ = app.emit(
-        "open-path",
-        serde_json::json!({ "path": raw, "isDir": p.is_dir() }),
-    );
 }
 
 /// Return and clear the cold-start launch path (CLI arg / OS file-open on launch).
@@ -63,24 +71,45 @@ mod window_registry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Cold-child launch decision — runs before any server/thread spins up so a
+    // hand-off launch exits cheaply. `--new` forces a fresh window (still root-
+    // safe because an untitled child owns no root; a pathful `--new` that hits a
+    // live owner still focuses that owner — the one-owner invariant is absolute).
+    let args: Vec<String> = std::env::args().collect();
+    let force_new = args.iter().any(|a| a == "--new");
+    let arg_path = launcher::first_path_arg(&args);
+    let cold_target = launcher::resolve(arg_path.as_deref());
+    let (self_pid, self_start, self_exe) = window_registry::self_identity();
+    let claimed_root: Option<String> = match &cold_target {
+        // Unique key — no other launch can ever contend for it, so it always "wins".
+        launcher::LaunchTarget::Untitled(k) => Some(k.clone()),
+        launcher::LaunchTarget::Workspace { root_key, .. } => {
+            if force_new {
+                if let Some(owner) = window_registry::live_owner(root_key) {
+                    let _ = focus::send_focus(owner.focus_port, &owner.token, arg_path.as_deref());
+                    std::process::exit(0);
+                }
+                Some(root_key.clone())
+            } else {
+                match window_registry::try_claim(root_key, || {
+                    placeholder_lock(self_pid, self_start, &self_exe, root_key)
+                })
+                .expect("registry io")
+                {
+                    window_registry::ClaimResult::Won => Some(root_key.clone()),
+                    window_registry::ClaimResult::Owned(owner) => {
+                        let _ =
+                            focus::send_focus(owner.focus_port, &owner.token, arg_path.as_deref());
+                        std::process::exit(0);
+                    }
+                }
+            }
+        }
+    };
+
     let local_auth_token =
         mcp::LocalAuthToken::generate().expect("failed to generate local server auth token");
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default();
-    // Single-instance must be registered first (plugin requirement). When a 2nd
-    // `sutra <path>` launches, forward the path into the running window and focus
-    // it rather than opening a duplicate. Desktop-only (no mobile bundle).
-    #[cfg(desktop)]
-    {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(path) = first_path_arg(&argv) {
-                emit_open_path(app, &path);
-            }
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
-        }));
-    }
+    let builder = tauri::Builder::default();
     builder
         // Keep native Edit responders for standard shortcuts; the in-window
         // menu bar remains the visible source of truth for app commands.
@@ -111,14 +140,14 @@ pub fn run() {
         .manage(proxy::ProxyServerState::default())
         .manage(watcher::WatcherState::default())
         .manage(LaunchPath::default())
-        .setup(|app| {
+        .setup(move |app| {
             // Desktop-only self-updater: registered here so the chain stays
             // mobile-safe (no updater crate on Android/iOS).
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             let state = app.state::<mcp::McpState>();
-            let token = app.state::<mcp::LocalAuthToken>().value().to_string();
+            let mcp_token = app.state::<mcp::LocalAuthToken>().value().to_string();
             // Best-effort: a failed MCP bind must not abort editor launch. The
             // port cell stays None, so `mcp_server_url` cleanly reports the
             // server is not started rather than the app failing to open.
@@ -128,10 +157,64 @@ pub fn run() {
                 state.pending.clone(),
                 state.next_id.clone(),
                 state.port.clone(),
-                token,
+                mcp_token,
             ) {
                 eprintln!("[mcp] server failed to start: {e}");
             }
+
+            // Programmatic main window: created only after the cold-child claim
+            // decision above (so a hand-off launch never builds one), and so
+            // per-root WebKit storage isolation can be applied (macOS 14+
+            // `data_store_identifier`; untitled windows get a random id).
+            #[allow(unused_mut)]
+            let mut win_builder = tauri::webview::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::default(),
+            )
+            .title("Sutra")
+            .inner_size(1280.0, 820.0);
+            #[cfg(target_os = "macos")]
+            {
+                let ds_id: [u8; 16] = match &cold_target {
+                    launcher::LaunchTarget::Workspace { root_key, .. } => {
+                        window_registry::data_store_id(root_key)
+                    }
+                    launcher::LaunchTarget::Untitled(_) => *uuid::Uuid::new_v4().as_bytes(),
+                };
+                win_builder = win_builder.data_store_identifier(ds_id);
+            }
+            win_builder.build()?;
+
+            // GC crashed roots first — heals their stale MCP config (dead port /
+            // endpoint) so a re-open re-merges clean instead of pointing nowhere.
+            for dead in window_registry::gc_sweep() {
+                if !dead.root.starts_with(launcher::UNTITLED_PREFIX) {
+                    mcp::mcp_teardown_config(Path::new(&dead.root));
+                }
+            }
+
+            // Bring up our focus listener, then finalize the lockfile with the
+            // real port + token (the cold-child claim above wrote a placeholder).
+            let focus_token = uuid::Uuid::new_v4().to_string();
+            let focus_port = focus::start_listener(app.handle().clone(), focus_token.clone())
+                .expect("focus listener bind");
+            if let Some(root_key) = &claimed_root {
+                let (pid, start, exe) = window_registry::self_identity();
+                let _ = window_registry::write_lock(
+                    root_key,
+                    &window_registry::Lock {
+                        pid,
+                        process_start: start,
+                        exe,
+                        focus_port,
+                        token: focus_token,
+                        root: root_key.clone(),
+                    },
+                );
+            }
+            app.manage(ClaimedRoot(Mutex::new(claimed_root.clone())));
+
             // Stash a cold-start path (CLI arg / OS file-open on launch) for the
             // frontend to consume on boot via `take_launch_path`.
             if let Some(path) = first_path_arg(&std::env::args().collect::<Vec<_>>()) {
@@ -229,13 +312,31 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|app_handle, event| {
             // macOS delivers Finder "Open With" / `open <file>` as file-open events
-            // here (not argv). Forward each into the running window.
+            // here (not argv). Funnel through the launcher so a root this process
+            // owns focuses itself (via its own listener — no special-case needed)
+            // and a foreign root hands off to its owner or spawns a child.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {
                 for url in urls {
                     if let Ok(path) = url.to_file_path() {
-                        emit_open_path(app_handle, &path.to_string_lossy());
+                        launcher::warm_launch(Some(&path.to_string_lossy()), false);
                     }
+                }
+            }
+            // Release our root claim and scrub this root's MCP config on close so
+            // agents fail clean rather than pointing at a dead port.
+            if let tauri::RunEvent::ExitRequested { .. } = &event {
+                if let Some(rk) = app_handle
+                    .state::<ClaimedRoot>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .clone()
+                {
+                    if !rk.starts_with(launcher::UNTITLED_PREFIX) {
+                        mcp::mcp_teardown_config(Path::new(&rk));
+                    }
+                    window_registry::release(&rk);
                 }
             }
             let _ = (app_handle, &event);

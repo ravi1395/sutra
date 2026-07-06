@@ -56,12 +56,12 @@ sysinfo = "0.32"
 sha2 = "0.10"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
 
-# Desktop-only plugins (no Android/iOS bundle target): self-updater +
-# single-instance (forwards an opened path into the running window).
+# Desktop-only plugin (no Android/iOS bundle target): self-updater. Single-
+# instance is gone — multi-window uses window_registry + launcher instead.
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
-tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

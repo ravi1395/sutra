@@ -170,6 +170,15 @@ pub fn write_lock(root_key: &str, lock: &Lock) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// Per-root WebKit data-store id: first 16 bytes of `sha256(root_key)`, used to
+/// isolate each window's `localStorage`/cookies (macOS `data_store_identifier`).
+pub fn data_store_id(root_key: &str) -> [u8; 16] {
+    let h = root_hash(root_key);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&hex::decode(&h[..32]).expect("sha256 hex is valid"));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +299,16 @@ mod tests {
         );
         assert!(won, "dead owner must be reclaimed");
         release(&key);
+    }
+
+    #[test]
+    fn data_store_id_is_deterministic_and_16_bytes() {
+        let a = data_store_id("some-root");
+        let b = data_store_id("some-root");
+        assert_eq!(a, b, "same key must yield same data store id");
+        assert_eq!(a.len(), 16);
+        let c = data_store_id("other-root");
+        assert_ne!(a, c, "different keys must yield different ids");
     }
 
     #[test]
