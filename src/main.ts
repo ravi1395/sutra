@@ -104,6 +104,7 @@ import { parseGitDirLine, resolveGitIndexPathFromGitDir } from "./git-index";
 import {
   breadcrumbSegments,
   ensureTrustSeeded,
+  isWorkspaceTrusted,
   loadRecents,
   loadWorkspaceSession,
   pathBelongsToRoot,
@@ -366,6 +367,12 @@ async function resolveAutomationUi(
 
   if (query === "listAutomations") {
     return { automations };
+  }
+
+  // Create/run persist or execute a shell command; a prompt-injected agent must not
+  // reach that in an untrusted folder. Listing (read-only) above stays allowed.
+  if (!isWorkspaceTrusted(root)) {
+    return { error: "This folder is not trusted. Trust it in Sutra before creating or running automations." };
   }
 
   if (query === "createAutomation") {

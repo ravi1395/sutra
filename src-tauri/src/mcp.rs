@@ -72,12 +72,40 @@ pub fn with_auth_token(url: String, token: &str) -> String {
     format!("{url}{sep}token={token}")
 }
 
-/// Reject unauthenticated MCP HTTP requests before they reach rmcp.
+/// True when an HTTP authority (Host value, or an Origin with its scheme stripped)
+/// points at loopback. Used to reject cross-origin / DNS-rebinding requests.
+fn is_loopback_authority(v: &str) -> bool {
+    let authority = v
+        .strip_prefix("http://")
+        .or_else(|| v.strip_prefix("https://"))
+        .unwrap_or(v);
+    authority.starts_with("127.0.0.1")
+        || authority.starts_with("localhost")
+        || authority.starts_with("[::1]")
+}
+
+/// Host and Origin (when present) must reference a loopback authority. A browser
+/// mounting a DNS-rebinding attack against the loopback MCP server carries a
+/// foreign Host/Origin and is rejected here — defense in depth behind the token,
+/// so a token leak is not the only barrier. Non-browser clients omit Origin
+/// (None → allowed); every well-formed HTTP/1.1 client sends a loopback Host.
+pub fn host_origin_ok(host: Option<&str>, origin: Option<&str>) -> bool {
+    let host_ok = host.map_or(true, is_loopback_authority);
+    let origin_ok = origin.map_or(true, is_loopback_authority);
+    host_ok && origin_ok
+}
+
+/// Reject unauthenticated / cross-origin MCP HTTP requests before they reach rmcp.
 async fn require_auth_token(
     AxumState(token): AxumState<String>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let host = req.headers().get("host").and_then(|v| v.to_str().ok());
+    let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+    if !host_origin_ok(host, origin) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if req.uri().path() == "/ingest/edit" {
         return Ok(next.run(req).await);
     }
@@ -1249,5 +1277,22 @@ mod tests {
         assert!(query_has_auth_token(Some("x=1&token=abc"), "abc"));
         assert!(!query_has_auth_token(Some("token=wrong"), "abc"));
         assert!(!query_has_auth_token(None, "abc"));
+    }
+
+    #[test]
+    fn host_origin_ok_allows_loopback_and_rejects_foreign() {
+        // Loopback Host, no Origin (typical non-browser MCP client) → allowed.
+        assert!(host_origin_ok(Some("127.0.0.1:5123"), None));
+        assert!(host_origin_ok(Some("localhost:5123"), None));
+        assert!(host_origin_ok(Some("[::1]:5123"), None));
+        assert!(host_origin_ok(None, None));
+        // Loopback Host + loopback Origin → allowed.
+        assert!(host_origin_ok(Some("127.0.0.1:1"), Some("http://127.0.0.1:1")));
+        // Foreign Host (DNS-rebinding attempt) → rejected even with a token elsewhere.
+        assert!(!host_origin_ok(Some("evil.com:5123"), None));
+        // Loopback Host but foreign Origin (cross-origin browser fetch) → rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("http://evil.com")));
+        // A "null" / opaque Origin is not loopback → rejected.
+        assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("null")));
     }
 }
