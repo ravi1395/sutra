@@ -40,6 +40,7 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
 // agent_tracker/runner/turns are pub: their contract fns are stubbed for the
 // harness-v2 wave and consumed cross-module (kept out of dead_code until wired).
 pub mod agent_tracker;
+mod app_state;
 mod assets;
 mod debug;
 mod focus;
@@ -139,6 +140,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_state::recents_list,
+            app_state::recents_push,
+            app_state::trust_list,
+            app_state::trust_add,
+            app_state::trust_migrated,
+            app_state::trust_set_migrated,
+            app_state::settings_get,
+            app_state::settings_set,
+            app_state::ui_state_get,
+            app_state::ui_state_set,
             assets::scan_agent_assets,
             agent_tracker::agent_tracking_begin,
             agent_tracker::agent_tracking_poll,
