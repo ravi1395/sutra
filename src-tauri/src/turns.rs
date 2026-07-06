@@ -667,8 +667,18 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
         state.signal_offset = 0; // file shrank/rotated — re-read from start
     }
     let new_bytes = &sig_text[state.signal_offset as usize..];
-    let new_text = String::from_utf8_lossy(new_bytes).into_owned();
-    state.signal_offset = sig_text.len() as u64;
+    // Consume only through the last newline: a torn tail (the hook appending
+    // while we read — the append isn't atomic vs the read) stays unconsumed and
+    // is re-read whole next poll, so a Stop signal split across two reads is
+    // never dropped. Complete-but-corrupt lines are still consumed here and
+    // skipped by parse_signals, so one bad line can't wedge the offset.
+    let consumed = new_bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let new_text = String::from_utf8_lossy(&new_bytes[..consumed]).into_owned();
+    state.signal_offset += consumed as u64;
     let signals = parse_signals(&new_text);
 
     let mut closed = vec![];
@@ -1353,6 +1363,68 @@ mod tests {
             !plan.contains_key(path),
             "unsnapshotted synthetic entry must not be deletable"
         );
+    }
+
+    // W4.3: a torn tail line (hook appending while the poll reads — the append
+    // is not atomic vs the read) must not advance signal_offset past the
+    // partial bytes, or the Stop signal split across two reads is lost and the
+    // claude turn stays open forever. The offset lands on the last newline
+    // boundary; the partial line is re-read whole once completed.
+    #[test]
+    fn torn_signal_tail_is_recovered_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        // Install the hook so the quiet-window fallback stays suppressed and
+        // only signals close the (Claude) turn during this test.
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // Seed an open Claude turn with signal_offset at 0.
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(1_000, &[("a.rs".into(), None, false)], "claude");
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+
+        let sig1 = "{\"agent\":\"claude\",\"ts\":5}\n";
+        let sig2_head = "{\"agent\":\"claude\",\"ts\":99"; // torn: no newline yet
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), format!("{sig1}{sig2_head}")).unwrap();
+
+        let first = turn_poll(root.clone()).unwrap();
+        assert_eq!(first.closed.len(), 1, "sig1 closes the open turn");
+        assert_eq!(
+            ROOTS.lock().unwrap().get(&root).unwrap().signal_offset,
+            sig1.len() as u64,
+            "offset stops at the newline boundary, leaving the torn tail unconsumed"
+        );
+
+        // Reopen a turn, then complete the torn line; poll must now deliver sig2.
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            roots
+                .get_mut(&root)
+                .unwrap()
+                .engine
+                .observe_changes(1_000, &[("b.rs".into(), None, false)], "claude");
+        }
+        fs::write(signal_path(&root), format!("{sig1}{sig2_head}}}\n")).unwrap();
+
+        let second = turn_poll(root.clone()).unwrap();
+        assert_eq!(second.closed.len(), 1, "completed sig2 now delivered, not lost");
+        assert_eq!(
+            ROOTS.lock().unwrap().get(&root).unwrap().signal_offset,
+            (sig1.len() + sig2_head.len() + 2) as u64,
+            "offset now at EOF"
+        );
+        ROOTS.lock().unwrap().remove(&root);
     }
 
     // M2: merge_stop_hook returns Err (not panic) on well-formed-but-wrong-shape JSON.
