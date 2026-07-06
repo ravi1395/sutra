@@ -46,6 +46,7 @@ mod focus;
 mod fs_cmds;
 mod git;
 mod lang;
+mod launcher;
 mod mcp;
 mod mcp_config;
 mod preview_server;
