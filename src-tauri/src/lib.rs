@@ -42,6 +42,8 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
 pub mod agent_tracker;
 mod app_state;
 mod assets;
+#[cfg(target_os = "macos")]
+mod cli_install;
 mod debug;
 mod focus;
 mod fs_cmds;
@@ -218,6 +220,10 @@ pub fn run() {
             watcher::watch_start,
             watcher::watch_stop,
             take_launch_path,
+            #[cfg(target_os = "macos")]
+            cli_install::cli_install_state,
+            #[cfg(target_os = "macos")]
+            cli_install::cli_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
