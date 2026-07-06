@@ -220,6 +220,40 @@ test("openRollbackDialog: dirty editor buffer blocks Apply (tab paths are absolu
   }
 });
 
+// W2.4: refreshGuard's else branch used to enable Apply unconditionally once
+// rows loaded and nothing was dirty — with zero checked paths (common: every
+// row defaults unchecked because human-touched/unsnapshotted) Apply calling
+// onApply([]) restores nothing but still reports success and closes.
+test("openRollbackDialog: Apply disabled with zero checked paths; toggles with checkbox", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)]), t(2, [f("a.ts", "h1", "h2", true)])];
+    const getDiskHashes = async () => ({ "a.ts": "hDIVERGED" }); // human-touched → unchecked by default
+    const onApply = async (paths: string[]): Promise<RollbackResult> => ({ restored: paths, failed: [] });
+
+    openRollbackDialog("/r", turns[0], { turns, onApply, getDiskHashes });
+    await flush();
+    await flush();
+    const overlay = body.children[body.children.length - 1];
+    const applyBtn = findByText(overlay, "Apply rollback")!;
+    const row = findByClass(overlay, "rollback-file-row")!;
+    const checkbox = row.children.find((c) => c.tagName === "input")!;
+
+    assert.equal(checkbox.checked, false, "human-touched row starts unchecked by default");
+    assert.equal(applyBtn.disabled, true, "Apply must not be clickable with zero checked paths");
+
+    checkbox.checked = true;
+    checkbox.onchange?.();
+    assert.equal(applyBtn.disabled, false, "checking a row enables Apply");
+
+    checkbox.checked = false;
+    checkbox.onchange?.();
+    assert.equal(applyBtn.disabled, true, "unchecking back to zero disables Apply again");
+  } finally {
+    restore();
+  }
+});
+
 test("openRollbackDialog: provider rejection renders a visible error and keeps Apply disabled", async () => {
   const { body, restore } = setupDom();
   try {

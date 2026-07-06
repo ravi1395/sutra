@@ -233,7 +233,10 @@ export function openRollbackDialog(
       applyBtn.disabled = true;
     } else {
       dirtyBanner.style.display = "none";
-      applyBtn.disabled = false;
+      // Zero checked paths (common: every row defaults unchecked because
+      // human-touched/unsnapshotted) must not leave Apply clickable — that
+      // calls onApply([]), which restores nothing but still reports success.
+      applyBtn.disabled = checkedPaths().length === 0;
     }
   }
 

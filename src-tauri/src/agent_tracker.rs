@@ -448,16 +448,23 @@ impl Tracker {
             (Some(_), None) => "D",
             _ => "M",
         };
-        let restore = session
-            .pending
-            .get(&path)
-            .map(|change| change.restore.clone())
-            .unwrap_or_else(|| restore_source_for_change(&session.root, &path, baseline.as_ref()));
+        // Carry both restore and human_touched forward from any existing
+        // entry in one .get() — re-ingest (hook edit reports) must never reset
+        // a human_touched flag set by an editor save in between two agent
+        // edits, else "Revert all" would overwrite the human's mid-session
+        // edit with the pre-agent baseline.
+        let (restore, human_touched) = match session.pending.get(&path) {
+            Some(change) => (change.restore.clone(), change.human_touched),
+            None => (
+                restore_source_for_change(&session.root, &path, baseline.as_ref()),
+                false,
+            ),
+        };
         session.pending.insert(
             path.clone(),
             PendingChange {
                 status: status.to_string(),
-                human_touched: false,
+                human_touched,
                 observed: current,
                 restore,
             },
@@ -1742,6 +1749,77 @@ mod tests {
             b"outside-agent",
             &tracker.only_session().baseline[&path],
         ));
+    }
+
+    // W1.4: re-ingest (Claude hook /ingest/edit) must not wipe human_touched.
+    // Sequence: agent edits (ht=false) -> human edits the same file in the
+    // editor (ht=true via record_sutra_mutation) -> agent edits again (hook
+    // re-ingest). The re-ingest must preserve ht=true so revert_safe_changes
+    // still refuses to overwrite the human's edit with the pre-agent baseline.
+    #[test]
+    fn record_agent_report_preserves_human_touched_across_reingest() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let mut tracker = tracker_with(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                last_scan: baseline.clone(),
+                baseline,
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: true,
+        });
+
+        // Agent edit #1 (hook ingest).
+        fs::write(&path, "agent-1").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(!tracker.only_session().pending[&path].human_touched);
+
+        // Human edits the same file in the editor.
+        let human_before = capture_paths(&[path.clone()]);
+        fs::write(&path, "human-edit").unwrap();
+        tracker.record_sutra_mutation(human_before, &[path.clone()]);
+        assert!(tracker.only_session().pending[&path].human_touched);
+
+        // Agent edit #2 (hook re-ingest) must NOT reset human_touched.
+        fs::write(&path, "agent-2").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(
+            tracker.only_session().pending[&path].human_touched,
+            "re-ingest must preserve human_touched"
+        );
+
+        // revert_safe_changes must skip (not overwrite) the human-touched file.
+        let result = tracker.revert(dir.path()).unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+        assert!(!result.reverted_paths.contains(&path_str));
+        assert!(result.unsafe_paths.contains(&path_str));
+    }
+
+    // A fresh entry (no prior pending change) must still start human_touched=false.
+    #[test]
+    fn record_agent_report_fresh_entry_starts_not_human_touched() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "base").unwrap();
+        let baseline = scan_workspace(dir.path(), None).unwrap();
+        let mut tracker = tracker_with(TrackingSession {
+                root: dir.path().to_path_buf(),
+                head: "head".into(),
+                last_scan: baseline.clone(),
+                baseline,
+                pending: BTreeMap::new(),
+                agent_active: true,
+                settle_polls: 0,
+                report_mode: true,
+        });
+
+        fs::write(&path, "agent").unwrap();
+        tracker.record_agent_report(dir.path(), path.clone());
+        assert!(!tracker.only_session().pending[&path].human_touched);
     }
 
     #[test]
