@@ -512,6 +512,11 @@ fn settings_has_marker(settings: &serde_json::Value) -> bool {
 struct RootState {
     engine: TurnEngine,
     signal_offset: u64,
+    // Unix-second floor of when this RootState was created. Signals whose ts
+    // predates it are stale history (the append-only signal file is never
+    // truncated) and are ignored, so restarting mid-turn can't replay
+    // yesterday's Stop and instant-close a freshly reopened turn (W4.4).
+    created_second: u64,
     // Fingerprint (before_hash, unsafe_before) of each path in the last observed
     // pending set. Feeds delta observation so a closed turn's still-pending files
     // don't re-open a turn every poll and the quiet window can elapse.
@@ -628,13 +633,20 @@ fn gc_if_needed(root: &str) {
 pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
     let mut roots = ROOTS.lock().unwrap();
     let manifest_next_id = load_manifest(&root).last().map(|t| t.id + 1).unwrap_or(1);
+    let now_ms = now_millis();
+    // On first poll of a root, start reading the append-only signal file from
+    // its CURRENT end so stale history (e.g. yesterday's Stop line, since the
+    // file is never truncated) is never replayed against a turn that opens on
+    // this same poll after an app restart mid-turn (W4.4).
+    let initial_offset = fs::metadata(signal_path(&root))
+        .map(|m| m.len())
+        .unwrap_or(0);
     let state = roots.entry(root.clone()).or_insert_with(|| RootState {
         engine: TurnEngine::with_next_id(QUIET_MS, false, manifest_next_id),
-        signal_offset: 0,
+        signal_offset: initial_offset,
+        created_second: now_ms / 1000,
         last_pending: BTreeMap::new(),
     });
-
-    let now_ms = now_millis();
 
     // Refresh hook-installed each poll so the quiet-window heuristic is actually
     // suppressed once the Claude Stop hook is installed (engine is created with
@@ -682,7 +694,15 @@ pub fn turn_poll(root: String) -> Result<TurnPollResult, String> {
     let signals = parse_signals(&new_text);
 
     let mut closed = vec![];
+    let created_second = state.created_second;
     for (agent, ts) in &signals {
+        // Belt-and-braces to the offset-init: ignore any signal whose ts
+        // predates this RootState's creation second (a file swapped/rewound
+        // under us). Second granularity matches the hook's `date +%s`, so a
+        // live signal written in the creation second is still honored.
+        if *ts < created_second {
+            continue;
+        }
         // Hook writes `date +%s` (seconds); engine time is ms — convert so
         // closed_at is comparable to opened_at.
         if let Some(turn) = state.engine.observe_signal(ts.saturating_mul(1000), agent) {
@@ -1312,6 +1332,7 @@ mod tests {
                 RootState {
                     engine,
                     signal_offset: 0,
+                    created_second: 0,
                     last_pending: BTreeMap::new(),
                 },
             );
@@ -1365,6 +1386,64 @@ mod tests {
         );
     }
 
+    // W4.4: the append-only signal file is never truncated, so a restart
+    // mid-turn must not replay yesterday's Stop line and instant-close a turn.
+    // A signal whose ts predates the RootState's creation second is ignored;
+    // a live signal (ts at/after creation) still closes the open turn.
+    #[test]
+    fn stale_signal_does_not_close_a_reopened_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        hook_install(root.clone(), "claude".to_string()).unwrap();
+
+        // A stale Stop line (ts:5, i.e. ~1970) already sits in the signal file.
+        fs::create_dir_all(dir.path().join(".sutra")).unwrap();
+        fs::write(signal_path(&root), "{\"agent\":\"claude\",\"ts\":5}\n").unwrap();
+
+        // A fresh RootState created "now" with an open Claude turn, its
+        // signal_offset already at EOF (as a real first poll would set it) and
+        // created_second stamped to now.
+        let now_s = now_millis() / 1000;
+        {
+            let mut roots = ROOTS.lock().unwrap();
+            let mut engine = TurnEngine::new(QUIET_MS, true);
+            engine.observe_changes(now_s * 1000, &[("a.rs".into(), None, false)], "claude");
+            roots.insert(
+                root.clone(),
+                RootState {
+                    engine,
+                    signal_offset: 0, // force a re-read of the stale line this poll
+                    created_second: now_s,
+                    last_pending: BTreeMap::new(),
+                },
+            );
+        }
+
+        let first = turn_poll(root.clone()).unwrap();
+        assert!(
+            first.closed.is_empty(),
+            "stale (pre-creation) signal must not close the open turn"
+        );
+        assert!(
+            ROOTS.lock().unwrap().get(&root).unwrap().engine.open.is_some(),
+            "turn still open after a stale signal"
+        );
+
+        // A live Stop appended after creation still closes the turn.
+        let live_ts = now_s + 1;
+        {
+            use std::io::Write as _;
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(signal_path(&root))
+                .unwrap();
+            writeln!(f, "{{\"agent\":\"claude\",\"ts\":{live_ts}}}").unwrap();
+        }
+        let second = turn_poll(root.clone()).unwrap();
+        assert_eq!(second.closed.len(), 1, "live signal still closes the turn");
+        ROOTS.lock().unwrap().remove(&root);
+    }
+
     // W4.3: a torn tail line (hook appending while the poll reads — the append
     // is not atomic vs the read) must not advance signal_offset past the
     // partial bytes, or the Stop signal split across two reads is lost and the
@@ -1388,6 +1467,7 @@ mod tests {
                 RootState {
                     engine,
                     signal_offset: 0,
+                    created_second: 0,
                     last_pending: BTreeMap::new(),
                 },
             );
