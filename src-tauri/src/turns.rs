@@ -769,13 +769,24 @@ pub fn turn_rollback(root: String, turn_id: u64, paths: Vec<String>) -> Result<R
     };
     for path in plan.keys() {
         let full_path = Path::new(&root).join(path);
-        let current = fs::read(&full_path).ok();
-        let before_hash = current.as_deref().and_then(|bytes| store.put(bytes));
+        // Distinguish "genuinely absent" (NotFound) from "unreadable" (other IO
+        // error) and "unsnapshottable" (put() returned None: >10MB or write
+        // error) — collapsing all three to snapshotted=true let a later
+        // rollback spanning this synthetic turn resolve_restore a delete for a
+        // file that actually exists (see W1.1's guard).
+        let (before_hash, snapshotted) = match fs::read(&full_path) {
+            Ok(bytes) => match store.put(&bytes) {
+                Some(hash) => (Some(hash), true),
+                None => (None, false), // oversized or blob-store write error
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, true), // genuinely absent
+            Err(_) => (None, false), // unreadable (permissions, IO error) — not absent
+        };
         pre_rollback.files.push(TurnFile {
             path: path.clone(),
             before_hash: before_hash.clone(),
             after_hash: before_hash,
-            snapshotted: true,
+            snapshotted,
             unsafe_before: false,
         });
     }
@@ -1249,6 +1260,50 @@ mod tests {
         let result = turn_rollback(root.clone(), 1, vec!["a.rs".into()]);
         ROOTS.lock().unwrap().remove(&root); // clean the shared static
         assert!(result.is_err());
+    }
+
+    // W1.2: turn_rollback's synthetic pre-rollback turn must not hardcode
+    // snapshotted=true. A file that grew past MAX_SNAPSHOT_BYTES by the time of
+    // rollback can't have its "before" content captured — the synthetic entry
+    // must record snapshotted=false so a later rollback spanning it (via
+    // resolve_restore's W1.1 guard) never plans a delete for it.
+    #[test]
+    fn synthetic_rollback_turn_marks_oversized_current_file_unsnapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let path = "big.bin";
+
+        // Turn 1: a pre-existing small file (h0) edited by the agent (h1).
+        let store = blob_store(&root);
+        let h0 = store.put(b"before-content").unwrap();
+        let h1 = store.put(b"after-content").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![(path, Some(&h0), Some(&h1))])).unwrap();
+
+        // The file grows past the snapshot cap before the rollback is applied.
+        let big = vec![0u8; MAX_SNAPSHOT_BYTES + 1];
+        fs::write(dir.path().join(path), &big).unwrap();
+
+        let result = turn_rollback(root.clone(), 0, vec![path.to_string()]).unwrap();
+        assert_eq!(result.restored, vec![path.to_string()]);
+        assert!(result.failed.is_empty());
+
+        let turns = load_manifest(&root);
+        let synthetic = turns
+            .iter()
+            .find(|t| t.boundary_source == "rollback")
+            .expect("synthetic pre-rollback turn recorded");
+        let file = synthetic.files.iter().find(|f| f.path == path).unwrap();
+        assert!(
+            !file.snapshotted,
+            "oversized current file must not be marked snapshotted"
+        );
+
+        // A later rollback spanning the synthetic turn must not plan a delete.
+        let plan = resolve_restore(&turns, 0);
+        assert!(
+            !plan.contains_key(path),
+            "unsnapshotted synthetic entry must not be deletable"
+        );
     }
 
     // M2: merge_stop_hook returns Err (not panic) on well-formed-but-wrong-shape JSON.
