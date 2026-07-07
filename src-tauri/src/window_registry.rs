@@ -1,9 +1,9 @@
 //! Cross-process window registry: one live process per canonical root.
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -125,42 +125,36 @@ fn publish_atomic(root_key: &str, dest: &Path, lock: &Lock) -> io::Result<()> {
     result
 }
 
-/// Acquire an exclusive advisory `flock` on `guard_path` (creating it if
+/// Acquire an exclusive advisory file lock on `guard_path` (creating it if
 /// absent), run `f` while holding it, then release when the returned guard
-/// `File` drops (fd close) at the end of this call — including on panic
+/// `File` drops at the end of this call — including on panic
 /// unwind or process death, so there's never an orphaned sentinel.
 ///
-/// `flock` is per-open-file-description: each `OpenOptions::open` call
-/// (thread or process) gets its own fd/description, so two threads of one
-/// process serialize on the guard exactly like two processes do — confirmed
-/// by `concurrent_claims_exactly_one_wins` and `concurrent_reclaim_exactly_one_wins`,
-/// both of which race threads, not processes.
+/// `fs2` maps this to the platform's native file lock (`flock`/`LockFileEx`),
+/// so two threads of one process serialize on the guard exactly like two
+/// processes do — confirmed by `concurrent_claims_exactly_one_wins` and
+/// `concurrent_reclaim_exactly_one_wins`, both of which race threads, not
+/// processes.
 ///
 /// Shared by `try_claim` and `gc_sweep` so both serialize against each other
 /// on the SAME per-root guard file, not just against themselves.
 fn with_root_guard<T>(guard_path: &Path, f: impl FnOnce() -> T) -> io::Result<T> {
     let guard = OpenOptions::new().read(true).write(true).create(true).open(guard_path)?;
-    let fd = guard.as_raw_fd();
-    // SAFETY: `fd` is a valid, open file descriptor owned by `guard` for the
-    // duration of this call; `flock` only reads/blocks on it.
-    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    guard.lock_exclusive()?;
     let result = f();
-    // `guard` drops here — flock released (fd close), including on panic
-    // unwind or process death.
+    // `guard` drops here — lock released, including on panic unwind or
+    // process death.
     Ok(result)
 }
 
 /// Claim `root_key`, serialized against every other thread/process racing the
-/// same root via an advisory exclusive `flock` on a per-root `.guard` file
+/// same root via an advisory exclusive file lock on a per-root `.guard` file
 /// (see `with_root_guard`).
 ///
 /// Readers (`live_owner`) never take this lock — they must keep working
 /// lock-free — so the published lockfile must always be a *complete* file.
 /// That is `publish_atomic`'s job (tmp write + `rename`, never observed
-/// empty or partial). What `flock` buys is mutual exclusion of the
+/// empty or partial). What the file lock buys is mutual exclusion of the
 /// *read-decide-publish* sequence itself: the prior fix (atomic `hard_link`
 /// publish) closed the empty-file TOCTOU for a fresh key, but the dead-lock
 /// reclaim arm still read-then-`remove_file`-by-name, so two racers could
@@ -495,7 +489,7 @@ mod tests {
     /// barrier. Pre-fix, two racers could each read the dead lock, both
     /// decide "reclaim", and the second's `remove_file`-by-name would delete
     /// the first's freshly-published *live* lock — yielding two `Won`. The
-    /// `flock` guard serializes read-decide-publish, so exactly one must win
+    /// file guard serializes read-decide-publish, so exactly one must win
     /// and every other thread must re-read the winner's live lock as `Owned`.
     #[test]
     fn concurrent_reclaim_exactly_one_wins() {
