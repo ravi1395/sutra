@@ -24,6 +24,7 @@ export const movePath = (from: string, to: string) =>
   invoke<void>("move_path", { from, to });
 export const deletePath = (path: string) => invoke<void>("delete_path", { path });
 export const createDir = (path: string) => invoke<void>("create_dir", { path });
+export const copyPath = (from: string, to: string) => invoke<void>("copy_path", { from, to });
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
 // New Window: no path → fresh untitled child; a path with a live owner focuses it.

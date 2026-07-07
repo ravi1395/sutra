@@ -4,7 +4,7 @@
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView } from "./tree";
+import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -38,6 +38,7 @@ import {
   deletePath,
   createDir,
   movePath,
+  copyPath,
   gitChangedFiles,
   gitCheckout,
   spawnWindow,
@@ -518,18 +519,24 @@ tree.onRename = async (path: string, newName: string) => {
   }
 };
 
-tree.onDelete = async (path: string) => {
-  if (!(await confirmNative(`Delete "${path.split("/").pop()}"?`))) return;
+tree.onDeleteMany = async (paths: string[]) => {
+  if (!(await confirmNative(deleteConfirmMessage(paths)))) return;
+  // Drop descendants whose ancestor is also selected — deleting the ancestor already removes
+  // them, and attempting to delete an already-gone descendant would abort the loop partway.
+  const toDelete = dropSelectedDescendants(paths);
   try {
-    await deletePath(path);
-    // Close any open tabs for deleted path and its children
-    const pathPrefix = path.endsWith("/") ? path : path + "/";
-    for (const tab of editor.tabs.slice()) {
-      if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
-        editor.closeTab(tab);
+    for (const path of toDelete) {
+      await deletePath(path);
+      // Close any open tabs for deleted path and its children
+      const pathPrefix = path.endsWith("/") ? path : path + "/";
+      for (const tab of editor.tabs.slice()) {
+        if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
+          editor.closeTab(tab);
+        }
       }
     }
     await tree.refresh();
+    tree.clearSelection();
   } catch (e) {
     void alertNative(`Delete failed: ${e}`);
   }
@@ -544,28 +551,61 @@ tree.onCreate = async (parentDir: string, name: string, isDir: boolean) => {
   else await writeFile(path, "");
 };
 
-tree.onMove = async (src: string, destDir: string) => {
-  try {
-    // Compute destination path: destDir + "/" + basename(src)
+tree.onMoveMany = async (paths: string[], destDir: string) => {
+  // A Shift-range selection commonly contains both an expanded directory and its own
+  // children — moving the directory already relocates the children, so drop them here
+  // (same rationale as the multi-delete loop above) to avoid a spurious per-item failure.
+  for (const src of dropSelectedDescendants(paths)) {
+    const srcParent = src.split("/").slice(0, -1).join("/");
+    if (srcParent === destDir) continue; // dropped into its own parent — no-op
     const srcBaseName = src.split("/").pop() || src;
     const destPath = destDir + "/" + srcBaseName;
-    await movePath(src, destPath);
-    // Update open tabs with moved path — keep dirty state, the bytes moved unchanged
-    const srcPrefix = src.endsWith("/") ? src : src + "/";
-    for (const tab of editor.tabs.slice()) {
-      if (tab.path === src) {
-        editor.retargetTab(tab, destPath, srcBaseName);
-      } else if (tab.path && tab.path.startsWith(srcPrefix)) {
-        // Move children: /old/child -> /new/child
-        const relPath = tab.path.slice(srcPrefix.length);
-        const newPath = destPath + "/" + relPath;
-        editor.retargetTab(tab, newPath, tab.name);
+    try {
+      await movePath(src, destPath);
+      // Update open tabs with moved path — keep dirty state, the bytes moved unchanged
+      const srcPrefix = src.endsWith("/") ? src : src + "/";
+      for (const tab of editor.tabs.slice()) {
+        if (tab.path === src) {
+          editor.retargetTab(tab, destPath, srcBaseName);
+        } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+          // Move children: /old/child -> /new/child
+          const relPath = tab.path.slice(srcPrefix.length);
+          const newPath = destPath + "/" + relPath;
+          editor.retargetTab(tab, newPath, tab.name);
+        }
       }
+    } catch (e) {
+      void alertNative(`Move failed for ${srcBaseName}: ${e}`);
     }
-    await tree.refresh();
-  } catch (e) {
-    void alertNative(`Move failed: ${e}`);
   }
+  await tree.refresh();
+  tree.clearSelection();
+};
+
+tree.onPaste = async (items, mode) => {
+  for (const { src, destPath } of items) {
+    try {
+      if (mode === "copy") {
+        await copyPath(src, destPath);
+      } else {
+        await movePath(src, destPath);
+        const srcPrefix = src.endsWith("/") ? src : src + "/";
+        const destBaseName = destPath.split("/").pop() || destPath;
+        for (const tab of editor.tabs.slice()) {
+          if (tab.path === src) {
+            editor.retargetTab(tab, destPath, destBaseName);
+          } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+            const relPath = tab.path.slice(srcPrefix.length);
+            editor.retargetTab(tab, destPath + "/" + relPath, tab.name);
+          }
+        }
+      }
+    } catch (e) {
+      void alertNative(`Paste failed for ${src.split("/").pop()}: ${e}`);
+    }
+  }
+  await tree.refresh();
+  tree.clearSelection();
 };
 
 // ---- save / save-as ----

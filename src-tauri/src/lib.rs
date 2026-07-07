@@ -273,6 +273,7 @@ pub fn run() {
             fs_cmds::move_path,
             fs_cmds::delete_path,
             fs_cmds::create_dir,
+            fs_cmds::copy_path,
             git::git_head_content,
             git::git_status,
             git::git_branch,
