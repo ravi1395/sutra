@@ -90,6 +90,16 @@ export function ancestorPathsForReveal(path: string): string[] {
   return out;
 }
 
+/** Inclusive range between `anchor` and `target` within `visiblePaths` (order-independent).
+ *  Falls back to `[target]` alone when `anchor` isn't in the visible list. */
+export function computeRangeSelection(visiblePaths: string[], anchor: string, target: string): string[] {
+  const anchorIdx = visiblePaths.indexOf(anchor);
+  const targetIdx = visiblePaths.indexOf(target);
+  if (anchorIdx === -1 || targetIdx === -1) return [target];
+  const [start, end] = anchorIdx <= targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+  return visiblePaths.slice(start, end + 1);
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 type TreeContainer = HTMLElement | DocumentFragment;
@@ -99,8 +109,10 @@ export class FileTree {
   private root: string | null = null;
   private expanded = new Set<string>();
   private activePath: string | null = null;
-  private selectedPath: string | null = null;
+  private selectedPath: string | null = null; // last-clicked entry; drives single-target create/paste-dir resolution
   private selectedIsDir = false;
+  private selectedPaths = new Set<string>(); // full multi-selection; drives delete/move/copy/paste
+  private lastClickedPath: string | null = null; // Shift-click range anchor
   private status = new Map<string, "M" | "A" | "D">();
   private changedDirs = new Set<string>();
   private deletedDirs = new Set<string>(); // dirs containing deleted entries (visible signal while collapsed)
@@ -114,6 +126,7 @@ export class FileTree {
 
   constructor(el: HTMLElement) {
     this.el = el;
+    this.el.tabIndex = -1;
     // Right-click on empty tree space (not a row) creates at the workspace root.
     this.el.addEventListener("contextmenu", (ev) => {
       if ((ev.target as HTMLElement).closest(".tree-row")) return; // row menu handles it
@@ -137,6 +150,8 @@ export class FileTree {
     this.expanded.add(path);
     this.selectedPath = null;
     this.selectedIsDir = false;
+    this.selectedPaths.clear();
+    this.lastClickedPath = null;
     await this.loadStatus();
     await this.render();
     if (this.root !== path) return;
@@ -192,6 +207,7 @@ export class FileTree {
     if (!this.isCurrentRender(seq, root)) return;
     this.el.replaceChildren(fragment);
     this.el.scrollTop = prevScroll; // browser clamps if content shrank
+    this.renderSelectionClasses();
   }
 
   /** Expand every ancestor of `path`, activate it, and re-render the tree. */
@@ -328,6 +344,24 @@ export class FileTree {
     );
   }
 
+  /** Paths of currently rendered rows, in DOM order — the universe Shift-click ranges over. */
+  private visiblePaths(): string[] {
+    return Array.from(this.el.querySelectorAll<HTMLElement>(".tree-row"))
+      .map((r) => r.dataset.path ?? "")
+      .filter(Boolean);
+  }
+
+  private computeVisibleRange(anchor: string, target: string): string[] {
+    return computeRangeSelection(this.visiblePaths(), anchor, target);
+  }
+
+  /** Sync `.multi-selected` DOM classes to `selectedPaths` without a full re-render. */
+  private renderSelectionClasses(): void {
+    this.el.querySelectorAll<HTMLElement>(".tree-row").forEach((row) => {
+      row.classList.toggle("multi-selected", this.selectedPaths.has(row.dataset.path ?? ""));
+    });
+  }
+
   private async renderDir(
     path: string,
     depth: number,
@@ -450,9 +484,25 @@ export class FileTree {
       });
     }
 
-    row.onclick = () => {
+    row.onclick = (ev: MouseEvent) => {
+      this.el.focus();
       this.selectedPath = e.path;
       this.selectedIsDir = e.isDir;
+      if (ev.shiftKey && this.lastClickedPath) {
+        this.selectedPaths = new Set(this.computeVisibleRange(this.lastClickedPath, e.path));
+        this.renderSelectionClasses();
+        return;
+      }
+      if (ev.metaKey || ev.ctrlKey) {
+        if (this.selectedPaths.has(e.path)) this.selectedPaths.delete(e.path);
+        else this.selectedPaths.add(e.path);
+        this.lastClickedPath = e.path;
+        this.renderSelectionClasses();
+        return;
+      }
+      this.lastClickedPath = e.path;
+      this.selectedPaths = new Set([e.path]);
+      this.renderSelectionClasses();
       if (e.isDir) {
         if (this.expanded.has(e.path)) this.expanded.delete(e.path);
         else this.expanded.add(e.path);

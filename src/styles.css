@@ -1152,6 +1152,12 @@ button:hover {
   color: var(--fg);
   border-left: 2px solid var(--em);
 }
+.tree-row.multi-selected {
+  background: var(--bg-3);
+}
+.tree-row.multi-selected.active {
+  background: var(--em-wash-row);
+}
 .tree-twisty {
   width: 12px;
   display: inline-block;
