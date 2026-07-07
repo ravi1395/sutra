@@ -129,3 +129,10 @@ test("testAutoRun is per-root and defaults off", () => {
   assert.equal(isTestAutoRunEnabled("/r1"), true);
   assert.equal(isTestAutoRunEnabled("/r2"), false);
 });
+
+test("formatOnSave defaults to true and round-trips through clampSettings", () => {
+  assert.equal(DEFAULT_SETTINGS.formatOnSave, true);
+  assert.equal(clampSettings({}).formatOnSave, true);
+  assert.equal(clampSettings({ formatOnSave: false }).formatOnSave, false);
+  assert.equal(clampSettings({ formatOnSave: "nonsense" as unknown as boolean }).formatOnSave, true);
+});

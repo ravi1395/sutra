@@ -40,6 +40,9 @@ import { sql } from "@codemirror/lang-sql";
 import { go } from "@codemirror/lang-go";
 import { markdown } from "@codemirror/lang-markdown";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
+import { yaml } from "@codemirror/lang-yaml";
+import { xml } from "@codemirror/lang-xml";
+import { toml } from "@codemirror/legacy-modes/mode/toml";
 import { readFile, gitHeadContent, fileMtime, langDidOpen, langDidChange, langDidClose } from "./ipc";
 import { previewServerUrl } from "./ipc";
 import { langAutocompletionExt, langHoverTooltipExt, gotoDefinition } from "./lang";
@@ -316,6 +319,7 @@ const inlineHintField = StateField.define<DecorationSet>({
 });
 
 const rubyLanguage = StreamLanguage.define(ruby);
+const tomlLanguage = StreamLanguage.define(toml);
 const editorThemeCompartment = new Compartment();
 
 // Indent width as both the display tab size and the unit inserted by indent commands.
@@ -402,6 +406,13 @@ export function detectLanguage(name: string): Extension | null {
       return go();
     case "rb":
       return rubyLanguage.extension;
+    case "yaml":
+    case "yml":
+      return yaml();
+    case "xml":
+      return xml();
+    case "toml":
+      return tomlLanguage.extension;
     case "json":
       return json();
     case "html":
@@ -1662,6 +1673,11 @@ export class EditorManager {
     const pane = this.paneOf(tab);
     if (pane && pane.active === tab) pane.setContent(text);
     else tab.state = (pane ?? this.focused).makeState(text, tab.name);
+  }
+
+  /** Public entry point for replacing a tab's content with beautified text before save. */
+  applyFormattedContent(tab: Tab, text: string): void {
+    this.setTabContent(tab, text);
   }
 
   /**
