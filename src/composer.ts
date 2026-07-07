@@ -134,6 +134,14 @@ export function mountComposer(opts: ComposerOptions): {
   const sectionsEl = mk("div", "cmp-sections");
   // Chip rail (rendered directly under the context hero)
   const chipRail = mk("div", "cmp-chip-rail");
+  // Standalone "+ selection" row — sits between the Context hero and the chip
+  // rail (or, if the template has no Context section, just before the chip
+  // rail). Built once and repositioned in renderSections(), not recreated.
+  const selRow = mk("div", "cmp-sel-row");
+  const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
+  selBtn.title = "Insert current editor selection as a context chip";
+  selBtn.onclick = addSelectionChip;
+  selRow.appendChild(selBtn);
 
   // Onboarding whisper — shown only on a fresh, empty draft.
   const onboardEl = mk("div", "cmp-onboard hidden");
@@ -319,14 +327,8 @@ export function mountComposer(opts: ComposerOptions): {
     if (comp) comp.area = ta;
 
     if (isCtx) {
-      // hint row: @ file · + selection (selection button moved to its own
-      // row below in Task 2 of this plan — still inline here for now)
       const hint = mk("div", "cmp-complete-hint");
-      hint.innerHTML = `@ file &middot; `;
-      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
-      selBtn.title = "Insert current editor selection as a context chip";
-      selBtn.onclick = addSelectionChip;
-      hint.appendChild(selBtn);
+      hint.textContent = "@ file";
       wrap.appendChild(hint);
     } else if (isTask) {
       const hint = mk("div", "cmp-complete-hint");
@@ -353,19 +355,15 @@ export function mountComposer(opts: ComposerOptions): {
     sectionsEl.innerHTML = "";
     ctxComp.area = null; taskComp.area = null; taskCount = null; ctxCount = null;
     sectionsEl.appendChild(onboardEl);
-    // chipRail persists across renders (only its .cmp-chip pills are re-rendered
-    // elsewhere) — drop any fallback "+ selection" button from a prior render
-    // before deciding whether to re-add one below, to avoid duplicates on
-    // repeated template switches.
-    chipRail.querySelectorAll(".cmp-add-sel").forEach((e) => e.remove());
     const ordered = orderSections(templateTags(config, templateName));
     let placedCtx = false;
     for (const tag of ordered) {
       renderSection(tag);
-      // Each hero's own suggestion dropdown sits directly under it; chip rail
-      // still sits directly under Context.
+      // Each hero's own suggestion dropdown sits directly under it; the
+      // standalone selection row + chip rail sit directly under Context.
       if (tag.id === "context") {
         sectionsEl.appendChild(ctxComp.suggestEl);
+        sectionsEl.appendChild(selRow);
         sectionsEl.appendChild(chipRail);
         placedCtx = true;
       } else if (tag.id === "task") {
@@ -373,13 +371,9 @@ export function mountComposer(opts: ComposerOptions): {
       }
     }
     if (!placedCtx) {
-      // No context section — keep completion + chips reachable at the end,
-      // and preserve the "+ selection" affordance the Context hero would
-      // otherwise provide, so selection chips stay reachable.
-      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
-      selBtn.title = "Insert current editor selection as a context chip";
-      selBtn.onclick = addSelectionChip;
-      chipRail.appendChild(selBtn);
+      // No context section — keep the selection row + chip rail reachable
+      // at the end, so selection chips stay attachable.
+      sectionsEl.appendChild(selRow);
       sectionsEl.appendChild(chipRail);
     }
     updateHeroCounts();

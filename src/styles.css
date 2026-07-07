@@ -2945,6 +2945,9 @@ button:hover {
   background: var(--em-wash);
 }
 .cmp-add-sel { font-size: 11px; }
+.cmp-sel-row {
+  padding: 2px 8px 4px;
+}
 .cmp-action-bar {
   display: flex;
   align-items: center;
