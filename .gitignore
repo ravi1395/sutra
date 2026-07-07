@@ -21,6 +21,7 @@ docs/*
 node_modules
 dist
 dist-ssr
+.worktrees/
 *.local
 plans*
 !docs/superpowers/plans/
