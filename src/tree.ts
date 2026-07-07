@@ -106,6 +106,13 @@ export function deleteConfirmMessage(paths: string[]): string {
   return `Delete ${paths.length} items?`;
 }
 
+/** Drop paths whose ancestor is also present in the selection — deleting the ancestor
+ *  already removes them, and attempting to delete an already-gone descendant separately
+ *  (e.g. in a sequential delete loop) would fail. */
+export function dropSelectedDescendants(paths: string[]): string[] {
+  return paths.filter((p) => !paths.some((other) => other !== p && p.startsWith(other + "/")));
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 type TreeContainer = HTMLElement | DocumentFragment;

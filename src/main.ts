@@ -4,7 +4,7 @@
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView, deleteConfirmMessage } from "./tree";
+import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -519,8 +519,11 @@ tree.onRename = async (path: string, newName: string) => {
 
 tree.onDeleteMany = async (paths: string[]) => {
   if (!(await confirmNative(deleteConfirmMessage(paths)))) return;
+  // Drop descendants whose ancestor is also selected — deleting the ancestor already removes
+  // them, and attempting to delete an already-gone descendant would abort the loop partway.
+  const toDelete = dropSelectedDescendants(paths);
   try {
-    for (const path of paths) {
+    for (const path of toDelete) {
       await deletePath(path);
       // Close any open tabs for deleted path and its children
       const pathPrefix = path.endsWith("/") ? path : path + "/";
