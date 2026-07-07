@@ -443,6 +443,7 @@ export class FileTree {
     const { mode } = this.clipboard;
     const paths = dropSelectedDescendants(this.clipboard.paths);
     const destDir = this.targetDirForCreate();
+    if (rejectsDrop(destDir, paths)) return; // pasting into (or as) one of the sources is invalid, same rule as drag-drop
     let existingNames: Set<string>;
     try {
       existingNames = new Set((await listDir(destDir)).map((entry) => entry.name));
