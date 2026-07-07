@@ -204,6 +204,53 @@ pub fn create_dir(tracker: State<'_, AgentTrackerState>, path: String) -> Result
     Ok(())
 }
 
+/// Recursively copy a directory's contents from `from` to `to`, creating `to`.
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// True if `to` is `from` itself or nested inside it — copying into that
+/// destination would recurse into the copy's own output.
+fn rejects_copy_destination(from: &Path, to: &Path) -> bool {
+    to.starts_with(from)
+}
+
+/// Copy a file or directory (recursive) to a new path; reject if destination exists,
+/// or is the source itself or one of its own subfolders.
+#[tauri::command]
+pub fn copy_path(tracker: State<'_, AgentTrackerState>, from: String, to: String) -> Result<(), String> {
+    let from_path = Path::new(&from);
+    let to_path = PathBuf::from(&to);
+    if to_path.exists() {
+        return Err("Destination already exists".to_string());
+    }
+    if rejects_copy_destination(from_path, &to_path) {
+        return Err("Cannot copy into the source itself or one of its own subfolders".to_string());
+    }
+    let before = capture_paths(&[to_path.clone()]);
+    if from_path.is_dir() {
+        copy_dir_recursive(from_path, &to_path).map_err(|e| e.to_string())?;
+    } else {
+        if let Some(parent) = to_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(from_path, &to_path).map_err(|e| e.to_string())?;
+    }
+    tracker.record_sutra_mutation(before, &[to_path]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +328,32 @@ mod tests {
 
         assert_eq!(deep, start);
         assert_eq!(label, "a");
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("a.txt"), "one").unwrap();
+        fs::write(src.join("nested").join("b.txt"), "two").unwrap();
+        let dest = dir.path().join("dest");
+
+        copy_dir_recursive(&src, &dest).unwrap();
+
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "one");
+        assert_eq!(
+            fs::read_to_string(dest.join("nested").join("b.txt")).unwrap(),
+            "two"
+        );
+    }
+
+    #[test]
+    fn rejects_copy_destination_true_for_self_and_descendant() {
+        let from = Path::new("/tmp/project");
+        assert!(rejects_copy_destination(from, Path::new("/tmp/project")));
+        assert!(rejects_copy_destination(from, Path::new("/tmp/project/sub")));
+        assert!(!rejects_copy_destination(from, Path::new("/tmp/other")));
+        assert!(!rejects_copy_destination(from, Path::new("/tmp/project-other"))); // shared string prefix, not a real descendant
     }
 }

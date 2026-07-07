@@ -1,9 +1,12 @@
 // Persisted user settings (editor, terminal, behavior) and pure clamp/update helpers.
+import { settingsGet, settingsSet } from "./ipc";
+
 export interface UserSettings {
   editorFontSize: number;
   editorFontFamily: string;
   editorTabSize: number;
   editorWordWrap: boolean;
+  formatOnSave: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
   terminalScrollback: number;
@@ -35,6 +38,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   editorFontFamily: FONT_FAMILIES[0],
   editorTabSize: 4,
   editorWordWrap: false,
+  formatOnSave: true,
   terminalFontSize: 12,
   terminalFontFamily: FONT_FAMILIES[1],
   terminalScrollback: 5000,
@@ -47,6 +51,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   quietWindowMs: 10000,
 };
 
+// Legacy localStorage key — read once (loadSettings) to port a pre-migration
+// value into the shared backend store, then never written again.
 const SETTINGS_KEY = "sutra.settings";
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 24;
@@ -79,6 +85,7 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     editorFontFamily: pick(FONT_FAMILIES, value.editorFontFamily, d.editorFontFamily),
     editorTabSize: pick(TAB_SIZES, value.editorTabSize, d.editorTabSize),
     editorWordWrap: pickBool(value.editorWordWrap, d.editorWordWrap),
+    formatOnSave: pickBool(value.formatOnSave, d.formatOnSave),
     terminalFontSize: clampFontSize(value.terminalFontSize, d.terminalFontSize),
     terminalFontFamily: pick(FONT_FAMILIES, value.terminalFontFamily, d.terminalFontFamily),
     terminalScrollback: pick(SCROLLBACK_OPTIONS, value.terminalScrollback, d.terminalScrollback),
@@ -120,12 +127,34 @@ export function nextFontSettings(settings: UserSettings, delta: number): UserSet
   });
 }
 
-export function loadSettings(): UserSettings {
+export interface SettingsBackend {
+  get: () => Promise<unknown>;
+  set: (value: unknown) => Promise<void>;
+}
+const defaultSettingsBackend: SettingsBackend = { get: settingsGet, set: settingsSet };
+
+/** Load settings from the shared backend store (every window sees the same
+ *  values). One-shot: while the backend is still empty (pre-migration), seeds
+ *  it from any pre-existing `sutra.settings` localStorage value, then never
+ *  reads localStorage again. Safe to call on every boot. */
+export async function loadSettings(backend: SettingsBackend = defaultSettingsBackend): Promise<UserSettings> {
   try {
-    return deserializeSettings(localStorage.getItem(SETTINGS_KEY));
+    const stored = await backend.get();
+    if (stored !== null && stored !== undefined) return clampSettings(stored as Partial<UserSettings>);
   } catch {
-    return DEFAULT_SETTINGS;
+    /* backend unavailable this call — fall through to legacy/defaults */
   }
+  let legacyRaw: string | null = null;
+  try {
+    legacyRaw = localStorage.getItem(SETTINGS_KEY);
+  } catch {
+    /* storage unavailable — nothing to port, fall back to defaults */
+  }
+  const legacy = deserializeSettings(legacyRaw);
+  if (legacyRaw !== null) {
+    await backend.set(legacy).catch(() => {});
+  }
+  return legacy;
 }
 
 // Per-root test auto-run toggle (harness v2), keyed "sutra.testAutoRun.<root>".
@@ -145,10 +174,9 @@ export function setTestAutoRunEnabled(root: string, on: boolean): void {
   }
 }
 
-export function saveSettings(settings: UserSettings): void {
-  try {
-    localStorage.setItem(SETTINGS_KEY, serializeSettings(settings));
-  } catch {
-    /* storage unavailable / quota - settings remain in memory for this run */
-  }
+/** Persist settings to the shared backend store (best-effort). */
+export function saveSettings(settings: UserSettings, backend: SettingsBackend = defaultSettingsBackend): Promise<void> {
+  return backend.set(clampSettings(settings)).catch(() => {
+    /* backend unavailable / quota - settings remain in memory for this run */
+  });
 }

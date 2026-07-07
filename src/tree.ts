@@ -2,7 +2,7 @@
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
 // Also exports OutlineView for the Files/Outline sidebar toggle.
-import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
+import { listDir, gitStatus, fileMtime, clipboardWrite, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
 import { showContextMenu } from "./contextmenu";
 import { icon } from "./icons";
 import {
@@ -90,6 +90,77 @@ export function ancestorPathsForReveal(path: string): string[] {
   return out;
 }
 
+/** Inclusive range between `anchor` and `target` within `visiblePaths` (order-independent).
+ *  Falls back to `[target]` alone when `anchor` isn't in the visible list. */
+export function computeRangeSelection(visiblePaths: string[], anchor: string, target: string): string[] {
+  const anchorIdx = visiblePaths.indexOf(anchor);
+  const targetIdx = visiblePaths.indexOf(target);
+  if (anchorIdx === -1 || targetIdx === -1) return [target];
+  const [start, end] = anchorIdx <= targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+  return visiblePaths.slice(start, end + 1);
+}
+
+/** Confirm-dialog copy for deleting one or many tree entries. */
+export function deleteConfirmMessage(paths: string[]): string {
+  if (paths.length === 1) return `Delete "${paths[0].split("/").pop()}"?`;
+  return `Delete ${paths.length} items?`;
+}
+
+/** Context-menu label for the "copy absolute path(s) to clipboard" action. */
+export function copyPathsMenuLabel(count: number): string {
+  return count > 1 ? `Copy ${count} Paths` : "Copy Path";
+}
+
+/** Auto-rename policy for paste conflicts (both copy and cut): "name copy.ext",
+ *  then "name copy 2.ext", etc. A leading dot (dotfiles) doesn't count as an extension. */
+export function resolvePasteConflictName(desiredName: string, existingNames: Set<string>): string {
+  if (!existingNames.has(desiredName)) return desiredName;
+  const dotIndex = desiredName.lastIndexOf(".");
+  const hasExt = dotIndex > 0;
+  const base = hasExt ? desiredName.slice(0, dotIndex) : desiredName;
+  const ext = hasExt ? desiredName.slice(dotIndex) : "";
+  let candidate = `${base} copy${ext}`;
+  let n = 2;
+  while (existingNames.has(candidate)) {
+    candidate = `${base} copy ${n}${ext}`;
+    n++;
+  }
+  return candidate;
+}
+
+/** Drop paths whose ancestor is also present in the selection — deleting the ancestor
+ *  already removes them, and attempting to delete an already-gone descendant separately
+ *  (e.g. in a sequential delete loop) would fail. */
+export function dropSelectedDescendants(paths: string[]): string[] {
+  return paths.filter((p) => !paths.some((other) => other !== p && p.startsWith(other + "/")));
+}
+
+/** Encode a drag payload: a bare path for a single entry (back-compat with
+ *  existing drop targets), JSON array for a multi-selection drag. */
+export function serializeTreeDragPayload(paths: string[]): string {
+  return paths.length === 1 ? paths[0] : JSON.stringify(paths);
+}
+
+/** Decode a drag payload written by `serializeTreeDragPayload`, tolerating a
+ *  bare path (single-item drag or an older payload). */
+export function parseTreeDragPayload(raw: string): string[] {
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === "string");
+    } catch {
+      // Not valid JSON — treat the whole string as a literal (unlikely) path.
+    }
+  }
+  return [raw];
+}
+
+/** True if dropping onto `destPath` would land on, or inside, any of `draggedPaths`. */
+export function rejectsDrop(destPath: string, draggedPaths: string[]): boolean {
+  return draggedPaths.some((src) => src === destPath || destPath.startsWith(src + "/"));
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 type TreeContainer = HTMLElement | DocumentFragment;
@@ -99,8 +170,11 @@ export class FileTree {
   private root: string | null = null;
   private expanded = new Set<string>();
   private activePath: string | null = null;
-  private selectedPath: string | null = null;
+  private selectedPath: string | null = null; // last-clicked entry; drives single-target create/paste-dir resolution
   private selectedIsDir = false;
+  private selectedPaths = new Set<string>(); // full multi-selection; drives delete/move/copy/paste
+  private lastClickedPath: string | null = null; // Shift-click range anchor
+  private clipboard: { paths: string[]; mode: "copy" | "cut" } | null = null;
   private status = new Map<string, "M" | "A" | "D">();
   private changedDirs = new Set<string>();
   private deletedDirs = new Set<string>(); // dirs containing deleted entries (visible signal while collapsed)
@@ -108,12 +182,15 @@ export class FileTree {
   onOpenFile?: (path: string) => void;
   onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
   onRename?: (path: string, newName: string) => void;
-  onDelete?: (path: string) => void;
+  onDeleteMany?: (paths: string[]) => void;
   onCreate?: (parentDir: string, name: string, isDir: boolean) => Promise<void>;
-  onMove?: (src: string, destDir: string) => void;
+  onMoveMany?: (paths: string[], destDir: string) => void;
+  onPaste?: (items: { src: string; destPath: string }[], mode: "copy" | "cut") => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
+    this.el.tabIndex = -1;
+    this.el.addEventListener("keydown", (ev) => this.handleKeyDown(ev));
     // Right-click on empty tree space (not a row) creates at the workspace root.
     this.el.addEventListener("contextmenu", (ev) => {
       if ((ev.target as HTMLElement).closest(".tree-row")) return; // row menu handles it
@@ -137,6 +214,8 @@ export class FileTree {
     this.expanded.add(path);
     this.selectedPath = null;
     this.selectedIsDir = false;
+    this.selectedPaths.clear();
+    this.lastClickedPath = null;
     await this.loadStatus();
     await this.render();
     if (this.root !== path) return;
@@ -192,6 +271,8 @@ export class FileTree {
     if (!this.isCurrentRender(seq, root)) return;
     this.el.replaceChildren(fragment);
     this.el.scrollTop = prevScroll; // browser clamps if content shrank
+    this.renderSelectionClasses();
+    this.renderClipboardClasses();
   }
 
   /** Expand every ancestor of `path`, activate it, and re-render the tree. */
@@ -328,6 +409,95 @@ export class FileTree {
     );
   }
 
+  /** Paths of currently rendered rows, in DOM order — the universe Shift-click ranges over. */
+  private visiblePaths(): string[] {
+    return Array.from(this.el.querySelectorAll<HTMLElement>(".tree-row"))
+      .map((r) => r.dataset.path ?? "")
+      .filter(Boolean);
+  }
+
+  private computeVisibleRange(anchor: string, target: string): string[] {
+    return computeRangeSelection(this.visiblePaths(), anchor, target);
+  }
+
+  /** Sync `.multi-selected` DOM classes to `selectedPaths` without a full re-render. */
+  private renderSelectionClasses(): void {
+    this.el.querySelectorAll<HTMLElement>(".tree-row").forEach((row) => {
+      row.classList.toggle("multi-selected", this.selectedPaths.has(row.dataset.path ?? ""));
+    });
+  }
+
+  /** Sync `.cut-pending` DOM classes to a cut-mode clipboard without a full re-render. */
+  private renderClipboardClasses(): void {
+    this.el.querySelectorAll<HTMLElement>(".tree-row").forEach((row) => {
+      const inCutClipboard =
+        this.clipboard?.mode === "cut" && this.clipboard.paths.includes(row.dataset.path ?? "");
+      row.classList.toggle("cut-pending", !!inCutClipboard);
+    });
+  }
+
+  /** Resolve the paste target dir, compute conflict-free destination names, and
+   *  delegate the actual copy/move to `onPaste`. */
+  private async paste(): Promise<void> {
+    if (!this.clipboard || !this.root) return;
+    const { mode } = this.clipboard;
+    const paths = dropSelectedDescendants(this.clipboard.paths);
+    let destDir = this.targetDirForCreate();
+    // A single folder pasted while still the active selection targets itself — fall back to
+    // its parent so "duplicate this folder" works, same as files (whose target already
+    // resolves to their parent). Any other self/descendant case still hits the guard below.
+    if (paths.length === 1 && destDir === paths[0]) {
+      destDir = paths[0].split("/").slice(0, -1).join("/");
+    }
+    if (rejectsDrop(destDir, paths)) return; // pasting into (or as) one of the sources is invalid, same rule as drag-drop
+    let existingNames: Set<string>;
+    try {
+      existingNames = new Set((await listDir(destDir)).map((entry) => entry.name));
+    } catch {
+      return;
+    }
+    const items: { src: string; destPath: string }[] = [];
+    for (const src of paths) {
+      const srcParent = src.split("/").slice(0, -1).join("/");
+      if (mode === "cut" && srcParent === destDir) continue; // pasting a cut item back into its own folder is a no-op
+      const srcName = src.split("/").pop() || src;
+      const destName = resolvePasteConflictName(srcName, existingNames);
+      existingNames.add(destName);
+      items.push({ src, destPath: destDir + "/" + destName });
+    }
+    if (items.length === 0) return;
+    this.onPaste?.(items, mode);
+    if (mode === "cut") {
+      this.clipboard = null;
+      this.renderClipboardClasses();
+    }
+  }
+
+  private handleKeyDown(ev: KeyboardEvent): void {
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return;
+    if ((ev.key === "Delete" || ev.key === "Backspace") && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.onDeleteMany?.(Array.from(this.selectedPaths));
+      return;
+    }
+    const mod = ev.metaKey || ev.ctrlKey;
+    if (mod && ev.code === "KeyC" && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.clipboard = { paths: Array.from(this.selectedPaths), mode: "copy" };
+      this.renderClipboardClasses();
+    } else if (mod && ev.code === "KeyX" && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.clipboard = { paths: Array.from(this.selectedPaths), mode: "cut" };
+      this.renderClipboardClasses();
+    } else if (mod && ev.code === "KeyV" && this.clipboard) {
+      ev.preventDefault();
+      void this.paste();
+    } else if (ev.key === "Escape" && this.clipboard) {
+      this.clipboard = null;
+      this.renderClipboardClasses();
+    }
+  }
+
   private async renderDir(
     path: string,
     depth: number,
@@ -414,25 +584,31 @@ export class FileTree {
 
     if (e.path === this.activePath) row.classList.add("active");
 
-    // Drag source: files and directories can be dragged
+    // Drag source: files and directories can be dragged. Dragging a row that's
+    // part of a multi-selection carries the whole selection; otherwise just this row.
     row.draggable = true;
     row.addEventListener("dragstart", (ev) => {
       if (!ev.dataTransfer) return;
+      const dragPaths =
+        this.selectedPaths.has(e.path) && this.selectedPaths.size > 1
+          ? Array.from(this.selectedPaths)
+          : [e.path];
       ev.dataTransfer.effectAllowed = e.isDir ? "move" : "copyMove";
-      ev.dataTransfer.setData(TREE_ENTRY_DRAG_TYPE, e.path);
-      ev.dataTransfer.setData("text/plain", e.path);
-      if (!e.isDir) ev.dataTransfer.setData(FILE_DRAG_TYPE, e.path);
+      ev.dataTransfer.setData(TREE_ENTRY_DRAG_TYPE, serializeTreeDragPayload(dragPaths));
+      ev.dataTransfer.setData("text/plain", dragPaths.join("\n"));
+      // Single-file payload for editor split-pane drop targets; multi-drags don't open in split.
+      if (dragPaths.length === 1 && !e.isDir) ev.dataTransfer.setData(FILE_DRAG_TYPE, e.path);
       row.classList.add("dragging");
     });
     row.addEventListener("dragend", () => row.classList.remove("dragging"));
 
-    // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant)
+    // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant
+    // of any dragged path).
     if (e.isDir) {
       row.addEventListener("dragover", (ev) => {
-        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
-        if (!src) return;
-        // Reject drops onto self or a descendant
-        if (src === e.path || src.startsWith(e.path + "/")) return;
+        const raw = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
+        if (!raw) return;
+        if (rejectsDrop(e.path, parseTreeDragPayload(raw))) return;
         ev.preventDefault();
         ev.dataTransfer!.dropEffect = "move";
         row.classList.add("drop-target");
@@ -444,15 +620,37 @@ export class FileTree {
         ev.preventDefault();
         ev.stopPropagation();
         row.classList.remove("drop-target");
-        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
-        if (!src || src === e.path || src.startsWith(e.path + "/")) return;
-        this.onMove?.(src, e.path);
+        const raw = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
+        if (!raw) return;
+        const paths = parseTreeDragPayload(raw);
+        if (rejectsDrop(e.path, paths)) return;
+        this.onMoveMany?.(paths, e.path);
       });
     }
 
-    row.onclick = () => {
+    row.onclick = (ev: MouseEvent) => {
+      // Skip when a click lands inside the row's own active rename/create input (e.g. cursor
+      // reposition) — clicking a *different* row still commits/cancels the edit via its blur
+      // handler, same as clicking any other focusable UI; that's intentional click-away behavior.
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return;
+      this.el.focus();
       this.selectedPath = e.path;
       this.selectedIsDir = e.isDir;
+      if (ev.shiftKey && this.lastClickedPath) {
+        this.selectedPaths = new Set(this.computeVisibleRange(this.lastClickedPath, e.path));
+        this.renderSelectionClasses();
+        return;
+      }
+      if (ev.metaKey || ev.ctrlKey) {
+        if (this.selectedPaths.has(e.path)) this.selectedPaths.delete(e.path);
+        else this.selectedPaths.add(e.path);
+        this.lastClickedPath = e.path;
+        this.renderSelectionClasses();
+        return;
+      }
+      this.lastClickedPath = e.path;
+      this.selectedPaths = new Set([e.path]);
+      this.renderSelectionClasses();
       if (e.isDir) {
         if (this.expanded.has(e.path)) this.expanded.delete(e.path);
         else this.expanded.add(e.path);
@@ -462,9 +660,14 @@ export class FileTree {
       }
     };
 
-    // Context menu on right-click
+    // Context menu on right-click. When the clicked row is part of a multi-selection,
+    // actions apply to the whole selection; otherwise they apply to this row alone.
     row.oncontextmenu = (ev) => {
       ev.preventDefault();
+      const targets =
+        this.selectedPaths.size > 1 && this.selectedPaths.has(e.path)
+          ? Array.from(this.selectedPaths)
+          : [e.path];
       showContextMenu(
         ev.clientX,
         ev.clientY,
@@ -474,8 +677,29 @@ export class FileTree {
             action: () => this.startInlineEdit(label, e.path, e.name),
           },
           {
-            label: "Delete",
-            action: () => this.onDelete?.(e.path),
+            label: "Cut",
+            action: () => {
+              this.clipboard = { paths: targets, mode: "cut" };
+              this.renderClipboardClasses();
+            },
+          },
+          {
+            label: "Copy",
+            action: () => {
+              this.clipboard = { paths: targets, mode: "copy" };
+              this.renderClipboardClasses();
+            },
+          },
+          {
+            label: copyPathsMenuLabel(targets.length),
+            action: () => void clipboardWrite(targets.join("\n")),
+          },
+          ...(this.clipboard
+            ? [{ label: "Paste", action: () => void this.paste() }]
+            : []),
+          {
+            label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
+            action: () => this.onDeleteMany?.(targets),
             danger: true,
           },
           {
@@ -546,6 +770,13 @@ export class FileTree {
   async refresh(): Promise<void> {
     await this.loadStatus();
     await this.render();
+  }
+
+  /** Clear the current multi-selection — call after a bulk mutation invalidates the selected paths. */
+  clearSelection(): void {
+    this.selectedPaths.clear();
+    this.lastClickedPath = null;
+    this.renderSelectionClasses();
   }
 }
 

@@ -171,6 +171,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       row("Font family", select(FONT_FAMILIES, s.editorFontFamily, fontLabel, (v) => patch({ editorFontFamily: v }))),
       row("Tab size", select(TAB_SIZES, s.editorTabSize, String, (v) => patch({ editorTabSize: v }))),
       row("Word wrap", toggle(s.editorWordWrap, (v) => patch({ editorWordWrap: v }))),
+      row("Format on save", toggle(s.formatOnSave, (v) => patch({ formatOnSave: v }))),
     );
   }
 

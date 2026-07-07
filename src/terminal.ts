@@ -20,6 +20,7 @@ import {
 } from "./terminal-groups";
 import { icon } from "./icons";
 import { isMod } from "./shortcuts";
+import { isControlSequence } from "./terminal-input";
 
 interface Term {
   id: string;
@@ -281,6 +282,12 @@ export class TerminalManager {
       } else if (d === "\b" || d === "\x7f") {
         // Backspace: remove last char from input.
         t.currentInput = t.currentInput.slice(0, -1);
+      } else if (isControlSequence(d)) {
+        // Control byte: readline shortcuts (Ctrl+A/U/K/W) or an ANSI report/function-key
+        // sequence (arrows, focus in/out CSI I/O, shift-tab, etc.) — xterm delivers these
+        // through the same onData channel as typed text, but they are never literal input;
+        // tracking them here corrupted cmdHistory with unprintable bytes that later rendered
+        // as garbage in the Tab history-suggestion dropdown.
       } else {
         // Regular char: add to input (simple; doesn't handle cursor movement).
         t.currentInput += d;

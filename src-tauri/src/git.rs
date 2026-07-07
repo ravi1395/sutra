@@ -357,15 +357,61 @@ pub fn git_worktrees(root: String) -> Result<Vec<WorktreeInfo>, String> {
 pub struct BranchInfo {
     pub name: String,
     pub is_current: bool,
+    // True when this branch is the HEAD of a worktree other than `root`. Such a
+    // branch cannot be checked out here (libgit2 refuses) and already appears in
+    // the worktrees list, so the picker filters it out of the branches section.
+    pub in_other_worktree: bool,
 }
 
-/// List local branches, flagging the one HEAD currently points at.
+/// Branch shorthand checked out at `path` (None when detached or unreadable).
+fn worktree_head_branch(path: &Path) -> Option<String> {
+    let repo = Repository::open(path).ok()?;
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    head.shorthand().map(String::from).ok()
+}
+
+/// Names of branches checked out in a worktree whose path differs from
+/// `root_canon`. Covers the main working tree (never in `repo.worktrees()`)
+/// plus every linked worktree.
+fn branches_bound_elsewhere(repo: &Repository, root_canon: &Path) -> std::collections::HashSet<String> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(mp) = main_workdir(repo) {
+        paths.push(mp);
+    }
+    if let Ok(wt_names) = repo.worktrees() {
+        for name_result in wt_names.iter() {
+            if let Ok(Some(name_str)) = name_result {
+                if let Ok(wt) = repo.find_worktree(name_str) {
+                    paths.push(wt.path().to_path_buf());
+                }
+            }
+        }
+    }
+    let mut set = std::collections::HashSet::new();
+    for p in paths {
+        if canon(&p).as_path() != root_canon {
+            if let Some(b) = worktree_head_branch(&p) {
+                set.insert(b);
+            }
+        }
+    }
+    set
+}
+
+/// List local branches, flagging the current HEAD and any branch bound to
+/// another worktree (so the picker can keep those distinct from checkout-able
+/// branches).
 #[tauri::command]
 pub fn git_branches(root: String) -> Result<Vec<BranchInfo>, String> {
     let repo = match Repository::discover(&root) {
         Ok(r) => r,
         Err(_) => return Ok(vec![]),
     };
+    let root_canon = canon(Path::new(&root));
+    let bound = branches_bound_elsewhere(&repo, &root_canon);
     let branches = match repo.branches(Some(BranchType::Local)) {
         Ok(b) => b,
         Err(e) => return Err(e.to_string()),
@@ -380,6 +426,7 @@ pub fn git_branches(root: String) -> Result<Vec<BranchInfo>, String> {
             result.push(BranchInfo {
                 name: name.to_string(),
                 is_current: branch.is_head(),
+                in_other_worktree: bound.contains(name),
             });
         }
     }
@@ -470,5 +517,25 @@ mod tests {
         git_checkout(root.clone(), "feature".into()).unwrap();
         let head = git_branch(root).unwrap();
         assert_eq!(head.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn branches_flag_worktree_bound() {
+        // A branch checked out in a linked worktree cannot be checked out at
+        // `root`; git_branches must flag it so the picker excludes it.
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let wt = dir.path().join("wt-feature");
+        run(dir.path(), &["worktree", "add", wt.to_str().unwrap(), "feature"]);
+
+        let branches = git_branches(root).unwrap();
+        let feature = branches.iter().find(|b| b.name == "feature").unwrap();
+        assert!(
+            feature.in_other_worktree,
+            "feature is HEAD of a linked worktree"
+        );
+        let main_b = branches.iter().find(|b| b.name == "main").unwrap();
+        assert!(!main_b.in_other_worktree, "main is the current root's branch");
+        assert!(main_b.is_current);
     }
 }

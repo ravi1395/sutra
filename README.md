@@ -125,8 +125,6 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - Opening a **folder** replaces the current workspace root. Opening a **file**
   inside the current workspace focuses it as a tab; a file **outside** it opens
   its parent folder as the workspace, then the file.
-- Sutra runs as a **single window**: launching it again with a path forwards the
-  path into the running window and focuses it instead of opening a duplicate.
 - A path handed to Sutra at launch takes precedence over last-folder restore.
 - **Workspace trust.** A folder opened this way (or restored on relaunch) starts
   **untrusted**: you can browse and edit it, but its saved automations and
@@ -135,6 +133,40 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   repo's commands. A one-click **Trust folder** prompt appears when a command is
   held back. Folders you pick yourself via **File ▸ Open** are trusted
   automatically; trust is remembered per folder.
+
+### Multiple windows & CLI
+- Sutra is **multi-process**: each distinct project root runs in its own
+  process/window, one process per canonical (realpath'd) root. Opening the
+  same root twice never creates a duplicate — the existing window is focused
+  instead.
+- `sutra [path]` — root-aware open. A **folder** opens (or focuses) that
+  folder's window; a **file** opens (or focuses) the window for its nearest
+  containing project (walking up for a `.git`, `package.json`, `Cargo.toml`,
+  or `src-tauri/tauri.conf.json` marker) and selects the file as a tab.
+- `sutra .` — open the current directory (shorthand for a folder path).
+- `sutra` with no path — always opens a new **untitled** window (no project
+  root attached).
+- `sutra --new [path]` — explicit "open a new window" intent. The one-owner-
+  per-root invariant is absolute, though: if `path`'s root already has a live
+  Sutra window, `--new` still focuses that window rather than opening a
+  second one for the same root. With no path, `--new` behaves like plain
+  `sutra` (a new untitled window).
+- **Installing the `sutra` command (macOS).** The app can check whether the
+  shim at `/usr/local/bin/sutra` is installed and current, and (re)install it
+  pointing at the running app bundle. This backend capability
+  (`cli_install_state` / `cli_install` Tauri commands) is in place, but a
+  Settings/menu affordance to trigger it from the UI is **not wired up yet**
+  — until then, install manually from a terminal:
+  ```sh
+  sudo mkdir -p /usr/local/bin
+  printf '#!/bin/sh\nexec "/Applications/Sutra.app/Contents/MacOS/Sutra" "$@"\n' | sudo tee /usr/local/bin/sutra >/dev/null
+  sudo chmod 755 /usr/local/bin/sutra
+  ```
+- **Dock menu** (macOS) — right-click the Dock icon for a menu of open
+  windows/recents — is **planned, not yet shipped** (in-progress spike).
+- On Windows: no CLI shim or Dock menu (macOS-only); multi-process root
+  isolation still applies (the app registers as a file opener on both
+  platforms).
 
 ### About, What's New & Tutorial
 - The **version pill** at the right of the title bar (e.g. `v2.1.0`) opens an

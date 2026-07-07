@@ -1,14 +1,16 @@
 // Workspace switcher anchored on the #ws-wordmark button and the openPopover
 // primitive used by the app menu. The wordmark label shows the current folder name.
 import { icon } from "./icons";
+import { cliInstall, cliInstallState } from "./ipc";
 import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
 
 export interface WorkspaceActions {
-  recents(): RecentWorkspace[];
+  recents(): Promise<RecentWorkspace[]>;
   switchWorkspace(path: string): void;
   addFolder(): void;
   openFolder(): void;
+  newWindow(): void;
   /** Optional: open the settings modal (⌘,). */
   openSettings?: () => void;
   /** Optional: run a user-initiated update check that reports its outcome. */
@@ -74,10 +76,17 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     anchor.classList.add("open");
   }
 
-  function openWorkspaceMenu(): void {
+  async function openWorkspaceMenu(): Promise<void> {
+    // Recents are backend-async (shared across windows) — await before
+    // building the popover so the row list reflects the live shared state.
+    // cliState degrades to "current" (no row) on any failure (non-macOS, IPC
+    // error) so a slow/missing backend never blocks or breaks the menu.
+    const [recents, cliState] = await Promise.all([
+      current ? actions.recents() : Promise.resolve([]),
+      cliInstallState().catch((): "absent" | "current" | "stale" => "current"),
+    ]);
     // Build the workspace selector menu using the shared .menu-card grammar.
     openPopover(wordmark, (el, close) => {
-      const recents = actions.recents();
       const items = current ? workspaceMenuModel(current, recents, Date.now()) : [];
 
       for (const item of items) {
@@ -145,6 +154,15 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       };
 
       mkRow("open folder…", "⌘O", () => actions.openFolder());
+      mkRow("new window", "⇧⌘N", () => actions.newWindow());
+      if (cliState !== "current") {
+        mkRow(cliState === "stale" ? "update cli command" : "install cli command", "", () => {
+          void (async () => {
+            const r = await cliInstall().catch((cmd: string) => cmd);
+            if (r !== "installed") await navigator.clipboard?.writeText(r); // copy admin cmd
+          })();
+        });
+      }
       if (actions.openSettings) {
         mkRow("settings…", "⌘,", () => actions.openSettings!());
       }
@@ -163,7 +181,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       `<span class="wm-chev">${icon("chevronDown", 11, 2.4)}</span>`;
   }
   renderWordmark();
-  wordmark.onclick = () => openWorkspaceMenu();
+  wordmark.onclick = () => void openWorkspaceMenu();
 
   // ---- global dismissers ----
   document.addEventListener("mousedown", (e) => {

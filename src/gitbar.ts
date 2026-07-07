@@ -178,7 +178,9 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
         const branch = await gitBranch(root);
         const aheadBehind = await gitAheadBehind(root);
         const worktrees = await gitWorktrees(root);
-        const branches = await gitBranches(root);
+        // Drop branches checked out in another worktree: they can't be checked
+        // out here and already appear (with path + root-switch) under worktrees.
+        const branches = (await gitBranches(root)).filter((b) => !b.in_other_worktree);
         render(
           branch,
           aheadBehind?.ahead ?? null,

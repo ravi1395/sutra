@@ -20,12 +20,15 @@ import {
 import { icon } from "./icons";
 import { mountTagManager } from "./tag-manager";
 import { IS_MAC } from "./shortcuts";
+import { readUiState, patchUiState } from "./terminal-groups";
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
-// Drawer height is a UI preference shared across roots/panels.
-const DRAWER_H_KEY = "composer-drawer-h";
-const DRAWER_H_DEFAULT = 220;
+// Drawer height is a UI preference shared across roots/panels, persisted in
+// the backend ui-state store (composerDrawerH field, see terminal-groups.ts).
+// This legacy localStorage key is only read once, at app boot (main.ts), to
+// seed that store.
+export const LEGACY_DRAWER_H_KEY = "composer-drawer-h";
 const DRAWER_H_MIN = 120;
 
 export interface ComposerOptions {
@@ -81,14 +84,27 @@ export function mountComposer(opts: ComposerOptions): {
   let visible = false;
   let pollTimer: number | undefined;
   let lastAgentsSig = ""; // last polled agent-list signature; skip rebuild if unchanged
-  let completeArea: HTMLTextAreaElement | null = null;  // section owning @ / / completion (context, else task)
-  let completeId = "context";                           // tag id a picked suggestion inserts into
   let ctxCount: HTMLElement | null = null;
-  let suggestItems: string[] = [];
-  let suggestActive = 0;
-  let suggestStart = 0;
   let prevOpen = false;
   let histOpen = false;
+
+  interface CompletionState {
+    id: "context" | "task";
+    triggers: Array<"@" | "/">;
+    area: HTMLTextAreaElement | null;
+    suggestEl: HTMLDivElement;
+    items: string[];
+    active: number;
+    start: number;
+  }
+  const ctxComp: CompletionState = {
+    id: "context", triggers: ["@"], area: null,
+    suggestEl: mk("div", "cmp-suggest hidden"), items: [], active: 0, start: 0,
+  };
+  const taskComp: CompletionState = {
+    id: "task", triggers: ["@", "/"], area: null,
+    suggestEl: mk("div", "cmp-suggest hidden"), items: [], active: 0, start: 0,
+  };
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   container.innerHTML = "";
@@ -116,10 +132,16 @@ export function mountComposer(opts: ComposerOptions): {
   // Main area: scrollable sections + overlay drawers (position anchor)
   const mainWrap = mk("div", "cmp-main");
   const sectionsEl = mk("div", "cmp-sections");
-  // Suggestion dropdown (moved under the Context hero during render)
-  const suggestEl = mk("div", "cmp-suggest hidden");
   // Chip rail (rendered directly under the context hero)
   const chipRail = mk("div", "cmp-chip-rail");
+  // Standalone "+ selection" row — sits between the Context hero and the chip
+  // rail (or, if the template has no Context section, just before the chip
+  // rail). Built once and repositioned in renderSections(), not recreated.
+  const selRow = mk("div", "cmp-sel-row");
+  const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
+  selBtn.title = "Insert current editor selection as a context chip";
+  selBtn.onclick = addSelectionChip;
+  selRow.appendChild(selBtn);
 
   // Onboarding whisper — shown only on a fresh, empty draft.
   const onboardEl = mk("div", "cmp-onboard hidden");
@@ -186,7 +208,7 @@ export function mountComposer(opts: ComposerOptions): {
   void init();
 
   async function init(): Promise<void> {
-    applyDrawerHeight();
+    await applyDrawerHeight();
     await Promise.all([reloadConfig(), refreshAgents(), refreshAssets()]);
     const saved = loadDraft(root);
     if (saved) applyDraft(saved);
@@ -285,8 +307,9 @@ export function mountComposer(opts: ComposerOptions): {
       return;
     }
 
-    // Whichever hero backs completion this render (Context if present, else Task).
-    const ownsCompletion = isHero && tag.id === completeId;
+    // Context and Task each own their own completion independently now —
+    // Context is @file-only, Task is @file + /skill.
+    const comp: CompletionState | null = isCtx ? ctxComp : isTask ? taskComp : null;
 
     const ta = mk("textarea", "cmp-section-input");
     ta.placeholder = tag.placeholder || tag.label;
@@ -296,28 +319,20 @@ export function mountComposer(opts: ComposerOptions): {
       text[tag.id] = ta.value;
       renderPreview();
       autosave();
-      if (ownsCompletion) { handleCompletion(ta); }
+      if (comp) { handleCompletion(ta, comp); }
       if (isHero) { updateHeroCounts(); updateOnboard(); }
     };
-    ta.onkeydown = (e) => { if (ownsCompletion) onCompleteKeydown(e); else onHeroKeydown(e); };
+    ta.onkeydown = (e) => { if (comp) onCompleteKeydown(e, comp); else onHeroKeydown(e); };
     wrap.appendChild(ta);
-    if (ownsCompletion) completeArea = ta;
+    if (comp) comp.area = ta;
 
     if (isCtx) {
-      // hint row: @ file · / skill · + selection
       const hint = mk("div", "cmp-complete-hint");
-      hint.innerHTML = `@ file &middot; / skill &middot; `;
-      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
-      selBtn.title = "Insert current editor selection as a context chip";
-      selBtn.onclick = addSelectionChip;
-      hint.appendChild(selBtn);
+      hint.textContent = "@ file";
       wrap.appendChild(hint);
     } else if (isTask) {
       const hint = mk("div", "cmp-complete-hint");
-      // Task backs completion only when the template omits a Context section.
-      hint.textContent = ownsCompletion
-        ? "@ file · / skill · plain prose"
-        : "plain prose — describe the outcome you want";
+      hint.textContent = "@ file · / skill · plain prose";
       wrap.appendChild(hint);
     }
     sectionsEl.appendChild(wrap);
@@ -338,36 +353,27 @@ export function mountComposer(opts: ComposerOptions): {
 
   function renderSections(): void {
     sectionsEl.innerHTML = "";
-    completeArea = null; taskCount = null; ctxCount = null;
+    ctxComp.area = null; taskComp.area = null; taskCount = null; ctxCount = null;
     sectionsEl.appendChild(onboardEl);
-    // chipRail persists across renders (only its .cmp-chip pills are re-rendered
-    // elsewhere) — drop any fallback "+ selection" button from a prior render
-    // before deciding whether to re-add one below, to avoid duplicates on
-    // repeated template switches.
-    chipRail.querySelectorAll(".cmp-add-sel").forEach((e) => e.remove());
     const ordered = orderSections(templateTags(config, templateName));
-    // Context owns completion when present; else Task backs it so @ / / still
-    // work in context-less templates.
-    completeId = ordered.some((t) => t.id === "context") ? "context" : "task";
-    let placed = false;
+    let placedCtx = false;
     for (const tag of ordered) {
       renderSection(tag);
-      // Suggestion dropdown + chip rail sit directly under the Context hero.
+      // Each hero's own suggestion dropdown sits directly under it; the
+      // standalone selection row + chip rail sit directly under Context.
       if (tag.id === "context") {
-        sectionsEl.appendChild(suggestEl);
+        sectionsEl.appendChild(ctxComp.suggestEl);
+        sectionsEl.appendChild(selRow);
         sectionsEl.appendChild(chipRail);
-        placed = true;
+        placedCtx = true;
+      } else if (tag.id === "task") {
+        sectionsEl.appendChild(taskComp.suggestEl);
       }
     }
-    if (!placed) {
-      // No context section — keep completion + chips reachable at the end,
-      // and preserve the "+ selection" affordance the Context hero would
-      // otherwise provide, so selection chips stay reachable.
-      const selBtn = mkBtn("cmp-add-sel sbtn", "+ selection");
-      selBtn.title = "Insert current editor selection as a context chip";
-      selBtn.onclick = addSelectionChip;
-      chipRail.appendChild(selBtn);
-      sectionsEl.appendChild(suggestEl);
+    if (!placedCtx) {
+      // No context section — keep the selection row + chip rail reachable
+      // at the end, so selection chips stay attachable.
+      sectionsEl.appendChild(selRow);
       sectionsEl.appendChild(chipRail);
     }
     updateHeroCounts();
@@ -440,13 +446,9 @@ export function mountComposer(opts: ComposerOptions): {
   }
 
   // ── drawers (preview / history) ────────────────────────────────────────────────
-  function drawerHeight(): number {
-    const v = parseInt(localStorage.getItem(DRAWER_H_KEY) ?? "", 10);
-    return Number.isFinite(v) ? v : DRAWER_H_DEFAULT;
-  }
-
-  function applyDrawerHeight(): void {
-    const h = `${drawerHeight()}px`;
+  async function applyDrawerHeight(): Promise<void> {
+    const ui = await readUiState();
+    const h = `${ui.composerDrawerH}px`;
     prevPeek.style.height = h;
     histPeek.style.height = h;
   }
@@ -520,9 +522,9 @@ export function mountComposer(opts: ComposerOptions): {
   function onDrawerUp(): void {
     if (dragEl) {
       const h = parseInt(dragEl.style.height, 10);
-      if (Number.isFinite(h)) localStorage.setItem(DRAWER_H_KEY, String(h));
+      if (Number.isFinite(h)) void patchUiState({ composerDrawerH: h }).catch(() => {});
       dragEl.classList.remove("cmp-peek-dragging");
-      applyDrawerHeight(); // keep both drawers in sync
+      void applyDrawerHeight(); // keep both drawers in sync
       dragEl = null;
     }
     window.removeEventListener("pointermove", onDrawerMove);
@@ -532,65 +534,65 @@ export function mountComposer(opts: ComposerOptions): {
   prevGrab.addEventListener("pointerdown", onDrawerDown);
   histGrab.addEventListener("pointerdown", onDrawerDown);
 
-  // ── @ / / completion ──────────────────────────────────────────────────────────
-  function handleCompletion(ta: HTMLTextAreaElement): void {
+  // ── @ / / completion (independent per hero: ctxComp is @-only, taskComp is @+/) ─
+  function handleCompletion(ta: HTMLTextAreaElement, comp: CompletionState): void {
     const ctx = completionContext(ta.value, ta.selectionStart);
-    if (!ctx) { hideSuggest(); return; }
-    suggestStart = ctx.start;
+    if (!ctx || !comp.triggers.includes(ctx.trigger)) { hideSuggest(comp); return; }
+    comp.start = ctx.start;
     if (ctx.trigger === "@") {
       void getFiles()
         .then((files) => {
           const matches = matchFiles(ctx.query, files);
-          showSuggest(matches.map((f) => basename(f)), matches.map((f) => `@${f}`));
+          showSuggest(comp, matches.map((f) => basename(f)), matches.map((f) => `@${f}`));
         })
-        .catch(() => hideSuggest());
+        .catch(() => hideSuggest(comp));
     } else {
       const aopts: AssetOption[] = assets.map((a) => ({ kind: a.kind, name: a.name, invocation: a.invocation }));
       const matches = matchAssets(ctx.query, aopts);
-      showSuggest(matches.map((a) => `${a.name} (${a.kind})`), matches.map((a) => assetToken(a)));
+      showSuggest(comp, matches.map((a) => `${a.name} (${a.kind})`), matches.map((a) => assetToken(a)));
     }
   }
 
-  function showSuggest(labels: string[], tokens: string[]): void {
-    suggestEl.innerHTML = "";
-    if (!labels.length) { hideSuggest(); return; }
-    suggestItems = tokens;
-    suggestActive = 0;
+  function showSuggest(comp: CompletionState, labels: string[], tokens: string[]): void {
+    comp.suggestEl.innerHTML = "";
+    if (!labels.length) { hideSuggest(comp); return; }
+    comp.items = tokens;
+    comp.active = 0;
     labels.forEach((lbl, i) => {
       const item = mk("div", `cmp-suggest-item${i === 0 ? " active" : ""}`);
       item.textContent = lbl;
-      item.onmousedown = (e) => { e.preventDefault(); pickSuggestion(tokens[i]); };
-      suggestEl.appendChild(item);
+      item.onmousedown = (e) => { e.preventDefault(); pickSuggestion(comp, tokens[i]); };
+      comp.suggestEl.appendChild(item);
     });
-    suggestEl.classList.remove("hidden");
+    comp.suggestEl.classList.remove("hidden");
   }
 
-  function hideSuggest(): void {
-    suggestEl.classList.add("hidden");
+  function hideSuggest(comp: CompletionState): void {
+    comp.suggestEl.classList.add("hidden");
   }
 
-  function pickSuggestion(token: string): void {
-    if (!completeArea) return;
-    const pos = completeArea.selectionStart;
-    const before = completeArea.value.slice(0, suggestStart);
-    const after = completeArea.value.slice(pos);
-    completeArea.value = before + token + " " + after;
+  function pickSuggestion(comp: CompletionState, token: string): void {
+    if (!comp.area) return;
+    const pos = comp.area.selectionStart;
+    const before = comp.area.value.slice(0, comp.start);
+    const after = comp.area.value.slice(pos);
+    comp.area.value = before + token + " " + after;
     const newPos = before.length + token.length + 1;
-    completeArea.setSelectionRange(newPos, newPos);
-    text[completeId] = completeArea.value;
-    hideSuggest();
+    comp.area.setSelectionRange(newPos, newPos);
+    text[comp.id] = comp.area.value;
+    hideSuggest(comp);
     updateHeroCounts();
     renderPreview();
     autosave();
   }
 
-  function onCompleteKeydown(e: KeyboardEvent): void {
-    if (!suggestEl.classList.contains("hidden")) {
-      const items = suggestEl.querySelectorAll<HTMLElement>(".cmp-suggest-item");
-      if (e.key === "ArrowDown") { e.preventDefault(); suggestActive = Math.min(suggestActive + 1, items.length - 1); items.forEach((it, i) => it.classList.toggle("active", i === suggestActive)); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); suggestActive = Math.max(suggestActive - 1, 0); items.forEach((it, i) => it.classList.toggle("active", i === suggestActive)); return; }
-      if (e.key === "Enter" || e.key === "Tab") { const token = suggestItems[suggestActive]; if (token !== undefined) { e.preventDefault(); pickSuggestion(token); return; } }
-      if (e.key === "Escape") { hideSuggest(); return; }
+  function onCompleteKeydown(e: KeyboardEvent, comp: CompletionState): void {
+    if (!comp.suggestEl.classList.contains("hidden")) {
+      const items = comp.suggestEl.querySelectorAll<HTMLElement>(".cmp-suggest-item");
+      if (e.key === "ArrowDown") { e.preventDefault(); comp.active = Math.min(comp.active + 1, items.length - 1); items.forEach((it, i) => it.classList.toggle("active", i === comp.active)); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); comp.active = Math.max(comp.active - 1, 0); items.forEach((it, i) => it.classList.toggle("active", i === comp.active)); return; }
+      if (e.key === "Enter" || e.key === "Tab") { const token = comp.items[comp.active]; if (token !== undefined) { e.preventDefault(); pickSuggestion(comp, token); return; } }
+      if (e.key === "Escape") { hideSuggest(comp); return; }
     }
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void onSend(); }
   }
@@ -615,10 +617,27 @@ export function mountComposer(opts: ComposerOptions): {
       history = pushHistory(history, entry);
       saveHistory(root, history);
       clearDraft(root);
-      renderHistory();
+      resetComposerState();
+      renderAll();
     } else {
       showStatus(result.reason);
     }
+  }
+
+  // Full reset after a successful stage/submit — the composer returns to the
+  // same blank state as a fresh, draft-less open (mirrors init()'s no-saved-
+  // draft branch). Never called on a failed send — result.reason is shown
+  // instead and the typed prompt stays intact for retry.
+  function resetComposerState(): void {
+    templateName = config.templates[0]?.name ?? "";
+    text = {};
+    chips = [];
+    thinking = false;
+    submit = false;
+    stageInp.checked = true;
+    submitInp.checked = false;
+    thinkInp.checked = false;
+    targetSel.value = "";
   }
 
   // ── draft ─────────────────────────────────────────────────────────────────────
@@ -752,7 +771,8 @@ export function mountComposer(opts: ComposerOptions): {
       void refreshAgents().then(() => renderTargetPicker());
     } else {
       stopPoll();
-      hideSuggest();
+      hideSuggest(ctxComp);
+      hideSuggest(taskComp);
     }
   }
 

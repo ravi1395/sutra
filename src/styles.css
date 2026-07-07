@@ -1142,6 +1142,9 @@ button:hover {
 .tree-row.dragging {
   opacity: 0.55;
 }
+.tree-row.cut-pending {
+  opacity: 0.5;
+}
 .tree-row.dir.drop-target {
   background: var(--em-wash);
   border-radius: var(--r-md);
@@ -1151,6 +1154,12 @@ button:hover {
   background: var(--em-wash-row);
   color: var(--fg);
   border-left: 2px solid var(--em);
+}
+.tree-row.multi-selected {
+  background: var(--bg-3);
+}
+.tree-row.multi-selected.active {
+  background: var(--em-wash-row);
 }
 .tree-twisty {
   width: 12px;
@@ -2945,6 +2954,9 @@ button:hover {
   background: var(--em-wash);
 }
 .cmp-add-sel { font-size: 11px; }
+.cmp-sel-row {
+  padding: 2px 8px 4px;
+}
 .cmp-action-bar {
   display: flex;
   align-items: center;
