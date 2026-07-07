@@ -485,6 +485,7 @@ export class FileTree {
     }
 
     row.onclick = (ev: MouseEvent) => {
+      if ((ev.target as HTMLElement).closest("input")) return; // don't hijack focus from an active rename/create edit
       this.el.focus();
       this.selectedPath = e.path;
       this.selectedIsDir = e.isDir;
