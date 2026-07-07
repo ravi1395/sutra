@@ -272,6 +272,10 @@ test("detectLanguage covers requested syntax highlighted extensions", () => {
     "main.rs",
     "server.go",
     "task.rb",
+    "config.yaml",
+    "config.yml",
+    "data.xml",
+    "Cargo.toml",
   ];
 
   for (const name of highlighted) {
