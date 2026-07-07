@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatContent, isFormattableExt } from "../src/format.ts";
+import { formatContent } from "../src/format.ts";
+import { isFormattableExt } from "../src/format-ext.ts";
 
 test("isFormattableExt matches the six beautify-on-save types", () => {
   assert.equal(isFormattableExt("json"), true);

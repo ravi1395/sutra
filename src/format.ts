@@ -31,11 +31,6 @@ const PRETTIER_PLUGINS = [
   prettierXml,
 ];
 
-export function isFormattableExt(ext: string): boolean {
-  const normalizedExt = ext.toLowerCase();
-  return normalizedExt === "toml" || normalizedExt in PRETTIER_PARSER;
-}
-
 let taploInstance: ReturnType<typeof Taplo.initialize> | null = null;
 function getTaplo() {
   if (!taploInstance) taploInstance = Taplo.initialize();

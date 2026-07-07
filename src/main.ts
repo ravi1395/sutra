@@ -16,7 +16,7 @@ import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
-import { formatContent, isFormattableExt } from "./format";
+import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
 import { AnnotationsPanel } from "./annotations";
@@ -670,6 +670,7 @@ async function saveTab(tab: Tab, forceDialog = false): Promise<void> {
   let content = editor.contentOf(tab);
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   if (settings.formatOnSave && isFormattableExt(ext)) {
+    const { formatContent } = await import("./format");
     const formatted = await formatContent(ext, content);
     if (formatted !== null) {
       editor.applyFormattedContent(tab, formatted);
