@@ -100,6 +100,12 @@ export function computeRangeSelection(visiblePaths: string[], anchor: string, ta
   return visiblePaths.slice(start, end + 1);
 }
 
+/** Confirm-dialog copy for deleting one or many tree entries. */
+export function deleteConfirmMessage(paths: string[]): string {
+  if (paths.length === 1) return `Delete "${paths[0].split("/").pop()}"?`;
+  return `Delete ${paths.length} items?`;
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 type TreeContainer = HTMLElement | DocumentFragment;
@@ -120,13 +126,14 @@ export class FileTree {
   onOpenFile?: (path: string) => void;
   onOpenFileInPane?: (path: string, side: TreePaneSide) => void;
   onRename?: (path: string, newName: string) => void;
-  onDelete?: (path: string) => void;
+  onDeleteMany?: (paths: string[]) => void;
   onCreate?: (parentDir: string, name: string, isDir: boolean) => Promise<void>;
   onMove?: (src: string, destDir: string) => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
     this.el.tabIndex = -1;
+    this.el.addEventListener("keydown", (ev) => this.handleKeyDown(ev));
     // Right-click on empty tree space (not a row) creates at the workspace root.
     this.el.addEventListener("contextmenu", (ev) => {
       if ((ev.target as HTMLElement).closest(".tree-row")) return; // row menu handles it
@@ -362,6 +369,14 @@ export class FileTree {
     });
   }
 
+  private handleKeyDown(ev: KeyboardEvent): void {
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return;
+    if ((ev.key === "Delete" || ev.key === "Backspace") && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.onDeleteMany?.(Array.from(this.selectedPaths));
+    }
+  }
+
   private async renderDir(
     path: string,
     depth: number,
@@ -516,9 +531,14 @@ export class FileTree {
       }
     };
 
-    // Context menu on right-click
+    // Context menu on right-click. When the clicked row is part of a multi-selection,
+    // actions apply to the whole selection; otherwise they apply to this row alone.
     row.oncontextmenu = (ev) => {
       ev.preventDefault();
+      const targets =
+        this.selectedPaths.size > 1 && this.selectedPaths.has(e.path)
+          ? Array.from(this.selectedPaths)
+          : [e.path];
       showContextMenu(
         ev.clientX,
         ev.clientY,
@@ -528,8 +548,8 @@ export class FileTree {
             action: () => this.startInlineEdit(label, e.path, e.name),
           },
           {
-            label: "Delete",
-            action: () => this.onDelete?.(e.path),
+            label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
+            action: () => this.onDeleteMany?.(targets),
             danger: true,
           },
           {

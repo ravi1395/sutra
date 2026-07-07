@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeRangeSelection } from "../src/tree";
+import { computeRangeSelection, deleteConfirmMessage } from "../src/tree";
 
 test("computeRangeSelection selects a forward range inclusive of both ends", () => {
   const visible = ["/a", "/b", "/c", "/d"];
@@ -20,4 +20,12 @@ test("computeRangeSelection with equal anchor and target returns just that entry
 test("computeRangeSelection falls back to the target alone when the anchor isn't visible", () => {
   const visible = ["/a", "/b", "/c"];
   assert.deepEqual(computeRangeSelection(visible, "/missing", "/b"), ["/b"]);
+});
+
+test("deleteConfirmMessage names the single file for a single-item selection", () => {
+  assert.equal(deleteConfirmMessage(["/root/a.ts"]), 'Delete "a.ts"?');
+});
+
+test("deleteConfirmMessage uses a count for a multi-item selection", () => {
+  assert.equal(deleteConfirmMessage(["/root/a.ts", "/root/b.ts", "/root/c.ts"]), "Delete 3 items?");
 });

@@ -4,7 +4,7 @@
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView } from "./tree";
+import { FileTree, OutlineView, deleteConfirmMessage } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -517,15 +517,17 @@ tree.onRename = async (path: string, newName: string) => {
   }
 };
 
-tree.onDelete = async (path: string) => {
-  if (!(await confirmNative(`Delete "${path.split("/").pop()}"?`))) return;
+tree.onDeleteMany = async (paths: string[]) => {
+  if (!(await confirmNative(deleteConfirmMessage(paths)))) return;
   try {
-    await deletePath(path);
-    // Close any open tabs for deleted path and its children
-    const pathPrefix = path.endsWith("/") ? path : path + "/";
-    for (const tab of editor.tabs.slice()) {
-      if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
-        editor.closeTab(tab);
+    for (const path of paths) {
+      await deletePath(path);
+      // Close any open tabs for deleted path and its children
+      const pathPrefix = path.endsWith("/") ? path : path + "/";
+      for (const tab of editor.tabs.slice()) {
+        if (tab.path && (tab.path === path || tab.path.startsWith(pathPrefix))) {
+          editor.closeTab(tab);
+        }
       }
     }
     await tree.refresh();
