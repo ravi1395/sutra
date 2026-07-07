@@ -4,6 +4,7 @@ export interface UserSettings {
   editorFontFamily: string;
   editorTabSize: number;
   editorWordWrap: boolean;
+  formatOnSave: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
   terminalScrollback: number;
@@ -35,6 +36,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   editorFontFamily: FONT_FAMILIES[0],
   editorTabSize: 4,
   editorWordWrap: false,
+  formatOnSave: true,
   terminalFontSize: 12,
   terminalFontFamily: FONT_FAMILIES[1],
   terminalScrollback: 5000,
@@ -79,6 +81,7 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     editorFontFamily: pick(FONT_FAMILIES, value.editorFontFamily, d.editorFontFamily),
     editorTabSize: pick(TAB_SIZES, value.editorTabSize, d.editorTabSize),
     editorWordWrap: pickBool(value.editorWordWrap, d.editorWordWrap),
+    formatOnSave: pickBool(value.formatOnSave, d.formatOnSave),
     terminalFontSize: clampFontSize(value.terminalFontSize, d.terminalFontSize),
     terminalFontFamily: pick(FONT_FAMILIES, value.terminalFontFamily, d.terminalFontFamily),
     terminalScrollback: pick(SCROLLBACK_OPTIONS, value.terminalScrollback, d.terminalScrollback),
