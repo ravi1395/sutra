@@ -1,6 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatContent } from "../src/format.ts";
+import { formatContent, isFormattableExt } from "../src/format.ts";
+
+test("isFormattableExt matches the six beautify-on-save types", () => {
+  assert.equal(isFormattableExt("json"), true);
+  assert.equal(isFormattableExt("yaml"), true);
+  assert.equal(isFormattableExt("yml"), true);
+  assert.equal(isFormattableExt("xml"), true);
+  assert.equal(isFormattableExt("html"), true);
+  assert.equal(isFormattableExt("htm"), true);
+  assert.equal(isFormattableExt("toml"), true);
+  assert.equal(isFormattableExt("rs"), false);
+  assert.equal(isFormattableExt("md"), false);
+});
 
 test("formatContent formats valid json", async () => {
   const result = await formatContent("json", '{"b":2,"a":1}');

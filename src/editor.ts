@@ -1675,6 +1675,11 @@ export class EditorManager {
     else tab.state = (pane ?? this.focused).makeState(text, tab.name);
   }
 
+  /** Public entry point for replacing a tab's content with beautified text before save. */
+  applyFormattedContent(tab: Tab, text: string): void {
+    this.setTabContent(tab, text);
+  }
+
   /**
    * Reload one tab from disk: refresh content + git HEAD baseline, drop any
    * AI-edit override (fresh baseline = new git HEAD after checkout), recompute
