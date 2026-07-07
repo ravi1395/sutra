@@ -7,7 +7,7 @@ pub const UNTITLED_PREFIX: &str = "untitled:";
 const ROOT_MARKERS: &[&str] = &[".git", "package.json", "Cargo.toml", "src-tauri/tauri.conf.json"];
 
 pub enum LaunchTarget {
-    Workspace { root_key: String, file: Option<String> },
+    Workspace { root_key: String, real_root: String, file: Option<String> },
     Untitled(String),
 }
 
@@ -20,15 +20,16 @@ pub fn resolve(path: Option<&str>) -> LaunchTarget {
     };
     let p = Path::new(raw);
     if p.is_dir() {
-        match reg::canonical_root_key(raw) {
-            Ok(root_key) => LaunchTarget::Workspace { root_key, file: None },
+        match reg::canonical_root(raw) {
+            Ok((root_key, real_root)) => LaunchTarget::Workspace { root_key, real_root, file: None },
             Err(_) => LaunchTarget::Untitled(format!("{UNTITLED_PREFIX}{}", uuid::Uuid::new_v4())),
         }
     } else {
         let root = file_root(p);
-        match reg::canonical_root_key(root.to_str().unwrap_or(raw)) {
-            Ok(root_key) => LaunchTarget::Workspace {
+        match reg::canonical_root(root.to_str().unwrap_or(raw)) {
+            Ok((root_key, real_root)) => LaunchTarget::Workspace {
                 root_key,
+                real_root,
                 file: std::fs::canonicalize(p).ok().map(|f| f.to_string_lossy().into_owned()),
             },
             Err(_) => LaunchTarget::Untitled(format!("{UNTITLED_PREFIX}{}", uuid::Uuid::new_v4())),
@@ -53,7 +54,7 @@ pub enum WarmOutcome { Focused, Spawned }
 pub fn warm_launch(path: Option<&str>, _force_new: bool) -> WarmOutcome {
     match resolve(path) {
         LaunchTarget::Untitled(_) => { spawn_child(&child_args(path, true)); WarmOutcome::Spawned }
-        LaunchTarget::Workspace { root_key, file } => match reg::live_owner(&root_key) {
+        LaunchTarget::Workspace { root_key, file, .. } => match reg::live_owner(&root_key) {
             Some(owner) => {
                 let target = file.as_deref().or(path);
                 let _ = crate::focus::send_focus(owner.focus_port, &owner.token, target);
@@ -109,7 +110,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let f = dir.join("main.rs"); std::fs::write(&f, "x").unwrap();
         match resolve(Some(f.to_str().unwrap())) {
-            LaunchTarget::Workspace { root_key, file } => {
+            LaunchTarget::Workspace { root_key, file, .. } => {
                 assert!(root_key.contains("lrtest"), "root is the .git ancestor");
                 assert!(file.is_some());
             }

@@ -8,11 +8,14 @@ use tauri::Manager;
 #[derive(Default)]
 struct LaunchPath(Mutex<Option<String>>);
 
-/// The canonical root key (or `untitled:<uuid>`) this process claimed at boot,
-/// if any. `None` only if the cold-child decision itself panicked before
-/// assignment — in practice always `Some`. Read by the close handler to
-/// release the registry lock and tear down this root's MCP config.
-struct ClaimedRoot(Mutex<Option<String>>);
+/// The canonical root key and its real (non-lowercased) filesystem path that
+/// this process claimed at boot, if any — `(root_key, real_root)`. `None`
+/// only if the cold-child decision itself panicked before assignment — in
+/// practice always `Some`. Read by the close handler to release the registry
+/// lock and tear down this root's MCP config. `real_root` (not `root_key`,
+/// which is case-folded for identity) is what filesystem ops must use, or
+/// teardown silently no-ops on case-sensitive volumes.
+struct ClaimedRoot(Mutex<Option<(String, String)>>);
 
 /// First argv entry after the exe that is not a flag and names an existing path.
 fn first_path_arg(argv: &[String]) -> Option<String> {
@@ -20,20 +23,6 @@ fn first_path_arg(argv: &[String]) -> Option<String> {
         .skip(1)
         .find(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
         .cloned()
-}
-
-/// A lock with `focus_port`/`token` left blank; reserves a root atomically
-/// during the cold-child claim. `.setup()` overwrites it via `write_lock`
-/// once the focus listener is bound.
-fn placeholder_lock(pid: u32, start: u64, exe: &str, root: &str) -> window_registry::Lock {
-    window_registry::Lock {
-        pid,
-        process_start: start,
-        exe: exe.to_string(),
-        focus_port: 0,
-        token: String::new(),
-        root: root.to_string(),
-    }
 }
 
 /// Return and clear the cold-start launch path (CLI arg / OS file-open on launch).
@@ -81,36 +70,63 @@ mod window_registry;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Cold-child launch decision — runs before any server/thread spins up so a
-    // hand-off launch exits cheaply. `--new` forces a fresh window (still root-
-    // safe because an untitled child owns no root; a pathful `--new` that hits a
-    // live owner still focuses that owner — the one-owner invariant is absolute).
+    // hand-off launch exits cheaply. An untitled child owns no root and never
+    // contends. Every pathful launch — with or without `--new` — routes
+    // through the SAME atomic claim below: one owner per canonical root is
+    // absolute, so `--new <path>` no longer reserves ownership out-of-band
+    // (Important-2 — that bypass raced a concurrent plain launch into two
+    // owners of one root). `--new` with no path still yields a fresh
+    // Untitled target via `resolve(None)`, unaffected by this.
     let args: Vec<String> = std::env::args().collect();
-    let force_new = args.iter().any(|a| a == "--new");
     let arg_path = launcher::first_path_arg(&args);
     let cold_target = launcher::resolve(arg_path.as_deref());
     let (self_pid, self_start, self_exe) = window_registry::self_identity();
-    let claimed_root: Option<String> = match &cold_target {
+
+    // Bind the focus listener BEFORE the claim so any lock we ever publish
+    // already carries a real, connectable port — no same-root launch can
+    // hand off to a not-yet-ready port-0 placeholder and silently drop its
+    // path (Important-1). A bind failure degrades gracefully: boot without
+    // cross-process focus rather than panic (Minor-1); this process just
+    // won't be reachable by a later same-root launch.
+    let focus_token = uuid::Uuid::new_v4().to_string();
+    let (focus_listener, focus_port) = match focus::bind() {
+        Ok((listener, port)) => (Some(listener), port),
+        Err(e) => {
+            eprintln!("[focus] listener bind failed, continuing without cross-process focus: {e}");
+            (None, 0)
+        }
+    };
+
+    // (root_key, real_root): the case-folded identity and the original-case
+    // realpath filesystem ops must use (Minor-2).
+    let claimed_root: Option<(String, String)> = match &cold_target {
         // Unique key — no other launch can ever contend for it, so it always "wins".
-        launcher::LaunchTarget::Untitled(k) => Some(k.clone()),
-        launcher::LaunchTarget::Workspace { root_key, .. } => {
-            if force_new {
-                if let Some(owner) = window_registry::live_owner(root_key) {
+        launcher::LaunchTarget::Untitled(k) => Some((k.clone(), k.clone())),
+        launcher::LaunchTarget::Workspace { root_key, real_root, .. } => {
+            let claim = window_registry::try_claim(root_key, || window_registry::Lock {
+                pid: self_pid,
+                process_start: self_start,
+                exe: self_exe.clone(),
+                focus_port,
+                token: focus_token.clone(),
+                root: root_key.clone(),
+                real_root: real_root.clone(),
+            });
+            match claim {
+                Ok(window_registry::ClaimResult::Won) => Some((root_key.clone(), real_root.clone())),
+                Ok(window_registry::ClaimResult::Owned(owner)) => {
                     let _ = focus::send_focus(owner.focus_port, &owner.token, arg_path.as_deref());
                     std::process::exit(0);
                 }
-                Some(root_key.clone())
-            } else {
-                match window_registry::try_claim(root_key, || {
-                    placeholder_lock(self_pid, self_start, &self_exe, root_key)
-                })
-                .expect("registry io")
-                {
-                    window_registry::ClaimResult::Won => Some(root_key.clone()),
-                    window_registry::ClaimResult::Owned(owner) => {
-                        let _ =
-                            focus::send_focus(owner.focus_port, &owner.token, arg_path.as_deref());
-                        std::process::exit(0);
-                    }
+                Err(e) => {
+                    // Registry IO failure (e.g. unwritable Application Support
+                    // dir): the old single-instance plugin never crashed the
+                    // app over this — degrade the same way (Minor-1). Opening
+                    // without cross-process coordination beats not opening.
+                    eprintln!(
+                        "[registry] claim IO error, continuing without cross-process coordination: {e}"
+                    );
+                    Some((root_key.clone(), real_root.clone()))
                 }
             }
         }
@@ -197,30 +213,20 @@ pub fn run() {
 
             // GC crashed roots first — heals their stale MCP config (dead port /
             // endpoint) so a re-open re-merges clean instead of pointing nowhere.
+            // Use `real_root` (not the lowercased `root` identity key) for the
+            // filesystem path — teardown on a case-sensitive volume silently
+            // no-ops otherwise (Minor-2).
             for dead in window_registry::gc_sweep() {
                 if !dead.root.starts_with(launcher::UNTITLED_PREFIX) {
-                    mcp::mcp_teardown_config(Path::new(&dead.root));
+                    mcp::mcp_teardown_config(Path::new(&dead.real_root));
                 }
             }
 
-            // Bring up our focus listener, then finalize the lockfile with the
-            // real port + token (the cold-child claim above wrote a placeholder).
-            let focus_token = uuid::Uuid::new_v4().to_string();
-            let focus_port = focus::start_listener(app.handle().clone(), focus_token.clone())
-                .expect("focus listener bind");
-            if let Some(root_key) = &claimed_root {
-                let (pid, start, exe) = window_registry::self_identity();
-                let _ = window_registry::write_lock(
-                    root_key,
-                    &window_registry::Lock {
-                        pid,
-                        process_start: start,
-                        exe,
-                        focus_port,
-                        token: focus_token,
-                        root: root_key.clone(),
-                    },
-                );
+            // Start the accept loop on the listener bound before the claim —
+            // the lock published at claim time already has this exact
+            // port+token, so there is nothing left to finalize.
+            if let Some(listener) = focus_listener {
+                focus::serve(listener, app.handle().clone(), focus_token.clone());
             }
             app.manage(ClaimedRoot(Mutex::new(claimed_root.clone())));
 
@@ -341,7 +347,7 @@ pub fn run() {
             // Release our root claim and scrub this root's MCP config on close so
             // agents fail clean rather than pointing at a dead port.
             if let tauri::RunEvent::ExitRequested { .. } = &event {
-                if let Some(rk) = app_handle
+                if let Some((rk, real_root)) = app_handle
                     .state::<ClaimedRoot>()
                     .0
                     .lock()
@@ -349,7 +355,8 @@ pub fn run() {
                     .clone()
                 {
                     if !rk.starts_with(launcher::UNTITLED_PREFIX) {
-                        mcp::mcp_teardown_config(Path::new(&rk));
+                        // real_root, not the lowercased identity key — see Minor-2.
+                        mcp::mcp_teardown_config(Path::new(&real_root));
                     }
                     window_registry::release(&rk);
                 }

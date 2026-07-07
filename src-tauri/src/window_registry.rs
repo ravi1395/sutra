@@ -1,15 +1,20 @@
 //! Cross-process window registry: one live process per canonical root.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-/// Canonical key for a root: resolved realpath, case-folded (APFS is
-/// case-insensitive). This is the identity two launches compare on.
-pub fn canonical_root_key(path: &str) -> Result<String, String> {
+/// Canonical key (lowercased realpath) plus the original-case realpath, in one
+/// canonicalize call. The key is the cross-process identity (APFS is
+/// case-insensitive); the real path is what filesystem ops (MCP teardown,
+/// endpoint) must use — case-sensitive volumes silently no-op on a lowercased
+/// path that doesn't exist.
+pub fn canonical_root(path: &str) -> Result<(String, String), String> {
     let real = std::fs::canonicalize(Path::new(path)).map_err(|e| e.to_string())?;
-    Ok(real.to_string_lossy().to_lowercase())
+    let real_str = real.to_string_lossy().into_owned();
+    Ok((real_str.to_lowercase(), real_str))
 }
 
 /// Hex sha256 of a key — the registry lockfile stem.
@@ -26,7 +31,9 @@ pub struct Lock {
     pub exe: String,
     pub focus_port: u16,
     pub token: String,
-    pub root: String, // canonical key, or "untitled:<uuid>"
+    pub root: String,      // canonical (lowercased) key, or "untitled:<uuid>" — identity
+    #[serde(default)]
+    pub real_root: String, // original-case realpath — use for all filesystem ops
 }
 
 /// `~/Library/Application Support/com.ravi1395.sutra/windows/`
@@ -87,42 +94,82 @@ fn lock_path(root_key: &str) -> PathBuf {
     registry_dir().join(format!("{}.json", root_hash(root_key)))
 }
 
-/// Atomically claim `root_key`. Creates the lockfile with O_EXCL so exactly
-/// one racer wins. If it already exists: live owner → Owned; dead owner →
-/// remove and retry the exclusive create. Bounded retry avoids livelock.
+static CLAIM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A per-attempt unique path in `registry_dir()` — pid + a process-local
+/// atomic counter, never `Date`/`rand`, so two threads/processes never collide.
+fn tmp_path(root_key: &str) -> PathBuf {
+    let n = CLAIM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    registry_dir().join(format!("{}.{}.{}.tmp", root_hash(root_key), std::process::id(), n))
+}
+
+/// Atomically claim `root_key`. The lock's full JSON is written to a unique
+/// temp file first, then published via `hard_link` — which fails with
+/// `AlreadyExists` if the destination is already occupied and otherwise
+/// creates it already fully populated. The destination path can therefore
+/// never be observed empty or partially written, closing the TOCTOU where a
+/// racer read an in-progress file as garbage and deleted it out from under
+/// the real owner (both racers then return `Won`).
+///
+/// If the destination exists: a live owner → `Owned`; a confirmed-dead owner
+/// (pid/start/exe mismatch) → remove and retry; an unreadable/unparseable
+/// file (contention mid-publish, or corruption) is NEVER deleted — we back
+/// off and retry, and if it never resolves we hand back a best-effort/benign
+/// `Owned` rather than risk a second `Won`. Losing a race (exit) is always
+/// safer than creating two owners.
 pub fn try_claim(root_key: &str, mk: impl FnOnce() -> Lock) -> std::io::Result<ClaimResult> {
     let path = lock_path(root_key);
     let lock = mk();
     let bytes = serde_json::to_vec(&lock).unwrap();
-    for _ in 0..5 {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(&bytes)?;
+
+    for attempt in 0..10u32 {
+        let tmp = tmp_path(root_key);
+        std::fs::write(&tmp, &bytes)?;
+        match std::fs::hard_link(&tmp, &path) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&tmp);
                 return Ok(ClaimResult::Won);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&tmp);
                 match read_lock(&path) {
                     Some(existing) if is_live(&existing) => return Ok(ClaimResult::Owned(existing)),
-                    _ => {
+                    Some(_dead) => {
+                        // Confirmed dead (pid/start/exe mismatch) — safe to reclaim.
                         let _ = std::fs::remove_file(&path);
                         continue;
-                    } // dead/garbage → reclaim
+                    }
+                    None => {
+                        // Unreadable: with hard_link this means another claimer's
+                        // publish landed between our AlreadyExists and our read (or
+                        // it vanished via a concurrent dead-reclaim). Never delete;
+                        // back off briefly and retry — the path may already be free.
+                        std::thread::sleep(Duration::from_millis(5 * (attempt as u64 + 1)));
+                        continue;
+                    }
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         }
     }
-    // Lost every reclaim race to a live winner: report it as owner.
+    // Exhausted retries under sustained contention. Never fabricate a `Won`
+    // here — re-read once more; if the path is still unreadable, hand back a
+    // benign, non-connectable `Owned` so the caller loses the race (exits)
+    // instead of risking a second owner.
     match read_lock(&path) {
         Some(existing) => Ok(ClaimResult::Owned(existing)),
-        None => std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .and_then(|mut f| {
-                f.write_all(&bytes)?;
-                Ok(ClaimResult::Won)
-            }),
+        None => Ok(ClaimResult::Owned(Lock {
+            pid: 0,
+            process_start: 0,
+            exe: String::new(),
+            focus_port: 0,
+            token: String::new(),
+            root: root_key.to_string(),
+            real_root: String::new(),
+        })),
     }
 }
 
@@ -162,7 +209,11 @@ pub fn gc_sweep() -> Vec<Lock> {
     reclaimed
 }
 
-/// Overwrite a claimed root's lockfile atomically (temp + rename).
+/// Overwrite a claimed root's lockfile atomically (temp + rename). No longer
+/// called on the boot path (the claim now publishes the real port/token from
+/// creation — Important-1), but kept and covered by `write_lock_overwrites`
+/// for any future need to update a live lock's contents in place.
+#[allow(dead_code)]
 pub fn write_lock(root_key: &str, lock: &Lock) -> std::io::Result<()> {
     let path = lock_path(root_key);
     let tmp = path.with_extension("json.tmp");
@@ -188,9 +239,10 @@ mod tests {
         // A tempdir exists on disk so canonicalize succeeds.
         let dir = std::env::temp_dir().join("SutraKeyTest_UPPER");
         std::fs::create_dir_all(&dir).unwrap();
-        let key = canonical_root_key(dir.to_str().unwrap()).unwrap();
+        let (key, real) = canonical_root(dir.to_str().unwrap()).unwrap();
         assert_eq!(key, key.to_lowercase(), "key must be case-folded");
         assert!(key.contains("sutrakeytest_upper"), "got {key}");
+        assert!(real.contains("SutraKeyTest_UPPER"), "real_root keeps original case: {real}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -212,6 +264,7 @@ mod tests {
             focus_port: 0,
             token: "t".into(),
             root: "/tmp/x".into(),
+            real_root: "/tmp/x".into(),
         };
         assert!(!is_live(&lock));
     }
@@ -226,6 +279,7 @@ mod tests {
             focus_port: 0,
             token: "t".into(),
             root: "/tmp/x".into(),
+            real_root: "/tmp/x".into(),
         };
         assert!(is_live(&good), "own process must read as live");
         let stale = Lock {
@@ -247,6 +301,7 @@ mod tests {
             focus_port: 5,
             token: "tok".into(),
             root: key.clone(),
+            real_root: key.clone(),
         };
         match try_claim(&key, mk).unwrap() {
             ClaimResult::Won => {}
@@ -260,6 +315,7 @@ mod tests {
             focus_port: 9,
             token: "x".into(),
             root: key.clone(),
+            real_root: key.clone(),
         })
         .unwrap()
         {
@@ -281,6 +337,7 @@ mod tests {
             focus_port: 1,
             token: "d".into(),
             root: key.clone(),
+            real_root: key.clone(),
         };
         let path = registry_dir().join(format!("{}.json", root_hash(&key)));
         std::fs::write(&path, serde_json::to_string(&dead).unwrap()).unwrap();
@@ -293,6 +350,7 @@ mod tests {
                 focus_port: 7,
                 token: "n".into(),
                 root: key.clone(),
+                real_root: key.clone(),
             })
             .unwrap(),
             ClaimResult::Won
@@ -322,9 +380,57 @@ mod tests {
             focus_port: 42,
             token: "T".into(),
             root: key.clone(),
+            real_root: key.clone(),
         };
         write_lock(&key, &l).unwrap();
         assert_eq!(live_owner(&key).unwrap().focus_port, 42);
+        release(&key);
+    }
+
+    /// The concurrency test the original suite lacked: N threads race
+    /// `try_claim` on the SAME fresh key, released together via a barrier so
+    /// they contend at the same instant. Exactly one must win; this is the
+    /// exact race the pre-fix `create_new`+`write_all` two-step allowed both
+    /// sides of to return `Won` (empty-file TOCTOU, Critical-1).
+    #[test]
+    fn concurrent_claims_exactly_one_wins() {
+        let key = format!(
+            "concurrent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let _ = release(&key);
+        let (pid, start, exe) = self_identity();
+        const N: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let key = key.clone();
+                let exe = exe.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait(); // release all N at the same instant
+                    try_claim(&key, || Lock {
+                        pid,
+                        process_start: start,
+                        exe: exe.clone(),
+                        focus_port: 1000 + i as u16,
+                        token: format!("t{i}"),
+                        root: key.clone(),
+                        real_root: key.clone(),
+                    })
+                })
+            })
+            .collect();
+        let results: Vec<ClaimResult> =
+            handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
+        let won = results.iter().filter(|r| matches!(r, ClaimResult::Won)).count();
+        let owned = results.iter().filter(|r| matches!(r, ClaimResult::Owned(_))).count();
+        assert_eq!(won, 1, "exactly one of {N} concurrent claimers must win, got {won}");
+        assert_eq!(owned, N - 1, "all others must see Owned, got {owned}");
         release(&key);
     }
 }
