@@ -37,6 +37,7 @@ import {
   deletePath,
   createDir,
   movePath,
+  copyPath,
   gitChangedFiles,
   gitCheckout,
   spawnWindow,
@@ -576,6 +577,31 @@ tree.onMoveMany = async (paths: string[], destDir: string) => {
     }
   }
   await tree.refresh();
+};
+
+tree.onPaste = async (items, mode) => {
+  try {
+    for (const { src, destPath } of items) {
+      if (mode === "copy") {
+        await copyPath(src, destPath);
+      } else {
+        await movePath(src, destPath);
+        const srcPrefix = src.endsWith("/") ? src : src + "/";
+        const destBaseName = destPath.split("/").pop() || destPath;
+        for (const tab of editor.tabs.slice()) {
+          if (tab.path === src) {
+            editor.retargetTab(tab, destPath, destBaseName);
+          } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+            const relPath = tab.path.slice(srcPrefix.length);
+            editor.retargetTab(tab, destPath + "/" + relPath, tab.name);
+          }
+        }
+      }
+    }
+    await tree.refresh();
+  } catch (e) {
+    void alertNative(`Paste failed: ${e}`);
+  }
 };
 
 // ---- save / save-as ----

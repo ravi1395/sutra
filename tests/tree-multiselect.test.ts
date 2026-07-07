@@ -8,6 +8,7 @@ import {
   serializeTreeDragPayload,
   parseTreeDragPayload,
   rejectsDrop,
+  resolvePasteConflictName,
 } from "../src/tree";
 
 test("computeRangeSelection selects a forward range inclusive of both ends", () => {
@@ -89,4 +90,25 @@ test("copyPathsMenuLabel is singular for one path", () => {
 
 test("copyPathsMenuLabel includes the count for multiple paths", () => {
   assert.equal(copyPathsMenuLabel(3), "Copy 3 Paths");
+});
+
+test("resolvePasteConflictName returns the name unchanged when there's no conflict", () => {
+  assert.equal(resolvePasteConflictName("foo.ts", new Set(["bar.ts"])), "foo.ts");
+});
+
+test("resolvePasteConflictName appends 'copy' before the extension on a conflict", () => {
+  assert.equal(resolvePasteConflictName("foo.ts", new Set(["foo.ts"])), "foo copy.ts");
+});
+
+test("resolvePasteConflictName increments the suffix on repeated conflicts", () => {
+  const existing = new Set(["foo.ts", "foo copy.ts"]);
+  assert.equal(resolvePasteConflictName("foo.ts", existing), "foo copy 2.ts");
+});
+
+test("resolvePasteConflictName handles names without an extension", () => {
+  assert.equal(resolvePasteConflictName("assets", new Set(["assets"])), "assets copy");
+});
+
+test("resolvePasteConflictName treats a leading dot as not an extension", () => {
+  assert.equal(resolvePasteConflictName(".env", new Set([".env"])), ".env copy");
 });

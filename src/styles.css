@@ -1142,6 +1142,9 @@ button:hover {
 .tree-row.dragging {
   opacity: 0.55;
 }
+.tree-row.cut-pending {
+  opacity: 0.5;
+}
 .tree-row.dir.drop-target {
   background: var(--em-wash);
   border-radius: var(--r-md);

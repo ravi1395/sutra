@@ -111,6 +111,23 @@ export function copyPathsMenuLabel(count: number): string {
   return count > 1 ? `Copy ${count} Paths` : "Copy Path";
 }
 
+/** Auto-rename policy for paste conflicts (both copy and cut): "name copy.ext",
+ *  then "name copy 2.ext", etc. A leading dot (dotfiles) doesn't count as an extension. */
+export function resolvePasteConflictName(desiredName: string, existingNames: Set<string>): string {
+  if (!existingNames.has(desiredName)) return desiredName;
+  const dotIndex = desiredName.lastIndexOf(".");
+  const hasExt = dotIndex > 0;
+  const base = hasExt ? desiredName.slice(0, dotIndex) : desiredName;
+  const ext = hasExt ? desiredName.slice(dotIndex) : "";
+  let candidate = `${base} copy${ext}`;
+  let n = 2;
+  while (existingNames.has(candidate)) {
+    candidate = `${base} copy ${n}${ext}`;
+    n++;
+  }
+  return candidate;
+}
+
 /** Drop paths whose ancestor is also present in the selection — deleting the ancestor
  *  already removes them, and attempting to delete an already-gone descendant separately
  *  (e.g. in a sequential delete loop) would fail. */
@@ -157,6 +174,7 @@ export class FileTree {
   private selectedIsDir = false;
   private selectedPaths = new Set<string>(); // full multi-selection; drives delete/move/copy/paste
   private lastClickedPath: string | null = null; // Shift-click range anchor
+  private clipboard: { paths: string[]; mode: "copy" | "cut" } | null = null;
   private status = new Map<string, "M" | "A" | "D">();
   private changedDirs = new Set<string>();
   private deletedDirs = new Set<string>(); // dirs containing deleted entries (visible signal while collapsed)
@@ -167,6 +185,7 @@ export class FileTree {
   onDeleteMany?: (paths: string[]) => void;
   onCreate?: (parentDir: string, name: string, isDir: boolean) => Promise<void>;
   onMoveMany?: (paths: string[], destDir: string) => void;
+  onPaste?: (items: { src: string; destPath: string }[], mode: "copy" | "cut") => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
@@ -253,6 +272,7 @@ export class FileTree {
     this.el.replaceChildren(fragment);
     this.el.scrollTop = prevScroll; // browser clamps if content shrank
     this.renderSelectionClasses();
+    this.renderClipboardClasses();
   }
 
   /** Expand every ancestor of `path`, activate it, and re-render the tree. */
@@ -407,11 +427,66 @@ export class FileTree {
     });
   }
 
+  /** Sync `.cut-pending` DOM classes to a cut-mode clipboard without a full re-render. */
+  private renderClipboardClasses(): void {
+    this.el.querySelectorAll<HTMLElement>(".tree-row").forEach((row) => {
+      const inCutClipboard =
+        this.clipboard?.mode === "cut" && this.clipboard.paths.includes(row.dataset.path ?? "");
+      row.classList.toggle("cut-pending", !!inCutClipboard);
+    });
+  }
+
+  /** Resolve the paste target dir, compute conflict-free destination names, and
+   *  delegate the actual copy/move to `onPaste`. */
+  private async paste(): Promise<void> {
+    if (!this.clipboard || !this.root) return;
+    const { paths, mode } = this.clipboard;
+    const destDir = this.targetDirForCreate();
+    let existingNames: Set<string>;
+    try {
+      existingNames = new Set((await listDir(destDir)).map((entry) => entry.name));
+    } catch {
+      return;
+    }
+    const items: { src: string; destPath: string }[] = [];
+    for (const src of paths) {
+      const srcParent = src.split("/").slice(0, -1).join("/");
+      if (mode === "cut" && srcParent === destDir) continue; // pasting a cut item back into its own folder is a no-op
+      const srcName = src.split("/").pop() || src;
+      const destName = resolvePasteConflictName(srcName, existingNames);
+      existingNames.add(destName);
+      items.push({ src, destPath: destDir + "/" + destName });
+    }
+    if (items.length === 0) return;
+    this.onPaste?.(items, mode);
+    if (mode === "cut") {
+      this.clipboard = null;
+      this.renderClipboardClasses();
+    }
+  }
+
   private handleKeyDown(ev: KeyboardEvent): void {
     if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return;
     if ((ev.key === "Delete" || ev.key === "Backspace") && this.selectedPaths.size > 0) {
       ev.preventDefault();
       this.onDeleteMany?.(Array.from(this.selectedPaths));
+      return;
+    }
+    const mod = ev.metaKey || ev.ctrlKey;
+    if (mod && ev.code === "KeyC" && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.clipboard = { paths: Array.from(this.selectedPaths), mode: "copy" };
+      this.renderClipboardClasses();
+    } else if (mod && ev.code === "KeyX" && this.selectedPaths.size > 0) {
+      ev.preventDefault();
+      this.clipboard = { paths: Array.from(this.selectedPaths), mode: "cut" };
+      this.renderClipboardClasses();
+    } else if (mod && ev.code === "KeyV" && this.clipboard) {
+      ev.preventDefault();
+      void this.paste();
+    } else if (ev.key === "Escape" && this.clipboard) {
+      this.clipboard = null;
+      this.renderClipboardClasses();
     }
   }
 
@@ -594,9 +669,25 @@ export class FileTree {
             action: () => this.startInlineEdit(label, e.path, e.name),
           },
           {
+            label: "Cut",
+            action: () => {
+              this.clipboard = { paths: targets, mode: "cut" };
+              this.renderClipboardClasses();
+            },
+          },
+          {
+            label: "Copy",
+            action: () => {
+              this.clipboard = { paths: targets, mode: "copy" };
+            },
+          },
+          {
             label: copyPathsMenuLabel(targets.length),
             action: () => void clipboardWrite(targets.join("\n")),
           },
+          ...(this.clipboard
+            ? [{ label: "Paste", action: () => void this.paste() }]
+            : []),
           {
             label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
             action: () => this.onDeleteMany?.(targets),
