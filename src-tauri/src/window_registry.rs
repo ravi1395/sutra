@@ -125,12 +125,41 @@ fn publish_atomic(root_key: &str, dest: &Path, lock: &Lock) -> io::Result<()> {
     result
 }
 
-/// Claim `root_key`, serialized against every other thread/process racing the
-/// same root via an advisory exclusive `flock` on a per-root `.guard` file.
+/// Acquire an exclusive advisory `flock` on `guard_path` (creating it if
+/// absent), run `f` while holding it, then release when the returned guard
+/// `File` drops (fd close) at the end of this call — including on panic
+/// unwind or process death, so there's never an orphaned sentinel.
 ///
-/// Readers (`live_owner`, `gc_sweep`) never take this lock — they must keep
-/// working lock-free — so the published lockfile must always be a *complete*
-/// file. That is `publish_atomic`'s job (tmp write + `rename`, never observed
+/// `flock` is per-open-file-description: each `OpenOptions::open` call
+/// (thread or process) gets its own fd/description, so two threads of one
+/// process serialize on the guard exactly like two processes do — confirmed
+/// by `concurrent_claims_exactly_one_wins` and `concurrent_reclaim_exactly_one_wins`,
+/// both of which race threads, not processes.
+///
+/// Shared by `try_claim` and `gc_sweep` so both serialize against each other
+/// on the SAME per-root guard file, not just against themselves.
+fn with_root_guard<T>(guard_path: &Path, f: impl FnOnce() -> T) -> io::Result<T> {
+    let guard = OpenOptions::new().read(true).write(true).create(true).open(guard_path)?;
+    let fd = guard.as_raw_fd();
+    // SAFETY: `fd` is a valid, open file descriptor owned by `guard` for the
+    // duration of this call; `flock` only reads/blocks on it.
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = f();
+    // `guard` drops here — flock released (fd close), including on panic
+    // unwind or process death.
+    Ok(result)
+}
+
+/// Claim `root_key`, serialized against every other thread/process racing the
+/// same root via an advisory exclusive `flock` on a per-root `.guard` file
+/// (see `with_root_guard`).
+///
+/// Readers (`live_owner`) never take this lock — they must keep working
+/// lock-free — so the published lockfile must always be a *complete* file.
+/// That is `publish_atomic`'s job (tmp write + `rename`, never observed
 /// empty or partial). What `flock` buys is mutual exclusion of the
 /// *read-decide-publish* sequence itself: the prior fix (atomic `hard_link`
 /// publish) closed the empty-file TOCTOU for a fresh key, but the dead-lock
@@ -143,42 +172,26 @@ fn publish_atomic(root_key: &str, dest: &Path, lock: &Lock) -> io::Result<()> {
 /// everyone else either blocks or (after acquiring) re-reads and sees the
 /// live winner.
 ///
-/// `flock` is per-open-file-description: each `OpenOptions::open` call
-/// (thread or process) gets its own fd/description, so two threads of one
-/// process serialize on the guard exactly like two processes do — confirmed
-/// by `concurrent_claims_exactly_one_wins` and `concurrent_reclaim_exactly_one_wins`,
-/// both of which race threads, not processes. The lock auto-releases when
-/// `guard` drops at the end of this function (fd close), including on
-/// process crash/kill — no orphaned sentinel to clean up.
+/// `gc_sweep` acquires this SAME guard file before removing a dead lock
+/// (NEW-4) — so a `gc_sweep` mid-decide for this root and a `try_claim` for
+/// it can never interleave; whichever gets the guard first runs its whole
+/// read-decide-mutate sequence to completion before the other even reads.
 pub fn try_claim(root_key: &str, mk: impl FnOnce() -> Lock) -> io::Result<ClaimResult> {
     let dest = lock_path(root_key);
-    let guard = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(guard_path(root_key))?;
-    let fd = guard.as_raw_fd();
-    // SAFETY: `fd` is a valid, open file descriptor owned by `guard` for the
-    // duration of this call; `flock` only reads/blocks on it.
-    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // ---- critical section: only one thread/process per root here ----
-    let result = match read_lock(&dest) {
-        Some(existing) if is_live(&existing) => ClaimResult::Owned(existing),
-        _ => {
-            // Absent, confirmed dead, or corrupt: we hold the guard, so no
-            // concurrent writer can be mid-publish — safe to clear and take it.
-            let _ = std::fs::remove_file(&dest);
-            publish_atomic(root_key, &dest, &mk())?;
-            ClaimResult::Won
+    with_root_guard(&guard_path(root_key), || -> io::Result<ClaimResult> {
+        // ---- critical section: only one thread/process per root here ----
+        match read_lock(&dest) {
+            Some(existing) if is_live(&existing) => Ok(ClaimResult::Owned(existing)),
+            _ => {
+                // Absent, confirmed dead, or corrupt: we hold the guard, so no
+                // concurrent writer (incl. gc_sweep) can be mid-decide/mutate
+                // — safe to clear and take it.
+                let _ = std::fs::remove_file(&dest);
+                publish_atomic(root_key, &dest, &mk())?;
+                Ok(ClaimResult::Won)
+            }
         }
-    };
-    // `guard` drops here — flock released (fd close), including on panic
-    // unwind or process death.
-    Ok(result)
+    })?
 }
 
 fn read_lock(path: &Path) -> Option<Lock> {
@@ -208,6 +221,18 @@ pub fn release(root_key: &str) {
 
 /// Delete every dead lockfile; return the reclaimed locks so the caller can
 /// heal their stale MCP config (Phase 3). Any launch heals all crashed roots.
+///
+/// NEW-4 fix: a per-root `remove_file`-by-name with no guard raced
+/// `try_claim`'s publish — `gc_sweep` could read a stale dead lock for root
+/// R, then `try_claim(R)` reclaims and publishes a fresh LIVE lock at the
+/// same path, then `gc_sweep`'s now-stale decision deletes that live lock →
+/// R goes unowned while its process is live → next launch mints a second
+/// owner. Fixed by acquiring the SAME per-root `.guard` `try_claim` locks
+/// (`p.with_extension("guard")` on a `<hash>.json` path yields the identical
+/// `<hash>.guard` file `guard_path` derives) and RE-VALIDATING liveness
+/// inside the guard before removing — symmetric to `try_claim`'s own
+/// reclaim arm. If the guard can't be acquired, skip the entry (fail safe:
+/// never remove without the guard).
 pub fn gc_sweep() -> Vec<Lock> {
     let mut reclaimed = Vec::new();
     let dir = registry_dir();
@@ -217,12 +242,24 @@ pub fn gc_sweep() -> Vec<Lock> {
             if p.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(l) = read_lock(&p) {
-                if !is_live(&l) {
-                    let _ = std::fs::remove_file(&p);
-                    reclaimed.push(l);
+            let gp = p.with_extension("guard");
+            let outcome = with_root_guard(&gp, || {
+                // Re-read + re-validate INSIDE the guard: a racer may have
+                // reclaimed and republished a live lock at `p` since our
+                // caller-less initial scan, or removed it already.
+                match read_lock(&p) {
+                    Some(l) if !is_live(&l) => {
+                        let _ = std::fs::remove_file(&p);
+                        Some(l)
+                    }
+                    _ => None,
                 }
+            });
+            if let Ok(Some(l)) = outcome {
+                reclaimed.push(l);
             }
+            // Err (guard acquisition failed) or Ok(None) (now-live or gone):
+            // skip this entry, never remove.
         }
     }
     reclaimed
@@ -527,5 +564,87 @@ mod tests {
         let distinct: std::collections::HashSet<u16> = owned_ports.into_iter().collect();
         assert_eq!(distinct.len(), 1, "all losers must observe the SAME single winner");
         release(&key);
+    }
+
+    /// NEW-4 regression: `gc_sweep`'s per-root remove-by-name must never race
+    /// ahead of a concurrent `try_claim` reclaiming the SAME root and delete
+    /// the freshly-published LIVE lock. Pre-fix, `gc_sweep` read-decided
+    /// "dead" against a stale read, then removed by path with no guard; if
+    /// `try_claim` reclaimed and republished a live lock at that path in
+    /// between, `gc_sweep`'s stale decision deleted the live lock, leaving
+    /// the root falsely unowned (next launch mints a second owner). Looped
+    /// 50x because the interleave is timing-dependent — a single run could
+    /// pass even with the bug present if the thread scheduler happened not
+    /// to interleave them.
+    #[test]
+    fn gc_sweep_vs_claim_never_drops_live_owner() {
+        let (pid, start, exe) = self_identity();
+        for i in 0..50 {
+            let key = format!(
+                "gcrace-{}-{}-{}",
+                std::process::id(),
+                i,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let _ = release(&key);
+            // Plant a dead lock directly (simulated crash: pid/start/exe never match).
+            let dead = Lock {
+                pid: 999_999,
+                process_start: 1,
+                exe: "/nope".into(),
+                focus_port: 1,
+                token: "d".into(),
+                root: key.clone(),
+                real_root: key.clone(),
+            };
+            std::fs::write(&lock_path(&key), serde_json::to_string(&dead).unwrap()).unwrap();
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            let claim_handle = {
+                let key = key.clone();
+                let exe = exe.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait(); // release together into the same instant
+                    try_claim(&key, || Lock {
+                        pid,
+                        process_start: start,
+                        exe: exe.clone(),
+                        focus_port: 4000,
+                        token: "live".into(),
+                        root: key.clone(),
+                        real_root: key.clone(),
+                    })
+                })
+            };
+            let sweep_handle = {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    gc_sweep()
+                })
+            };
+
+            let claim_result = claim_handle.join().unwrap().unwrap();
+            let _ = sweep_handle.join().unwrap();
+
+            if matches!(claim_result, ClaimResult::Won) {
+                let owner = live_owner(&key);
+                assert!(
+                    owner.is_some(),
+                    "gc_sweep must not drop the freshly-claimed live owner (iter {i})"
+                );
+                assert_eq!(
+                    owner.unwrap().pid,
+                    pid,
+                    "live owner pid must be the claimer's live pid (iter {i})"
+                );
+            }
+            release(&key);
+        }
     }
 }
