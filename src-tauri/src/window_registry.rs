@@ -182,9 +182,20 @@ pub fn live_owner(root_key: &str) -> Option<Lock> {
     read_lock(&lock_path(root_key)).filter(is_live)
 }
 
-/// Remove our own lockfile on graceful close.
+/// Remove our own lockfile on graceful close — but only if it still
+/// identifies THIS process. An unconditional remove would let the first
+/// quitter of two same-root processes delete the survivor's lock out from
+/// under it (the failure mode CRITICAL-1 named); checking pid/start/exe
+/// against `self_identity()` first means we only ever delete a lock we
+/// ourselves published or still occupy.
 pub fn release(root_key: &str) {
-    let _ = std::fs::remove_file(lock_path(root_key));
+    let path = lock_path(root_key);
+    let (pid, start, exe) = self_identity();
+    if let Some(l) = read_lock(&path) {
+        if l.pid == pid && l.process_start == start && l.exe == exe {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Delete every dead lockfile; return the reclaimed locks so the caller can
