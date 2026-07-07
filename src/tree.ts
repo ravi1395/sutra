@@ -2,7 +2,7 @@
 // pre-collapsed from Rust (label `a/b/c`, path = deepest dir), so expanding one
 // node reveals real content instead of a corridor of empty folders.
 // Also exports OutlineView for the Files/Outline sidebar toggle.
-import { listDir, gitStatus, fileMtime, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
+import { listDir, gitStatus, fileMtime, clipboardWrite, type Entry, type GitStatusEntry, type DocumentSymbol } from "./ipc";
 import { showContextMenu } from "./contextmenu";
 import { icon } from "./icons";
 import {
@@ -104,6 +104,11 @@ export function computeRangeSelection(visiblePaths: string[], anchor: string, ta
 export function deleteConfirmMessage(paths: string[]): string {
   if (paths.length === 1) return `Delete "${paths[0].split("/").pop()}"?`;
   return `Delete ${paths.length} items?`;
+}
+
+/** Context-menu label for the "copy absolute path(s) to clipboard" action. */
+export function copyPathsMenuLabel(count: number): string {
+  return count > 1 ? `Copy ${count} Paths` : "Copy Path";
 }
 
 /** Drop paths whose ancestor is also present in the selection — deleting the ancestor
@@ -587,6 +592,10 @@ export class FileTree {
           {
             label: "Rename",
             action: () => this.startInlineEdit(label, e.path, e.name),
+          },
+          {
+            label: copyPathsMenuLabel(targets.length),
+            action: () => void clipboardWrite(targets.join("\n")),
           },
           {
             label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",

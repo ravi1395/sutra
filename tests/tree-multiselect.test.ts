@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   computeRangeSelection,
   deleteConfirmMessage,
+  copyPathsMenuLabel,
   dropSelectedDescendants,
   serializeTreeDragPayload,
   parseTreeDragPayload,
@@ -80,4 +81,12 @@ test("rejectsDrop is true when the destination is inside a dragged directory", (
 
 test("rejectsDrop is false for an unrelated destination", () => {
   assert.equal(rejectsDrop("/x/y", ["/a/b", "/a/c"]), false);
+});
+
+test("copyPathsMenuLabel is singular for one path", () => {
+  assert.equal(copyPathsMenuLabel(1), "Copy Path");
+});
+
+test("copyPathsMenuLabel includes the count for multiple paths", () => {
+  assert.equal(copyPathsMenuLabel(3), "Copy 3 Paths");
 });
