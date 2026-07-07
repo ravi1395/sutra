@@ -548,28 +548,34 @@ tree.onCreate = async (parentDir: string, name: string, isDir: boolean) => {
   else await writeFile(path, "");
 };
 
-tree.onMove = async (src: string, destDir: string) => {
-  try {
-    // Compute destination path: destDir + "/" + basename(src)
+tree.onMoveMany = async (paths: string[], destDir: string) => {
+  // A Shift-range selection commonly contains both an expanded directory and its own
+  // children — moving the directory already relocates the children, so drop them here
+  // (same rationale as the multi-delete loop above) to avoid a spurious per-item failure.
+  for (const src of dropSelectedDescendants(paths)) {
+    const srcParent = src.split("/").slice(0, -1).join("/");
+    if (srcParent === destDir) continue; // dropped into its own parent — no-op
     const srcBaseName = src.split("/").pop() || src;
     const destPath = destDir + "/" + srcBaseName;
-    await movePath(src, destPath);
-    // Update open tabs with moved path — keep dirty state, the bytes moved unchanged
-    const srcPrefix = src.endsWith("/") ? src : src + "/";
-    for (const tab of editor.tabs.slice()) {
-      if (tab.path === src) {
-        editor.retargetTab(tab, destPath, srcBaseName);
-      } else if (tab.path && tab.path.startsWith(srcPrefix)) {
-        // Move children: /old/child -> /new/child
-        const relPath = tab.path.slice(srcPrefix.length);
-        const newPath = destPath + "/" + relPath;
-        editor.retargetTab(tab, newPath, tab.name);
+    try {
+      await movePath(src, destPath);
+      // Update open tabs with moved path — keep dirty state, the bytes moved unchanged
+      const srcPrefix = src.endsWith("/") ? src : src + "/";
+      for (const tab of editor.tabs.slice()) {
+        if (tab.path === src) {
+          editor.retargetTab(tab, destPath, srcBaseName);
+        } else if (tab.path && tab.path.startsWith(srcPrefix)) {
+          // Move children: /old/child -> /new/child
+          const relPath = tab.path.slice(srcPrefix.length);
+          const newPath = destPath + "/" + relPath;
+          editor.retargetTab(tab, newPath, tab.name);
+        }
       }
+    } catch (e) {
+      void alertNative(`Move failed for ${srcBaseName}: ${e}`);
     }
-    await tree.refresh();
-  } catch (e) {
-    void alertNative(`Move failed: ${e}`);
   }
+  await tree.refresh();
 };
 
 // ---- save / save-as ----

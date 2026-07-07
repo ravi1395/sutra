@@ -113,6 +113,32 @@ export function dropSelectedDescendants(paths: string[]): string[] {
   return paths.filter((p) => !paths.some((other) => other !== p && p.startsWith(other + "/")));
 }
 
+/** Encode a drag payload: a bare path for a single entry (back-compat with
+ *  existing drop targets), JSON array for a multi-selection drag. */
+export function serializeTreeDragPayload(paths: string[]): string {
+  return paths.length === 1 ? paths[0] : JSON.stringify(paths);
+}
+
+/** Decode a drag payload written by `serializeTreeDragPayload`, tolerating a
+ *  bare path (single-item drag or an older payload). */
+export function parseTreeDragPayload(raw: string): string[] {
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === "string");
+    } catch {
+      // Not valid JSON — treat the whole string as a literal (unlikely) path.
+    }
+  }
+  return [raw];
+}
+
+/** True if dropping onto `destPath` would land on, or inside, any of `draggedPaths`. */
+export function rejectsDrop(destPath: string, draggedPaths: string[]): boolean {
+  return draggedPaths.some((src) => src === destPath || destPath.startsWith(src + "/"));
+}
+
 export type TreePaneSide = SplitDropSide;
 export const paneSideFromClientX = splitSideFromClientX;
 type TreeContainer = HTMLElement | DocumentFragment;
@@ -135,7 +161,7 @@ export class FileTree {
   onRename?: (path: string, newName: string) => void;
   onDeleteMany?: (paths: string[]) => void;
   onCreate?: (parentDir: string, name: string, isDir: boolean) => Promise<void>;
-  onMove?: (src: string, destDir: string) => void;
+  onMoveMany?: (paths: string[], destDir: string) => void;
 
   constructor(el: HTMLElement) {
     this.el = el;
@@ -470,25 +496,31 @@ export class FileTree {
 
     if (e.path === this.activePath) row.classList.add("active");
 
-    // Drag source: files and directories can be dragged
+    // Drag source: files and directories can be dragged. Dragging a row that's
+    // part of a multi-selection carries the whole selection; otherwise just this row.
     row.draggable = true;
     row.addEventListener("dragstart", (ev) => {
       if (!ev.dataTransfer) return;
+      const dragPaths =
+        this.selectedPaths.has(e.path) && this.selectedPaths.size > 1
+          ? Array.from(this.selectedPaths)
+          : [e.path];
       ev.dataTransfer.effectAllowed = e.isDir ? "move" : "copyMove";
-      ev.dataTransfer.setData(TREE_ENTRY_DRAG_TYPE, e.path);
-      ev.dataTransfer.setData("text/plain", e.path);
-      if (!e.isDir) ev.dataTransfer.setData(FILE_DRAG_TYPE, e.path);
+      ev.dataTransfer.setData(TREE_ENTRY_DRAG_TYPE, serializeTreeDragPayload(dragPaths));
+      ev.dataTransfer.setData("text/plain", dragPaths.join("\n"));
+      // Single-file payload for editor split-pane drop targets; multi-drags don't open in split.
+      if (dragPaths.length === 1 && !e.isDir) ev.dataTransfer.setData(FILE_DRAG_TYPE, e.path);
       row.classList.add("dragging");
     });
     row.addEventListener("dragend", () => row.classList.remove("dragging"));
 
-    // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant)
+    // Drop target: directories accept drops (ignore drops onto self/ancestor/descendant
+    // of any dragged path).
     if (e.isDir) {
       row.addEventListener("dragover", (ev) => {
-        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
-        if (!src) return;
-        // Reject drops onto self or a descendant
-        if (src === e.path || src.startsWith(e.path + "/")) return;
+        const raw = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
+        if (!raw) return;
+        if (rejectsDrop(e.path, parseTreeDragPayload(raw))) return;
         ev.preventDefault();
         ev.dataTransfer!.dropEffect = "move";
         row.classList.add("drop-target");
@@ -500,9 +532,11 @@ export class FileTree {
         ev.preventDefault();
         ev.stopPropagation();
         row.classList.remove("drop-target");
-        const src = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
-        if (!src || src === e.path || src.startsWith(e.path + "/")) return;
-        this.onMove?.(src, e.path);
+        const raw = ev.dataTransfer?.getData(TREE_ENTRY_DRAG_TYPE);
+        if (!raw) return;
+        const paths = parseTreeDragPayload(raw);
+        if (rejectsDrop(e.path, paths)) return;
+        this.onMoveMany?.(paths, e.path);
       });
     }
 

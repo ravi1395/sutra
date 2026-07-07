@@ -1,6 +1,13 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeRangeSelection, deleteConfirmMessage, dropSelectedDescendants } from "../src/tree";
+import {
+  computeRangeSelection,
+  deleteConfirmMessage,
+  dropSelectedDescendants,
+  serializeTreeDragPayload,
+  parseTreeDragPayload,
+  rejectsDrop,
+} from "../src/tree";
 
 test("computeRangeSelection selects a forward range inclusive of both ends", () => {
   const visible = ["/a", "/b", "/c", "/d"];
@@ -40,4 +47,37 @@ test("dropSelectedDescendants drops paths whose ancestor is also selected", () =
 test("dropSelectedDescendants passes through a selection with no ancestor/descendant relationships", () => {
   const paths = ["/root/a.ts", "/root/b.ts", "/root/c.ts"];
   assert.deepEqual(dropSelectedDescendants(paths), paths);
+});
+
+test("serializeTreeDragPayload keeps a single path as a plain string", () => {
+  assert.equal(serializeTreeDragPayload(["/a"]), "/a");
+});
+
+test("serializeTreeDragPayload JSON-encodes multiple paths", () => {
+  assert.equal(serializeTreeDragPayload(["/a", "/b"]), JSON.stringify(["/a", "/b"]));
+});
+
+test("parseTreeDragPayload round-trips a serialized multi-path payload", () => {
+  const payload = serializeTreeDragPayload(["/a", "/b", "/c"]);
+  assert.deepEqual(parseTreeDragPayload(payload), ["/a", "/b", "/c"]);
+});
+
+test("parseTreeDragPayload treats a plain path as a single-item array", () => {
+  assert.deepEqual(parseTreeDragPayload("/a/b.ts"), ["/a/b.ts"]);
+});
+
+test("parseTreeDragPayload falls back to the raw string on malformed JSON", () => {
+  assert.deepEqual(parseTreeDragPayload("[not json"), ["[not json"]);
+});
+
+test("rejectsDrop is true when the destination is one of the dragged paths", () => {
+  assert.equal(rejectsDrop("/a/b", ["/a/b", "/a/c"]), true);
+});
+
+test("rejectsDrop is true when the destination is inside a dragged directory", () => {
+  assert.equal(rejectsDrop("/a/b/child", ["/a/b"]), true);
+});
+
+test("rejectsDrop is false for an unrelated destination", () => {
+  assert.equal(rejectsDrop("/x/y", ["/a/b", "/a/c"]), false);
 });
