@@ -535,6 +535,7 @@ tree.onDeleteMany = async (paths: string[]) => {
       }
     }
     await tree.refresh();
+    tree.clearSelection();
   } catch (e) {
     void alertNative(`Delete failed: ${e}`);
   }
@@ -577,6 +578,7 @@ tree.onMoveMany = async (paths: string[], destDir: string) => {
     }
   }
   await tree.refresh();
+  tree.clearSelection();
 };
 
 tree.onPaste = async (items, mode) => {
@@ -602,6 +604,7 @@ tree.onPaste = async (items, mode) => {
     }
   }
   await tree.refresh();
+  tree.clearSelection();
 };
 
 // ---- save / save-as ----

@@ -442,7 +442,13 @@ export class FileTree {
     if (!this.clipboard || !this.root) return;
     const { mode } = this.clipboard;
     const paths = dropSelectedDescendants(this.clipboard.paths);
-    const destDir = this.targetDirForCreate();
+    let destDir = this.targetDirForCreate();
+    // A single folder pasted while still the active selection targets itself — fall back to
+    // its parent so "duplicate this folder" works, same as files (whose target already
+    // resolves to their parent). Any other self/descendant case still hits the guard below.
+    if (paths.length === 1 && destDir === paths[0]) {
+      destDir = paths[0].split("/").slice(0, -1).join("/");
+    }
     if (rejectsDrop(destDir, paths)) return; // pasting into (or as) one of the sources is invalid, same rule as drag-drop
     let existingNames: Set<string>;
     try {
@@ -764,6 +770,13 @@ export class FileTree {
   async refresh(): Promise<void> {
     await this.loadStatus();
     await this.render();
+  }
+
+  /** Clear the current multi-selection — call after a bulk mutation invalidates the selected paths. */
+  clearSelection(): void {
+    this.selectedPaths.clear();
+    this.lastClickedPath = null;
+    this.renderSelectionClasses();
   }
 }
 

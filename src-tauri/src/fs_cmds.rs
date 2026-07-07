@@ -226,7 +226,8 @@ fn rejects_copy_destination(from: &Path, to: &Path) -> bool {
     to.starts_with(from)
 }
 
-/// Copy a file or directory (recursive) to a new path; reject if destination exists.
+/// Copy a file or directory (recursive) to a new path; reject if destination exists,
+/// or is the source itself or one of its own subfolders.
 #[tauri::command]
 pub fn copy_path(tracker: State<'_, AgentTrackerState>, from: String, to: String) -> Result<(), String> {
     let from_path = Path::new(&from);
