@@ -617,10 +617,27 @@ export function mountComposer(opts: ComposerOptions): {
       history = pushHistory(history, entry);
       saveHistory(root, history);
       clearDraft(root);
-      renderHistory();
+      resetComposerState();
+      renderAll();
     } else {
       showStatus(result.reason);
     }
+  }
+
+  // Full reset after a successful stage/submit — the composer returns to the
+  // same blank state as a fresh, draft-less open (mirrors init()'s no-saved-
+  // draft branch). Never called on a failed send — result.reason is shown
+  // instead and the typed prompt stays intact for retry.
+  function resetComposerState(): void {
+    templateName = config.templates[0]?.name ?? "";
+    text = {};
+    chips = [];
+    thinking = false;
+    submit = false;
+    stageInp.checked = true;
+    submitInp.checked = false;
+    thinkInp.checked = false;
+    targetSel.value = "";
   }
 
   // ── draft ─────────────────────────────────────────────────────────────────────
