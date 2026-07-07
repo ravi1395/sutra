@@ -485,7 +485,10 @@ export class FileTree {
     }
 
     row.onclick = (ev: MouseEvent) => {
-      if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return; // don't hijack focus from an active rename/create edit
+      // Skip when a click lands inside the row's own active rename/create input (e.g. cursor
+      // reposition) — clicking a *different* row still commits/cancels the edit via its blur
+      // handler, same as clicking any other focusable UI; that's intentional click-away behavior.
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("tree-edit-input")) return;
       this.el.focus();
       this.selectedPath = e.path;
       this.selectedIsDir = e.isDir;
