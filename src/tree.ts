@@ -440,7 +440,8 @@ export class FileTree {
    *  delegate the actual copy/move to `onPaste`. */
   private async paste(): Promise<void> {
     if (!this.clipboard || !this.root) return;
-    const { paths, mode } = this.clipboard;
+    const { mode } = this.clipboard;
+    const paths = dropSelectedDescendants(this.clipboard.paths);
     const destDir = this.targetDirForCreate();
     let existingNames: Set<string>;
     try {
@@ -679,6 +680,7 @@ export class FileTree {
             label: "Copy",
             action: () => {
               this.clipboard = { paths: targets, mode: "copy" };
+              this.renderClipboardClasses();
             },
           },
           {

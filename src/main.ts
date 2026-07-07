@@ -580,8 +580,8 @@ tree.onMoveMany = async (paths: string[], destDir: string) => {
 };
 
 tree.onPaste = async (items, mode) => {
-  try {
-    for (const { src, destPath } of items) {
+  for (const { src, destPath } of items) {
+    try {
       if (mode === "copy") {
         await copyPath(src, destPath);
       } else {
@@ -597,11 +597,11 @@ tree.onPaste = async (items, mode) => {
           }
         }
       }
+    } catch (e) {
+      void alertNative(`Paste failed for ${src.split("/").pop()}: ${e}`);
     }
-    await tree.refresh();
-  } catch (e) {
-    void alertNative(`Paste failed: ${e}`);
   }
+  await tree.refresh();
 };
 
 // ---- save / save-as ----
