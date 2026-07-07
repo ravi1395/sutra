@@ -181,6 +181,11 @@ test("pause clears an armed settle timer but marks a hidden catch-up pending; re
     mock.timers.tick(1000); // even if the cleared timer somehow fired, prove no run happened
     assert.equal(calls, 0);
     resumeDiagnosticsFsTrigger(execute, () => "/r");
+    // runDiagnostics now awaits the (backend-async) settings gate before
+    // calling execute — flush that hop. `flush()` (setTimeout-based) is
+    // mocked-inert here since this test fakes `setTimeout`; setImmediate is
+    // real and still fires after pending promise microtasks settle.
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(calls, 1); // the armed-but-cleared trigger is not lost
   } finally {
     mock.timers.reset();

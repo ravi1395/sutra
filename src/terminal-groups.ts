@@ -1,3 +1,5 @@
+import { uiStateGet, uiStateSet } from "./ipc";
+
 export type TerminalGroupSide = "left" | "right";
 
 export interface TerminalGroups<T> {
@@ -25,6 +27,81 @@ export function loadDrawerState(raw: string | null): DrawerState {
   } catch {
     return clampDrawerState(null);
   }
+}
+
+// ---- shared ui-state (terminal drawer + composer drawer height) ----
+// Both dims used to live under separate localStorage keys (`sutra.drawer`,
+// `composer-drawer-h`); they're now one backend-owned `ui-state.json` object
+// so every window shares the same values. `readUiState`/`patchUiState` do a
+// read-merge-write so main.ts (terminalDrawer) and composer.ts
+// (composerDrawerH) never clobber each other's field.
+export interface UiState {
+  terminalDrawer: DrawerState;
+  composerDrawerH: number;
+}
+
+const COMPOSER_DRAWER_H_DEFAULT = 220;
+const COMPOSER_DRAWER_H_MIN = 120;
+
+function clampComposerDrawerH(value: unknown): number {
+  return typeof value === "number" && value >= COMPOSER_DRAWER_H_MIN ? value : COMPOSER_DRAWER_H_DEFAULT;
+}
+
+/** Clamp a persisted (or partial/legacy) ui-state blob into a full UiState. */
+export function clampUiState(value: unknown): UiState {
+  const v = (value ?? {}) as Partial<{ terminalDrawer: unknown; composerDrawerH: unknown }>;
+  return {
+    terminalDrawer: clampDrawerState(v.terminalDrawer),
+    composerDrawerH: clampComposerDrawerH(v.composerDrawerH),
+  };
+}
+
+export interface UiStateBackend {
+  get: () => Promise<unknown>;
+  set: (value: unknown) => Promise<void>;
+}
+const defaultUiStateBackend: UiStateBackend = { get: uiStateGet, set: uiStateSet };
+
+/** Read the shared ui-state from the backend. `legacy`, when given, is
+ *  consulted ONLY the first time the backend is still empty (pre-migration):
+ *  it seeds the backend once from the caller's pre-migration localStorage
+ *  values so drawer-size preferences survive the move to backend-owned
+ *  state. Safe to call on every boot/mount. */
+export async function readUiState(
+  legacy?: { drawerRaw: string | null; composerHRaw: string | null },
+  backend: UiStateBackend = defaultUiStateBackend,
+): Promise<UiState> {
+  try {
+    const stored = await backend.get();
+    if (stored !== null && stored !== undefined) return clampUiState(stored);
+  } catch {
+    /* backend unavailable this call — fall through to legacy/defaults */
+  }
+  if (!legacy) return clampUiState(null);
+  let legacyDrawer: unknown = null;
+  try {
+    legacyDrawer = legacy.drawerRaw ? JSON.parse(legacy.drawerRaw) : null;
+  } catch {
+    /* junk localStorage value — nothing to port */
+  }
+  const parsedH = legacy.composerHRaw ? parseInt(legacy.composerHRaw, 10) : NaN;
+  const seeded = clampUiState({
+    terminalDrawer: legacyDrawer,
+    composerDrawerH: Number.isFinite(parsedH) ? parsedH : undefined,
+  });
+  await backend.set(seeded).catch(() => {});
+  return seeded;
+}
+
+/** Merge `patch` into the current shared ui-state and persist (best-effort). */
+export async function patchUiState(
+  patch: Partial<UiState>,
+  backend: UiStateBackend = defaultUiStateBackend,
+): Promise<UiState> {
+  const current = await readUiState(undefined, backend);
+  const next = clampUiState({ ...current, ...patch });
+  await backend.set(next).catch(() => {});
+  return next;
 }
 
 export function groupSideForItem<T>(groups: TerminalGroups<T>, item: T): TerminalGroupSide | null {

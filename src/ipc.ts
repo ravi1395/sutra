@@ -26,6 +26,29 @@ export const deletePath = (path: string) => invoke<void>("delete_path", { path }
 export const createDir = (path: string) => invoke<void>("create_dir", { path });
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
+// New Window: no path → fresh untitled child; a path with a live owner focuses it.
+export const spawnWindow = (path?: string) => invoke<void>("spawn_window", { path: path ?? null });
+
+// CLI shim install (macOS only backend; absent elsewhere — callers must
+// tolerate rejection). "absent"/"stale" surface a menu row; cliInstall()
+// either installs directly or returns an admin command for the UI to copy.
+export const cliInstallState = () => invoke<"absent" | "current" | "stale">("cli_install_state");
+export const cliInstall = () => invoke<string>("cli_install");
+
+// --- Backend-owned shared app state (recents/trust/settings/ui-state) ---
+// Cross-process source of truth: every window and the native Dock menu reads
+// and writes the same disk-backed JSON via these commands (see app_state.rs).
+export interface RecentBk { path: string; name: string; opened_at: number }
+export const recentsList = () => invoke<RecentBk[]>("recents_list");
+export const recentsPush = (path: string, name: string) => invoke<void>("recents_push", { path, name });
+export const trustList = () => invoke<string[]>("trust_list");
+export const trustAdd = (path: string) => invoke<void>("trust_add", { path });
+export const trustMigrated = () => invoke<boolean>("trust_migrated");
+export const trustSetMigrated = () => invoke<void>("trust_set_migrated");
+export const settingsGet = () => invoke<unknown>("settings_get");
+export const settingsSet = (value: unknown) => invoke<void>("settings_set", { value });
+export const uiStateGet = () => invoke<unknown>("ui_state_get");
+export const uiStateSet = (value: unknown) => invoke<void>("ui_state_set", { value });
 
 export interface GitStatusEntry {
   path: string;

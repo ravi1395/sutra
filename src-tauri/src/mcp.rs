@@ -267,6 +267,26 @@ fn write_endpoint_file(root: &Path, port: u16) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Clean-on-close / crash-heal: strip Sutra's MCP entries and the endpoint file
+/// so an agent sees NO server (fails clean) rather than a dead port. Leaves the
+/// .claude hook + .gitignore in place; the hook exits quietly if endpoint absent.
+/// Best-effort throughout — a missing or malformed file is silently skipped.
+pub fn mcp_teardown_config(root: &Path) {
+    let mcp = root.join(".mcp.json");
+    if let Ok(s) = std::fs::read_to_string(&mcp) {
+        if let Ok(out) = crate::mcp_config::remove_mcp_json(&s) {
+            let _ = std::fs::write(&mcp, out);
+        }
+    }
+    let codex = root.join(".codex").join("config.toml");
+    if let Ok(s) = std::fs::read_to_string(&codex) {
+        if let Ok(out) = crate::mcp_config::remove_codex_toml(&s) {
+            let _ = std::fs::write(&codex, out);
+        }
+    }
+    let _ = std::fs::remove_file(root.join(".sutra").join("endpoint"));
+}
+
 /// POSIX-sh hook body: reads Claude PostToolUse JSON on stdin, extracts the
 /// edited file path with node, and reports it to Sutra's ingest endpoint.
 const REPORT_EDIT_SH: &str = r#"#!/bin/sh

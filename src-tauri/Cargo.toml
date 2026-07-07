@@ -52,12 +52,25 @@ tree-sitter-json = "0.24"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.23"
 tree-sitter-md = "0.3"
+sysinfo = "0.32"
+sha2 = "0.10"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
 
-# Desktop-only plugins (no Android/iOS bundle target): self-updater +
-# single-instance (forwards an opened path into the running window).
+# Desktop-only plugin (no Android/iOS bundle target): self-updater. Single-
+# instance is gone — multi-window uses window_registry + launcher instead.
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
-tauri-plugin-single-instance = "2"
+
+# Dock menu (dock_menu.rs): bridges applicationDockMenu: into Tauri's existing
+# AppKit delegate via the objc2 runtime. Pinned to the 0.6/0.3 series already
+# resolved transitively through tauri's macOS backend (tao/wry), so this adds
+# no new major-version branch to the dependency graph.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray"] }
 
 [dev-dependencies]
 tempfile = "3"
