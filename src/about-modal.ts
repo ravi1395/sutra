@@ -24,6 +24,15 @@ export interface TutorialShortcut {
 const REPO_URL = "https://github.com/ravi1395/sutra";
 const RELEASES_URL = `${REPO_URL}/releases`;
 
+// Post-update discovery: the ☰ button shows a dot badge until the user views
+// What's New for the current version. Gating is a pure function so it's testable.
+export const WHATS_NEW_SEEN_KEY = "sutra.whatsNewSeen";
+
+/** True when the running version exists and differs from the last version whose What's New was viewed. */
+export function shouldShowWhatsNew(current: string, seen: string | null): boolean {
+  return current !== "" && current !== seen;
+}
+
 export const ABOUT_TABS = ["What's New", "Tutorial", "About"] as const;
 export type AboutTab = (typeof ABOUT_TABS)[number];
 

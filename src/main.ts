@@ -132,7 +132,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
-import { openAboutModal, type AboutTab } from "./about-modal";
+import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -1772,10 +1772,11 @@ const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onInfo: (m) => void alertNative(m),
 });
 btnMenu.innerHTML = icon("menu", 17);
-// Version pill → About panel (What's New / Tutorial / About). Label lazily once the runtime version resolves.
-const btnVersion = $("btn-version") as HTMLButtonElement;
-void getVersion().then((v) => (btnVersion.textContent = `v${v}`), () => undefined);
-btnVersion.onclick = () => openAbout();
+// Post-update What's New badge on the app menu button (replaces the old
+// permanent version pill; version now lives only in the About modal).
+void getVersion().then((v) => {
+  if (shouldShowWhatsNew(v, localStorage.getItem(WHATS_NEW_SEEN_KEY))) btnMenu.classList.add("badged");
+}, () => undefined);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
@@ -1819,6 +1820,9 @@ btnMenu.onclick = () => {
       foot.className = "menu-foot";
       el.appendChild(foot);
       mk(MENU_LABELS.checkUpdates, "", () => void updater.checkNow());
+      if (btnMenu.classList.contains("badged")) {
+        mk(MENU_LABELS.whatsNew + " •", "", () => openAbout("What's New"));
+      }
       mk(MENU_LABELS.settings, "⌘,", () => openSettings());
       mk(MENU_LABELS.about, "", () => openAbout());
     },
@@ -2130,9 +2134,17 @@ function openSettings(): void {
   });
 }
 
-// Opens the About panel (version pill, app menu, palette). Resolves the runtime version first.
+// Opens the About panel (app menu, palette). Resolves the runtime version first, then
+// marks What's New seen for this version so the ☰ badge clears.
 function openAbout(tab: AboutTab = "What's New"): void {
-  void getVersion().then((v) => openAboutModal(v, tab), () => openAboutModal("", tab));
+  void getVersion().then(
+    (v) => {
+      localStorage.setItem(WHATS_NEW_SEEN_KEY, v);
+      btnMenu.classList.remove("badged");
+      openAboutModal(v, tab);
+    },
+    () => openAboutModal("", tab),
+  );
 }
 
 // ---- quit guard ----
