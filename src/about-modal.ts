@@ -1,5 +1,6 @@
 // About panel: a tabbed overlay (What's New / Tutorial / About) opened from the
-// titlebar version pill and the app menu. Reuses the settings-modal CSS grammar
+// app menu (☰ "about sutra…" / "what's new •"), the palette `>about` command,
+// and the Settings "About Sutra →" link. Reuses the settings-modal CSS grammar
 // (.settings-overlay/.settings-modal/.settings-nav-item/.settings-content).
 // Content is static + bundled so the panel works offline.
 import { icon } from "./icons";

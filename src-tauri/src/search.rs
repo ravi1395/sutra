@@ -132,7 +132,13 @@ fn list_files_with_cap(root: String, cap: usize) -> Result<FileListing, String> 
         .require_git(false)
         .filter_entry(|entry| {
             // WalkBuilder's default already skips hidden entries; build dirs are
-            // skipped even when a repo forgets to gitignore them.
+            // skipped even when a repo forgets to gitignore them. Only prune
+            // actual subdirectories below the root — pruning the root entry
+            // itself (e.g. a workspace opened at a path literally named
+            // "target") or a top-level FILE named e.g. "dist" would be wrong.
+            if entry.depth() == 0 || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                return true;
+            }
             entry
                 .file_name()
                 .to_str()
@@ -235,6 +241,31 @@ mod tests {
         let out = list_files(dir.path().to_string_lossy().into_owned()).unwrap();
 
         assert_eq!(out.paths, vec!["visible.txt".to_string()]);
+    }
+
+    #[test]
+    fn list_files_keeps_top_level_file_named_like_skip_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Top-level FILE (not dir) named exactly like a skip-dir entry.
+        std::fs::write(dir.path().join("target"), "x").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "x").unwrap();
+        // Real target/ subdir should still be pruned.
+        std::fs::create_dir(dir.path().join("sub_target_dir")).unwrap();
+        std::fs::create_dir(dir.path().join("sub_target_dir").join("target")).unwrap();
+        std::fs::write(
+            dir.path()
+                .join("sub_target_dir")
+                .join("target")
+                .join("f.txt"),
+            "x",
+        )
+        .unwrap();
+
+        let out = list_files(dir.path().to_string_lossy().into_owned()).unwrap();
+
+        assert!(out.paths.contains(&"target".to_string()));
+        assert!(out.paths.contains(&"visible.txt".to_string()));
+        assert!(!out.paths.iter().any(|p| p.contains("sub_target_dir/target")));
     }
 
     #[test]
