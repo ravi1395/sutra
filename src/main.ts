@@ -2129,7 +2129,7 @@ function openSettings(): void {
   openSettingsModal({
     get: () => settings,
     apply: persistSettings,
-    version: getVersion(),
+    openAbout: () => openAbout(),
     shortcuts: shortcutEntries(),
   });
 }
