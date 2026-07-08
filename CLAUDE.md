@@ -17,7 +17,18 @@ Two-process: Rust (Tauri) owns FS/git/PTY/search; TypeScript owns all UI via IPC
 
 **IPC rule:** implement in `src-tauri/src/*.rs` → register in `lib.rs` `invoke_handler![]` → typed wrapper in `src/ipc.ts`. Never call `invoke` directly from UI.
 
-**Codebase queries:** use `graphify query "<intent>"` before grep — returns scoped subgraph faster. `graphify update .` after edits (AST-only).
+### Graphify (context budget — follow in order)
+Knowledge graph at `graphify-out/` covers the whole codebase. Use it to answer questions *without* reading files.
+
+1. **Any "where/what calls/how connected" question → graph first, files second:**
+   - `graphify query "<question>"` — scoped subgraph (~10–30 nodes with file:line)
+   - `graphify path "<A>" "<B>"` — call/dependency chain between two symbols (replaces multi-file Read walks)
+   - `graphify explain "<concept>"` — node + neighbors summary (replaces reading a whole module for orientation)
+2. **Read only the `file:line` spans the graph surfaces** (Read with offset/limit), never whole files for orientation.
+3. **Escalate to rg/Read only if** the graph returns nothing relevant, or you're editing/debugging exact code.
+4. **Never** Read `graph.json` (2.9 MB) or `GRAPH_REPORT.md` (39 KB) into main context; report only for broad architecture review, ideally via a subagent that returns conclusions.
+5. **Large explorations:** delegate graphify queries + follow-up span reads to a cheap subagent; return conclusions + file:line refs, not file contents.
+6. **After code edits:** `graphify update .` (AST-only, no API cost) so the graph stays truthful. After deleting code: add `--force`.
 
 ### Code map
 ```
