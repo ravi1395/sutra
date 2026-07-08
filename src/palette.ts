@@ -273,10 +273,12 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
     // Kick off the file fetch immediately and cache for this open (files is the default mode).
     opts.files().then(
       (listing) => {
+        if (!overlay) return;
         fileListing = listing;
         if (parsePaletteInput(input.value).mode === "files") render();
       },
       () => {
+        if (!overlay) return;
         fileFetchFailed = true;
         render();
       },
