@@ -169,11 +169,13 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   platforms).
 
 ### About, What's New & Tutorial
-- The **version pill** at the right of the title bar (e.g. `v2.1.0`) opens an
+- The **☰ app menu** (or the command palette's `>` commands mode) opens an
   About panel with three tabs: **What's New** (the bundled changelog), a short
   **Tutorial** (core workflows + a keyboard cheatsheet), and **About** (version
-  and links). Also reachable from the app menu and the command palette
-  (**About Sutra**, **What's New**).
+  and links) — **About Sutra** and **what's new** are both rows in the menu.
+- After an update, the ☰ button shows a small dot badge and its menu row reads
+  **what's new •** until you open What's New for the new version; there is no
+  persistent version pill in the UI.
 
 ### Editor
 - CodeMirror 6 with **line numbers**, one-dark theme, bracket matching, search,
@@ -370,6 +372,9 @@ instantly and persist in `localStorage` across launches.
 | `⌥⌘S` | Save All (dirty tabs) |
 | `⌘N` | New file (untitled tab) |
 | `⌘O` | Open folder |
+| `⌘P` | Command palette (search files) |
+| `⇧⌘P` | Command palette (run commands) |
+| `⌘T` | Go to symbol in workspace |
 | `⌘W` | Close tab |
 | `⌘X` / `⌘C` / `⌘V` | Cut / copy / paste |
 | `⌘Z` / `⇧⌘Z` | Undo / redo |

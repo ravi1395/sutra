@@ -321,6 +321,7 @@ pub fn run() {
             lang::lang_goto_definition,
             lang::lang_hover,
             search::search_dir,
+            search::list_files,
             watcher::watch_start,
             watcher::watch_stop,
             take_launch_path,

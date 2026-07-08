@@ -11,11 +11,45 @@ export interface WorkspaceActions {
   addFolder(): void;
   openFolder(): void;
   newWindow(): void;
-  /** Optional: open the settings modal (⌘,). */
-  openSettings?: () => void;
-  /** Optional: run a user-initiated update check that reports its outcome. */
-  checkForUpdates?: () => void;
 }
+
+// Single-home menu contract: a feature label appears in exactly one of these
+// lists (tested in tests/menu-scope.test.ts). Shortcuts + palette commands are
+// accelerators and may duplicate freely.
+//
+// MENU_LABELS is the single source of truth: both the exported verb arrays
+// and the actual rendered menu rows (mkRow below, and main.ts's mk builder)
+// read from it, so a label rename can't silently drift from the contract.
+export const MENU_LABELS = {
+  openFolder: "open folder…",
+  newWindow: "new window",
+  installCli: "install cli command",
+  updateCli: "update cli command",
+  commandPalette: "command palette",
+  problems: "problems",
+  sessions: "sessions",
+  whatsNew: "what's new",
+  checkUpdates: "check for updates…",
+  settings: "settings…",
+  about: "about sutra…",
+} as const;
+
+export const WORKSPACE_MENU_VERBS = [
+  MENU_LABELS.openFolder,
+  MENU_LABELS.newWindow,
+  MENU_LABELS.installCli,
+  MENU_LABELS.updateCli,
+] as const;
+
+export const APP_MENU_VERBS = [
+  MENU_LABELS.commandPalette,
+  MENU_LABELS.problems,
+  MENU_LABELS.sessions,
+  MENU_LABELS.checkUpdates,
+  MENU_LABELS.whatsNew,
+  MENU_LABELS.settings,
+  MENU_LABELS.about,
+] as const;
 
 export interface WorkspaceBarHandle {
   setCurrentWorkspace(path: string | null): void;
@@ -153,21 +187,15 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
         el.appendChild(row);
       };
 
-      mkRow("open folder…", "⌘O", () => actions.openFolder());
-      mkRow("new window", "⇧⌘N", () => actions.newWindow());
+      mkRow(MENU_LABELS.openFolder, "⌘O", () => actions.openFolder());
+      mkRow(MENU_LABELS.newWindow, "⇧⌘N", () => actions.newWindow());
       if (cliState !== "current") {
-        mkRow(cliState === "stale" ? "update cli command" : "install cli command", "", () => {
+        mkRow(cliState === "stale" ? MENU_LABELS.updateCli : MENU_LABELS.installCli, "", () => {
           void (async () => {
             const r = await cliInstall().catch((cmd: string) => cmd);
             if (r !== "installed") await navigator.clipboard?.writeText(r); // copy admin cmd
           })();
         });
-      }
-      if (actions.openSettings) {
-        mkRow("settings…", "⌘,", () => actions.openSettings!());
-      }
-      if (actions.checkForUpdates) {
-        mkRow("check for updates…", "", () => actions.checkForUpdates!());
       }
     }, "menu-card");
   }

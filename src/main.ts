@@ -66,6 +66,8 @@ import {
   runnerCancel,
   onRunnerDone,
   recentsPush,
+  listFiles,
+  langWorkspaceSymbols,
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
@@ -84,8 +86,8 @@ import {
   problemsPanelEl,
 } from "./diagnostics";
 import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
-import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
+import { mountWorkspaceBar, MENU_LABELS, type WorkspaceBarHandle } from "./menubar";
+import { mountPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -132,7 +134,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
-import { openAboutModal, type AboutTab } from "./about-modal";
+import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -424,7 +426,6 @@ void onFsChanged((payload) => {
 const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
-let symbolPalette: { open(): void }; // Cmd+T workspace symbol picker
 let gitBar: GitBarHandle; // assigned at boot
 let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
@@ -1711,13 +1712,15 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
-  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP") || (mod && e.code === "KeyK")) {
+  } else if (mod && e.shiftKey && e.code === "KeyP") {
     e.preventDefault();
-    palette.open();
+    palette.open(">"); // ⌘⇧P command mode
+  } else if (mod && e.code === "KeyP") {
+    e.preventDefault();
+    palette.open(); // ⌘P file mode
   } else if (mod && e.code === "KeyT") {
-    // Cmd+T / Ctrl+T: workspace symbol search backed by the lang engine.
     e.preventDefault();
-    symbolPalette.open();
+    palette.open("#"); // ⌘T symbol mode
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
     if (editor.isSplit) void editor.closeSplit();
@@ -1765,17 +1768,18 @@ btnTerm.innerHTML = icon("terminal", 17);
 btnComposer.innerHTML = icon("prompt-builder", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
-btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;
+btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘P</kbd>`;
 // Self-update pill beside the palette: hidden until a newer release is found.
 const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onError: (m) => void alertNative(m),
   onInfo: (m) => void alertNative(m),
 });
 btnMenu.innerHTML = icon("menu", 17);
-// Version pill → About panel (What's New / Tutorial / About). Label lazily once the runtime version resolves.
-const btnVersion = $("btn-version") as HTMLButtonElement;
-void getVersion().then((v) => (btnVersion.textContent = `v${v}`), () => undefined);
-btnVersion.onclick = () => openAbout();
+// Post-update What's New badge on the app menu button (replaces the old
+// permanent version pill; version now lives only in the About modal).
+void getVersion().then((v) => {
+  if (shouldShowWhatsNew(v, localStorage.getItem(WHATS_NEW_SEEN_KEY))) btnMenu.classList.add("badged");
+}, () => undefined);
 $("btn-back").innerHTML = icon("back", 16);
 $("btn-reload").innerHTML = icon("reload", 16);
 $("btn-refresh").innerHTML = icon("refresh", 15);
@@ -1812,15 +1816,18 @@ btnMenu.onclick = () => {
         };
         el.appendChild(row);
       };
-      mk("open folder…", "⌘O", () => actions.openFolder());
-      mk("command palette", "⌘K", () => palette.open());
-      mk("problems", "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
-      mk("sessions", "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
+      mk(MENU_LABELS.commandPalette, "⌘P", () => palette.open());
+      mk(MENU_LABELS.problems, "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
+      mk(MENU_LABELS.sessions, "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
       const foot = document.createElement("div");
       foot.className = "menu-foot";
       el.appendChild(foot);
-      mk("settings…", "⌘,", () => openSettings());
-      mk("about sutra…", "", () => openAbout());
+      mk(MENU_LABELS.checkUpdates, "", () => void updater.checkNow());
+      if (btnMenu.classList.contains("badged")) {
+        mk(MENU_LABELS.whatsNew + " •", "", () => openAbout("What's New"));
+      }
+      mk(MENU_LABELS.settings, "⌘,", () => openSettings());
+      mk(MENU_LABELS.about, "", () => openAbout());
     },
     "menu-card",
   );
@@ -1871,8 +1878,6 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
   newWindow: actions.newWindow,
-  openSettings: () => openSettings(),
-  checkForUpdates: () => void updater.checkNow(),
 });
 workspaceBar.setCurrentWorkspace(null);
 
@@ -2100,7 +2105,6 @@ function recentPaletteCommands(): Command[] {
   // every recentsPush.
   return recentsCache
     .filter((recent) => recent.path !== currentRoot)
-    .slice(0, 5)
     .map((recent) => ({
       id: `recent:${recent.path}`,
       title: `Open ${recent.name}`,
@@ -2109,10 +2113,14 @@ function recentPaletteCommands(): Command[] {
     }));
 }
 
-palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
-
-// Workspace symbol picker (Cmd+T) backed by the lang engine.
-symbolPalette = mountSymbolPalette((path, line) => void editor.openFile(path, line));
+palette = mountPalette({
+  commands: () => paletteCommands,
+  workspaces: () => recentPaletteCommands(),
+  files: () => listFiles(currentRoot ?? ""),
+  symbols: (query, limit) => langWorkspaceSymbols(query, limit),
+  onOpenFile: (path, line) => void editor.openFile(path, line),
+  resolveFile: (rel) => `${currentRoot}/${rel}`,
+});
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {
@@ -2127,14 +2135,22 @@ function openSettings(): void {
   openSettingsModal({
     get: () => settings,
     apply: persistSettings,
-    version: getVersion(),
+    openAbout: () => openAbout(),
     shortcuts: shortcutEntries(),
   });
 }
 
-// Opens the About panel (version pill, app menu, palette). Resolves the runtime version first.
+// Opens the About panel (app menu, palette). Resolves the runtime version first, then
+// marks What's New seen for this version so the ☰ badge clears.
 function openAbout(tab: AboutTab = "What's New"): void {
-  void getVersion().then((v) => openAboutModal(v, tab), () => openAboutModal("", tab));
+  void getVersion().then(
+    (v) => {
+      localStorage.setItem(WHATS_NEW_SEEN_KEY, v);
+      btnMenu.classList.remove("badged");
+      openAboutModal(v, tab);
+    },
+    () => openAboutModal("", tab),
+  );
 }
 
 // ---- quit guard ----

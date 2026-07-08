@@ -1,5 +1,6 @@
 // About panel: a tabbed overlay (What's New / Tutorial / About) opened from the
-// titlebar version pill and the app menu. Reuses the settings-modal CSS grammar
+// app menu (☰ "about sutra…" / "what's new •"), the palette `>about` command,
+// and the Settings "About Sutra →" link. Reuses the settings-modal CSS grammar
 // (.settings-overlay/.settings-modal/.settings-nav-item/.settings-content).
 // Content is static + bundled so the panel works offline.
 import { icon } from "./icons";
@@ -23,6 +24,15 @@ export interface TutorialShortcut {
 
 const REPO_URL = "https://github.com/ravi1395/sutra";
 const RELEASES_URL = `${REPO_URL}/releases`;
+
+// Post-update discovery: the ☰ button shows a dot badge until the user views
+// What's New for the current version. Gating is a pure function so it's testable.
+export const WHATS_NEW_SEEN_KEY = "sutra.whatsNewSeen";
+
+/** True when the running version exists and differs from the last version whose What's New was viewed. */
+export function shouldShowWhatsNew(current: string, seen: string | null): boolean {
+  return current !== "" && current !== seen;
+}
 
 export const ABOUT_TABS = ["What's New", "Tutorial", "About"] as const;
 export type AboutTab = (typeof ABOUT_TABS)[number];
@@ -70,7 +80,7 @@ export const TUTORIAL_SECTIONS: TutorialSection[] = [
   },
   {
     title: "Find things fast",
-    body: "⌘K opens the command palette over files and commands. ⌘F finds within a file; ⇧⌘F searches the whole folder.",
+    body: "⌘P searches files and runs commands (> commands, # symbols, @ workspaces). ⌘F finds within a file; ⇧⌘F searches the whole folder.",
   },
   {
     title: "Automations",
@@ -86,7 +96,7 @@ export const TUTORIAL_SECTIONS: TutorialSection[] = [
 export const TUTORIAL_SHORTCUTS: TutorialShortcut[] = [
   { title: "Open folder", keys: "⌘O" },
   { title: "Save", keys: "⌘S" },
-  { title: "Command palette", keys: "⌘K" },
+  { title: "Command palette", keys: "⌘P" },
   { title: "Find in file", keys: "⌘F" },
   { title: "Search folder", keys: "⇧⌘F" },
   { title: "Toggle comment", keys: "⌘/" },

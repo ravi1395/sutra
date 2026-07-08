@@ -1,7 +1,7 @@
-// Command palette: fuzzy-searchable list of global actions, bound to Cmd+P / Cmd+Shift+P.
-// Also exports mountSymbolPalette (Cmd+T workspace symbols) and mountLocationPicker
+// Unified command palette: prefix-routed four-mode overlay (files / >commands / #symbols /
+// @workspaces), bound to Cmd+P / Cmd+Shift+P / Cmd+T. Also exports mountLocationPicker
 // (goto-definition multi-candidate chooser).
-import { langWorkspaceSymbols, type Symbol as WorkspaceSymbol, type Location } from "./ipc";
+import { type Symbol as WorkspaceSymbol, type Location, type FileListing } from "./ipc";
 export interface Command {
   id: string;
   title: string;
@@ -11,12 +11,31 @@ export interface Command {
 }
 
 export interface PaletteHandle {
-  open(): void;
+  open(prefill?: string): void;
 }
 
 export interface PaletteSection {
   head: string;
   items: Command[];
+}
+
+export type PaletteMode = "files" | "commands" | "symbols" | "workspaces";
+
+/** Route raw palette input to a mode by its leading prefix; the rest is the query. */
+export function parsePaletteInput(raw: string): { mode: PaletteMode; query: string } {
+  if (raw.startsWith(">")) return { mode: "commands", query: raw.slice(1).trim() };
+  if (raw.startsWith("#")) return { mode: "symbols", query: raw.slice(1).trim() };
+  if (raw.startsWith("@")) return { mode: "workspaces", query: raw.slice(1).trim() };
+  return { mode: "files", query: raw.trim() };
+}
+
+export interface PaletteOpts {
+  commands: () => Command[]; // command mode ('>') — verbs only
+  workspaces: () => Command[]; // workspace mode ('@') — recents as runnable rows
+  files: () => Promise<FileListing>; // file mode (no prefix) — fetched once per open
+  symbols: (query: string, limit: number) => Promise<WorkspaceSymbol[]>; // '#' mode
+  onOpenFile: (path: string, line?: number) => void;
+  resolveFile: (rel: string) => string; // relative file-mode path -> absolute path for onOpenFile
 }
 
 /** Group filtered commands into ordered sections, dropping empty ones. */
@@ -46,13 +65,29 @@ function fuzzyScore(query: string, text: string): number | null {
   return queryIdx === q.length ? score : null;
 }
 
-export function mountPalette(commands: Command[] | (() => Command[])): PaletteHandle {
+// One rendered palette row: either a non-selectable header/note, or a selectable row whose
+// `onRun` gets pushed onto the flat `activeRows` list so the keyboard handler stays mode-agnostic.
+type ListItem =
+  | { kind: "header"; text: string }
+  | { kind: "note"; text: string }
+  | { kind: "row"; title: string; detail?: string; onRun: () => void };
+
+export function mountPalette(opts: PaletteOpts): PaletteHandle {
   let overlay: HTMLElement | null = null;
   let selectedIdx = 0;
-  let filteredCommands: Command[] = [];
   let isOpen = false;
+  // Flat run-thunk per rendered (selectable) row — every mode's render() rebuilds this,
+  // so arrow/Enter selection logic never needs to know which mode is active.
+  let activeRows: Array<() => void> = [];
 
-  const currentCommands = (): Command[] => typeof commands === "function" ? commands() : commands;
+  // File mode: fetched once per open and cached; null = loading, fileFetchFailed = error.
+  let fileListing: FileListing | null = null;
+  let fileFetchFailed = false;
+
+  // Symbol mode: debounced IPC results, cached against the query they were fetched for.
+  let symbolResults: WorkspaceSymbol[] = [];
+  let lastSymbolQuery = "";
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function close(): void {
     if (overlay) {
@@ -61,56 +96,146 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
     }
     isOpen = false;
     selectedIdx = 0;
+    activeRows = [];
+    fileListing = null;
+    fileFetchFailed = false;
+    symbolResults = [];
+    lastSymbolQuery = "";
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  }
+
+  function buildFiles(query: string): ListItem[] {
+    if (fileFetchFailed) return [{ kind: "note", text: "no file index — check folder access" }];
+    if (fileListing === null) return [{ kind: "note", text: "searching files…" }];
+    const scored = fileListing.paths
+      .map((path) => ({ path, score: fuzzyScore(query, path) }))
+      .filter((x): x is { path: string; score: number } => x.score !== null)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 100);
+    const items: ListItem[] = scored.map(({ path }) => {
+      const segments = path.split("/");
+      const base = segments.pop() ?? path;
+      return {
+        kind: "row",
+        title: base,
+        detail: segments.join("/"),
+        onRun: () => opts.onOpenFile(opts.resolveFile(path)),
+      };
+    });
+    if (fileListing.truncated) items.push({ kind: "note", text: "20k+ files — narrow your query" });
+    return items;
+  }
+
+  function buildCommands(query: string, source: Command[]): ListItem[] {
+    const scored = source
+      .map((cmd) => ({ cmd, score: fuzzyScore(query, cmd.title) }))
+      .filter((x): x is { cmd: Command; score: number } => x.score !== null)
+      .sort((a, b) => b.score - a.score);
+    const sections = groupCommands(scored.map((x) => x.cmd));
+    const items: ListItem[] = [];
+    for (const section of sections) {
+      items.push({ kind: "header", text: section.head });
+      for (const cmd of section.items) items.push({ kind: "row", title: cmd.title, detail: cmd.shortcut, onRun: cmd.run });
+    }
+    return items;
+  }
+
+  function buildWorkspaces(query: string): ListItem[] {
+    return opts.workspaces()
+      .map((cmd) => ({ cmd, score: fuzzyScore(query, cmd.title) }))
+      .filter((x): x is { cmd: Command; score: number } => x.score !== null)
+      .sort((a, b) => b.score - a.score)
+      .map(({ cmd }) => ({ kind: "row" as const, title: cmd.title, detail: cmd.shortcut, onRun: cmd.run }));
+  }
+
+  function buildSymbols(): ListItem[] {
+    // Fuzzy-rank client-side against the query the results were fetched for; the backend
+    // already filtered, this just orders the rendered rows to match keyboard selection.
+    const scored = symbolResults
+      .map((sym) => ({ sym, score: fuzzyScore(lastSymbolQuery, sym.name) ?? fuzzyScore(lastSymbolQuery, sym.path) ?? 0 }))
+      .sort((a, b) => b.score - a.score);
+    return scored.map(({ sym }) => ({
+      kind: "row" as const,
+      title: sym.name,
+      detail: `${sym.kind}  ${sym.path.split("/").pop() ?? sym.path}`,
+      onRun: () => opts.onOpenFile(sym.path, sym.selectionRange.start.line + 1),
+    }));
+  }
+
+  // Debounce the symbol-mode IPC call to avoid spamming on every keystroke.
+  function scheduleSymbolQuery(query: string): void {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      if (!overlay) return;
+      opts.symbols(query, 100)
+        .then((syms) => {
+          if (!overlay) return;
+          symbolResults = syms ?? [];
+          lastSymbolQuery = query;
+          render();
+        })
+        .catch(() => {});
+    }, 150);
   }
 
   function render(): void {
     if (!overlay) return;
     const input = overlay.querySelector<HTMLInputElement>(".palette-input")!;
     const list = overlay.querySelector<HTMLElement>(".palette-list")!;
-    const query = input.value.trim();
+    const { mode, query } = parsePaletteInput(input.value);
 
-    // Filter and sort commands
-    const scored = currentCommands()
-      .map((cmd) => ({ cmd, score: fuzzyScore(query, cmd.title) }))
-      .filter((x) => x.score !== null)
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    const items: ListItem[] =
+      mode === "files" ? buildFiles(query) :
+      mode === "commands" ? buildCommands(query, opts.commands()) :
+      mode === "workspaces" ? buildWorkspaces(query) :
+      buildSymbols();
 
-    // Flatten in grouped (visual) order so selectedIdx maps to the highlighted row.
-    const sections = groupCommands(scored.map((x) => x.cmd));
-    filteredCommands = sections.flatMap((section) => section.items);
-    if (selectedIdx >= filteredCommands.length) selectedIdx = 0;
+    const rowCount = items.reduce((n, item) => n + (item.kind === "row" ? 1 : 0), 0);
+    if (rowCount === 0 || selectedIdx >= rowCount) selectedIdx = 0;
 
+    activeRows = [];
     list.innerHTML = "";
-    let flatIdx = 0;
-    for (const section of sections) {
-      const head = document.createElement("div");
-      head.className = "palette-section-head";
-      head.textContent = section.head;
-      list.appendChild(head);
-      for (const cmd of section.items) {
-        const idx = flatIdx++;
+    let rowIdx = 0;
+    for (const item of items) {
+      if (item.kind === "header") {
+        const head = document.createElement("div");
+        head.className = "palette-section-head";
+        head.textContent = item.text;
+        list.appendChild(head);
+      } else if (item.kind === "note") {
+        const note = document.createElement("div");
+        note.className = "palette-section-head";
+        note.textContent = item.text;
+        list.appendChild(note);
+      } else {
+        const idx = rowIdx++;
+        activeRows.push(item.onRun);
         const row = document.createElement("div");
         row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
         const title = document.createElement("span");
         title.className = "palette-title";
-        title.textContent = cmd.title;
+        title.textContent = item.title;
         row.appendChild(title);
-        if (cmd.shortcut) {
-          const shortcut = document.createElement("span");
-          shortcut.className = "palette-shortcut";
-          shortcut.textContent = cmd.shortcut;
-          row.appendChild(shortcut);
+        if (item.detail) {
+          const detail = document.createElement("span");
+          detail.className = "palette-shortcut";
+          detail.textContent = item.detail;
+          row.appendChild(detail);
         }
         row.onclick = () => {
           close();
-          cmd.run();
+          item.onRun();
         };
         list.appendChild(row);
       }
     }
   }
 
-  function open(): void {
+  function open(prefill?: string): void {
     if (isOpen) {
       close();
       return; // toggle: open again closes
@@ -126,7 +251,7 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
     const input = document.createElement("input");
     input.className = "palette-input";
     input.type = "text";
-    input.placeholder = "pull a thread…";
+    input.placeholder = "Search files…  (> commands  # symbols  @ workspaces)";
     input.spellcheck = false;
     input.autocomplete = "off";
 
@@ -135,35 +260,57 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
 
     const footer = document.createElement("div");
     footer.className = "palette-footer";
-    footer.innerHTML = `<span><span class="kbd">↑↓</span> select</span><span><span class="kbd">↵</span> run</span><span><span class="kbd">esc</span> close</span>`;
+    footer.innerHTML = `<span><span class="kbd">></span> commands</span><span><span class="kbd">#</span> symbols</span><span><span class="kbd">@</span> workspaces</span><span><span class="kbd">↵</span> open</span><span><span class="kbd">esc</span> close</span>`;
 
     container.append(input, list, footer);
     overlay.appendChild(container);
     document.body.appendChild(overlay);
 
     input.focus();
+    input.value = prefill ?? "";
+    input.setSelectionRange(input.value.length, input.value.length);
+
+    // Kick off the file fetch immediately and cache for this open (files is the default mode).
+    opts.files().then(
+      (listing) => {
+        if (!overlay) return;
+        fileListing = listing;
+        if (parsePaletteInput(input.value).mode === "files") render();
+      },
+      () => {
+        if (!overlay) return;
+        fileFetchFailed = true;
+        render();
+      },
+    );
+
+    const initial = parsePaletteInput(input.value);
+    if (initial.mode === "symbols") scheduleSymbolQuery(initial.query);
+
     render();
 
     input.addEventListener("input", () => {
       selectedIdx = 0;
+      const { mode, query } = parsePaletteInput(input.value);
+      if (mode === "symbols") scheduleSymbolQuery(query);
       render();
     });
 
     input.addEventListener("keydown", (e) => {
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        selectedIdx = (selectedIdx - 1 + filteredCommands.length) % filteredCommands.length;
+        if (activeRows.length) selectedIdx = (selectedIdx - 1 + activeRows.length) % activeRows.length;
         render();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
-        selectedIdx = (selectedIdx + 1) % filteredCommands.length;
+        if (activeRows.length) selectedIdx = (selectedIdx + 1) % activeRows.length;
         render();
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (filteredCommands[selectedIdx]) {
-          const cmd = filteredCommands[selectedIdx];
+        const run = activeRows[selectedIdx];
+        if (run) {
           close();
-          cmd.run();
+          run();
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -172,138 +319,6 @@ export function mountPalette(commands: Command[] | (() => Command[])): PaletteHa
     });
 
     // Click outside to close
-    overlay.addEventListener("mousedown", (e) => {
-      if (e.target === overlay) close();
-    });
-  }
-
-  return { open };
-}
-
-// ---------------------------------------------------------------------------
-// Workspace symbol picker  (Cmd+T)
-// ---------------------------------------------------------------------------
-
-/**
- * Open a palette-style overlay for workspace symbols backed by lang_workspace_symbols.
- * Accepts a navigation callback to open the selected symbol's file at its line.
- */
-export function mountSymbolPalette(
-  onNavigate: (path: string, line: number) => void,
-): { open(): void } {
-  let overlay: HTMLElement | null = null;
-  let selectedIdx = 0;
-  let results: WorkspaceSymbol[] = [];
-  // Fuzzy-sorted render order; Enter/selection must index into THIS, not `results`.
-  let ordered: WorkspaceSymbol[] = [];
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function close(): void {
-    overlay?.remove();
-    overlay = null;
-    selectedIdx = 0;
-    results = [];
-    ordered = [];
-  }
-
-  function renderResults(list: HTMLElement, query: string): void {
-    // Fuzzy-rank in JS since the backend already returned a filtered set.
-    const scored = results
-      .map((s) => ({ sym: s, score: fuzzyScore(query, s.name) ?? fuzzyScore(query, s.path) ?? 0 }))
-      .sort((a, b) => b.score - a.score);
-    // Persist the sorted order so keyboard selection matches the rendered rows.
-    ordered = scored.map(({ sym }) => sym);
-    list.innerHTML = "";
-    ordered.forEach((sym, idx) => {
-      const row = document.createElement("div");
-      row.className = `palette-row${idx === selectedIdx ? " selected" : ""}`;
-      const name = document.createElement("span");
-      name.className = "palette-title";
-      name.textContent = sym.name;
-      const detail = document.createElement("span");
-      detail.className = "palette-shortcut";
-      detail.textContent = `${sym.kind}  ${sym.path.split("/").pop() ?? sym.path}`;
-      row.append(name, detail);
-      row.onclick = () => {
-        close();
-        onNavigate(sym.path, sym.selectionRange.start.line + 1);
-      };
-      list.appendChild(row);
-    });
-  }
-
-  function open(): void {
-    if (overlay) { close(); return; }
-
-    overlay = document.createElement("div");
-    overlay.className = "palette-overlay";
-
-    const container = document.createElement("div");
-    container.className = "palette-container";
-
-    const input = document.createElement("input");
-    input.className = "palette-input";
-    input.type = "text";
-    input.placeholder = "Go to symbol in workspace…";
-    input.spellcheck = false;
-    input.autocomplete = "off";
-
-    const list = document.createElement("div");
-    list.className = "palette-list";
-
-    const footer = document.createElement("div");
-    footer.className = "palette-footer";
-    footer.innerHTML = `<span><span class="kbd">↑↓</span> select</span><span><span class="kbd">↵</span> go to</span><span><span class="kbd">esc</span> close</span>`;
-
-    container.append(input, list, footer);
-    overlay.appendChild(container);
-    document.body.appendChild(overlay);
-    input.focus();
-
-    // Debounce the IPC call to avoid spamming on every keystroke.
-    function scheduleQuery(query: string): void {
-      if (debounceTimer !== null) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null;
-        if (!overlay) return;
-        langWorkspaceSymbols(query, 100)
-          .then((syms) => {
-            if (!overlay) return;
-            results = syms ?? [];
-            selectedIdx = 0;
-            renderResults(list, query);
-          })
-          .catch(() => {});
-      }, 150);
-    }
-
-    scheduleQuery("");
-
-    input.addEventListener("input", () => {
-      selectedIdx = 0;
-      scheduleQuery(input.value.trim());
-    });
-
-    input.addEventListener("keydown", (e) => {
-      const count = ordered.length;
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        selectedIdx = (selectedIdx - 1 + count) % Math.max(1, count);
-        renderResults(list, input.value.trim());
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        selectedIdx = (selectedIdx + 1) % Math.max(1, count);
-        renderResults(list, input.value.trim());
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        const sym = ordered[selectedIdx];
-        if (sym) { close(); onNavigate(sym.path, sym.selectionRange.start.line + 1); }
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-      }
-    });
-
     overlay.addEventListener("mousedown", (e) => {
       if (e.target === overlay) close();
     });

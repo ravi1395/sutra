@@ -5,6 +5,7 @@ import {
   ABOUT_TABS,
   TUTORIAL_SHORTCUTS,
   TUTORIAL_SECTIONS,
+  shouldShowWhatsNew,
   type Release,
 } from "../src/about-modal";
 
@@ -41,4 +42,14 @@ test("TUTORIAL content is present and well-formed", () => {
   for (const s of TUTORIAL_SECTIONS) {
     assert.ok(s.title.length > 0 && s.body.length > 0);
   }
+});
+
+test("shouldShowWhatsNew: unseen or newer version → badge", () => {
+  assert.equal(shouldShowWhatsNew("2.2.0", null), true);
+  assert.equal(shouldShowWhatsNew("2.2.0", "2.1.1"), true);
+});
+
+test("shouldShowWhatsNew: seen version or unknown version → no badge", () => {
+  assert.equal(shouldShowWhatsNew("2.2.0", "2.2.0"), false);
+  assert.equal(shouldShowWhatsNew("", null), false);
 });

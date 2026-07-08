@@ -22,7 +22,7 @@ export interface ShortcutEntry {
 export interface SettingsModalDeps {
   get: () => UserSettings;
   apply: (next: UserSettings) => void;
-  version: Promise<string>;
+  openAbout: () => void;
   shortcuts: ShortcutEntry[];
   /** Current workspace root; enables the per-root Harness controls when present. */
   getRoot?: () => string | null;
@@ -268,7 +268,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     content.replaceChildren(head("Shortcuts"), table);
   }
 
-  // About section: description, runtime version, reset-all.
+  // About section: identity + link out to the About modal (sole version surface) + reset-all.
   function renderAbout(): void {
     const wordmark = document.createElement("h2");
     wordmark.className = "settings-wordmark";
@@ -282,13 +282,13 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       "Three panes, no ceremony: file tree, CodeMirror 6 multi-tab editor, and " +
       "integrated terminals — with a git diff gutter, per-hunk revert, project " +
       "search, live preview, and AI agent edit tracking.";
-    const ver = document.createElement("p");
-    ver.className = "settings-version";
-    ver.textContent = "Version —";
-    void deps.version.then(
-      (v) => (ver.textContent = `Version ${v}`),
-      () => undefined,
-    );
+    const aboutLink = document.createElement("button");
+    aboutLink.className = "settings-reset";
+    aboutLink.textContent = "About Sutra →";
+    aboutLink.onclick = () => {
+      close();
+      deps.openAbout();
+    };
     const reset = document.createElement("button");
     reset.className = "settings-reset";
     reset.textContent = "Reset all settings";
@@ -296,7 +296,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       deps.apply({ ...DEFAULT_SETTINGS });
       renderSection(activeSection);
     };
-    content.replaceChildren(head("About"), wordmark, tagline, desc, ver, reset);
+    content.replaceChildren(head("About"), wordmark, tagline, desc, aboutLink, reset);
   }
 
   const renderers: Record<Section, () => void> = {

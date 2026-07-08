@@ -41,10 +41,10 @@ src/
   terminal.ts          xterm sessions, PTY lifecycle, tab bar
   layout.ts            drag-resize splitters
   menubar.ts           in-window menu (native macOS menu suppressed in lib.rs)
-  palette.ts           Cmd+P command palette | Cmd+T symbol picker | goto-def chooser
+  palette.ts           Cmd+P unified palette (files | > commands | # symbols | @ workspaces) | goto-def chooser
   workspace.ts         root folder state, recents, localStorage
   settings.ts          UserSettings model + helpers  |  settings-modal.ts  UI modal
-  about-modal.ts       version pill → What's New / Tutorial / About (bundled RELEASES)
+  about-modal.ts       ☰ menu / palette → About modal (What's New / Tutorial / About, bundled RELEASES); post-update What's New badge gating
   preview.ts           Markdown/HTML split preview   |  browser.ts  localhost iframe
   search.ts / search-panel.ts  project-wide file search
   gitbar.ts            branch whisper + dropdown  |  git-index.ts  worktree helpers
@@ -98,6 +98,7 @@ tests/  one .test.ts per frontend module (node:test)
 - Diagnostics: fs-settle 1 s → jobs (120 s cap each); tool failure keeps last-good diags (`:toolfail:` source); turn tests via runner id `test:<root>:<turnId>` (10 min cap); fs trigger ignores build outputs + hidden dirs (`target`/`node_modules`/`dist`/`.*`) — diag jobs write `target/**` and must never re-trigger themselves
 - Poll cadences: agent tracker + turn poll 1.5 s piggyback; sessions panel polls cheap, full only for active roots
 - Watcher noise filter: fs-changed drops contents of `node_modules`/`target`/`dist` and `.git/objects`+`.git/logs`; keeps dir-itself events, `.git/HEAD`/`index`/`refs/**` (gitbar + gutter refresh after commit/checkout), and all other hidden dirs (open-tab reload, tree)
+- Palette file mode: list_files IPC, gitignore-respected, 20k cap; ⌘K permanently unbound (reserved)
 
 ## State
 - Version: v2.1.1 — bump all 3 in lockstep: `package.json:4`, `src-tauri/Cargo.toml:3`, `src-tauri/tauri.conf.json:4`. Update this line every bump. **v2.2.0 bump pending GUI verification of multi-window** (`feat/multi-window` branch: multi-process windows are code-complete + unit-tested, but process-spawn/focus-IPC/Dock behavior needs a manual app smoke pass via `sutra-verify` before the version moves — see "done = behavior observed").

@@ -248,6 +248,12 @@ export const searchDir = (
   isRegex = false,
 ) => invoke<SearchResult>("search_dir", { root, pattern, caseInsensitive, isRegex });
 
+export interface FileListing {
+  paths: string[];
+  truncated: boolean;
+}
+export const listFiles = (root: string) => invoke<FileListing>("list_files", { root });
+
 // Clipboard wrappers over tauri-plugin-clipboard-manager.
 export const clipboardRead = (): Promise<string> => readText();
 export const clipboardWrite = (text: string): Promise<void> => writeText(text);
