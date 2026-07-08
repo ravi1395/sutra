@@ -105,6 +105,69 @@ pub fn search_dir(
     Ok(SearchResult { matches, truncated })
 }
 
+const MAX_FILES: usize = 20_000;
+const SKIP_DIRS: [&str; 3] = ["node_modules", "target", "dist"];
+
+#[derive(Serialize)]
+pub struct FileListing {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
+/// Workspace file listing for the palette's file mode: gitignore-respecting,
+/// hidden + build dirs skipped, workspace-relative paths, hard-capped.
+#[tauri::command]
+pub fn list_files(root: String) -> Result<FileListing, String> {
+    list_files_with_cap(root, MAX_FILES)
+}
+
+fn list_files_with_cap(root: String, cap: usize) -> Result<FileListing, String> {
+    let root_path = std::path::PathBuf::from(&root);
+    let mut paths = Vec::new();
+    let mut truncated = false;
+
+    let walker = ignore::WalkBuilder::new(&root)
+        // WalkBuilder only honors .gitignore inside an actual git repo by
+        // default; the workspace root passed here need not be one.
+        .require_git(false)
+        .filter_entry(|entry| {
+            // WalkBuilder's default already skips hidden entries; build dirs are
+            // skipped even when a repo forgets to gitignore them.
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| !SKIP_DIRS.contains(&name))
+                .unwrap_or(true)
+        })
+        .build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(&root_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if paths.len() >= cap {
+            truncated = true;
+            break;
+        }
+        paths.push(rel_str);
+    }
+
+    Ok(FileListing { paths, truncated })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +204,49 @@ mod tests {
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].text, "foo1");
+    }
+
+    #[test]
+    fn list_files_returns_relative_paths_and_respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("kept.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("nested.rs"), "x").unwrap();
+
+        let out = list_files(dir.path().to_string_lossy().into_owned()).unwrap();
+
+        assert!(out.paths.contains(&"kept.txt".to_string()));
+        assert!(out.paths.contains(&"sub/nested.rs".to_string()));
+        assert!(!out.paths.iter().any(|p| p.contains("ignored.txt")));
+        assert!(!out.truncated);
+    }
+
+    #[test]
+    fn list_files_skips_hidden_and_build_dirs_even_without_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        for d in ["node_modules", "target", "dist", ".hidden"] {
+            std::fs::create_dir(dir.path().join(d)).unwrap();
+            std::fs::write(dir.path().join(d).join("f.txt"), "x").unwrap();
+        }
+        std::fs::write(dir.path().join("visible.txt"), "x").unwrap();
+
+        let out = list_files(dir.path().to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(out.paths, vec!["visible.txt".to_string()]);
+    }
+
+    #[test]
+    fn list_files_caps_at_limit_and_flags_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..15 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+
+        let out = list_files_with_cap(dir.path().to_string_lossy().into_owned(), 10).unwrap();
+
+        assert_eq!(out.paths.len(), 10);
+        assert!(out.truncated);
     }
 }
