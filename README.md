@@ -370,6 +370,9 @@ instantly and persist in `localStorage` across launches.
 | `⌥⌘S` | Save All (dirty tabs) |
 | `⌘N` | New file (untitled tab) |
 | `⌘O` | Open folder |
+| `⌘P` | Command palette (search files) |
+| `⇧⌘P` | Command palette (run commands) |
+| `⌘T` | Go to symbol in workspace |
 | `⌘W` | Close tab |
 | `⌘X` / `⌘C` / `⌘V` | Cut / copy / paste |
 | `⌘Z` / `⇧⌘Z` | Undo / redo |

@@ -79,7 +79,7 @@ export const TUTORIAL_SECTIONS: TutorialSection[] = [
   },
   {
     title: "Find things fast",
-    body: "⌘K opens the command palette over files and commands. ⌘F finds within a file; ⇧⌘F searches the whole folder.",
+    body: "⌘P searches files and runs commands (> commands, # symbols, @ workspaces). ⌘F finds within a file; ⇧⌘F searches the whole folder.",
   },
   {
     title: "Automations",
@@ -95,7 +95,7 @@ export const TUTORIAL_SECTIONS: TutorialSection[] = [
 export const TUTORIAL_SHORTCUTS: TutorialShortcut[] = [
   { title: "Open folder", keys: "⌘O" },
   { title: "Save", keys: "⌘S" },
-  { title: "Command palette", keys: "⌘K" },
+  { title: "Command palette", keys: "⌘P" },
   { title: "Find in file", keys: "⌘F" },
   { title: "Search folder", keys: "⇧⌘F" },
   { title: "Toggle comment", keys: "⌘/" },

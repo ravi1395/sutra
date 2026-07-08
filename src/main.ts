@@ -66,6 +66,8 @@ import {
   runnerCancel,
   onRunnerDone,
   recentsPush,
+  listFiles,
+  langWorkspaceSymbols,
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
@@ -85,7 +87,7 @@ import {
 } from "./diagnostics";
 import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
 import { mountWorkspaceBar, MENU_LABELS, type WorkspaceBarHandle } from "./menubar";
-import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
+import { mountPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
   mountAutomationBar,
@@ -424,7 +426,6 @@ void onFsChanged((payload) => {
 const whisperBar = $("whisper-bar");
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
-let symbolPalette: { open(): void }; // Cmd+T workspace symbol picker
 let gitBar: GitBarHandle; // assigned at boot
 let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
@@ -1711,13 +1712,15 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyB") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
-  } else if ((mod && e.code === "KeyP") || (mod && e.shiftKey && e.code === "KeyP") || (mod && e.code === "KeyK")) {
+  } else if (mod && e.shiftKey && e.code === "KeyP") {
     e.preventDefault();
-    palette.open();
+    palette.open(">"); // ⌘⇧P command mode
+  } else if (mod && e.code === "KeyP") {
+    e.preventDefault();
+    palette.open(); // ⌘P file mode
   } else if (mod && e.code === "KeyT") {
-    // Cmd+T / Ctrl+T: workspace symbol search backed by the lang engine.
     e.preventDefault();
-    symbolPalette.open();
+    palette.open("#"); // ⌘T symbol mode
   } else if (mod && e.code === "Backslash") {
     e.preventDefault();
     if (editor.isSplit) void editor.closeSplit();
@@ -1765,7 +1768,7 @@ btnTerm.innerHTML = icon("terminal", 17);
 btnComposer.innerHTML = icon("prompt-builder", 17);
 btnDiff.innerHTML = icon("git-compare", 17);
 btnBrowser.innerHTML = icon("world", 17);
-btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘K</kbd>`;
+btnPalette.innerHTML = `${icon("command", 14)}<span class="pal-text">Search files, run commands…</span><kbd>⌘P</kbd>`;
 // Self-update pill beside the palette: hidden until a newer release is found.
 const updater = mountUpdater($("btn-update") as HTMLButtonElement, {
   onError: (m) => void alertNative(m),
@@ -2102,7 +2105,6 @@ function recentPaletteCommands(): Command[] {
   // every recentsPush.
   return recentsCache
     .filter((recent) => recent.path !== currentRoot)
-    .slice(0, 5)
     .map((recent) => ({
       id: `recent:${recent.path}`,
       title: `Open ${recent.name}`,
@@ -2111,10 +2113,14 @@ function recentPaletteCommands(): Command[] {
     }));
 }
 
-palette = mountPalette(() => [...recentPaletteCommands(), ...paletteCommands]);
-
-// Workspace symbol picker (Cmd+T) backed by the lang engine.
-symbolPalette = mountSymbolPalette((path, line) => void editor.openFile(path, line));
+palette = mountPalette({
+  commands: () => paletteCommands,
+  workspaces: () => recentPaletteCommands(),
+  files: () => listFiles(currentRoot ?? ""),
+  symbols: (query, limit) => langWorkspaceSymbols(query, limit),
+  onOpenFile: (path, line) => void editor.openFile(path, line),
+  resolveFile: (rel) => `${currentRoot}/${rel}`,
+});
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.
 function shortcutEntries(): ShortcutEntry[] {

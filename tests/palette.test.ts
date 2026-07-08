@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { groupCommands, type Command } from "../src/palette";
+import { groupCommands, parsePaletteInput, type Command } from "../src/palette";
 
 test("groupCommands orders recent before verbs and drops empties", () => {
   const noop = () => {};
@@ -11,4 +11,16 @@ test("groupCommands orders recent before verbs and drops empties", () => {
 
   assert.deepEqual(groupCommands(cmds).map((section) => section.head), ["recent", "verbs"]);
   assert.deepEqual(groupCommands([]).length, 0);
+});
+
+test("parsePaletteInput routes prefixes to modes", () => {
+  assert.deepEqual(parsePaletteInput("edi"), { mode: "files", query: "edi" });
+  assert.deepEqual(parsePaletteInput(">set"), { mode: "commands", query: "set" });
+  assert.deepEqual(parsePaletteInput("# Editor"), { mode: "symbols", query: "Editor" });
+  assert.deepEqual(parsePaletteInput("@sutra"), { mode: "workspaces", query: "sutra" });
+});
+
+test("parsePaletteInput: bare or deleted prefix falls back to file mode", () => {
+  assert.deepEqual(parsePaletteInput(""), { mode: "files", query: "" });
+  assert.deepEqual(parsePaletteInput(">"), { mode: "commands", query: "" });
 });
