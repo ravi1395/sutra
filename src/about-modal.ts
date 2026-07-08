@@ -41,6 +41,16 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.2.0",
+    date: "2026-07-09",
+    notes: [
+      "Unified ⌘P palette: search files by default, then > for commands, # for symbols, @ for recent workspaces.",
+      "Menus tidied — every action now lives in exactly one place (folder/workspace on the left, app settings on the right).",
+      "The always-on version tag is gone; a dot on the menu button quietly flags What's New after an update.",
+      "Version and About details consolidated into a single About panel.",
+    ],
+  },
+  {
     version: "2.1.0",
     date: "2026-07-05",
     notes: [
