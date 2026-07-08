@@ -11,11 +11,27 @@ export interface WorkspaceActions {
   addFolder(): void;
   openFolder(): void;
   newWindow(): void;
-  /** Optional: open the settings modal (⌘,). */
-  openSettings?: () => void;
-  /** Optional: run a user-initiated update check that reports its outcome. */
-  checkForUpdates?: () => void;
 }
+
+// Single-home menu contract: a feature label appears in exactly one of these
+// lists (tested in tests/menu-scope.test.ts). Shortcuts + palette commands are
+// accelerators and may duplicate freely.
+export const WORKSPACE_MENU_VERBS = [
+  "open folder…",
+  "new window",
+  "install cli command",
+  "update cli command",
+] as const;
+
+export const APP_MENU_VERBS = [
+  "command palette",
+  "problems",
+  "sessions",
+  "check for updates…",
+  "what's new",
+  "settings…",
+  "about sutra…",
+] as const;
 
 export interface WorkspaceBarHandle {
   setCurrentWorkspace(path: string | null): void;
@@ -162,12 +178,6 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
             if (r !== "installed") await navigator.clipboard?.writeText(r); // copy admin cmd
           })();
         });
-      }
-      if (actions.openSettings) {
-        mkRow("settings…", "⌘,", () => actions.openSettings!());
-      }
-      if (actions.checkForUpdates) {
-        mkRow("check for updates…", "", () => actions.checkForUpdates!());
       }
     }, "menu-card");
   }

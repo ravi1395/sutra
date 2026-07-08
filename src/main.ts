@@ -1812,13 +1812,13 @@ btnMenu.onclick = () => {
         };
         el.appendChild(row);
       };
-      mk("open folder…", "⌘O", () => actions.openFolder());
-      mk("command palette", "⌘K", () => palette.open());
+      mk("command palette", "⌘P", () => palette.open());
       mk("problems", "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
       mk("sessions", "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
       const foot = document.createElement("div");
       foot.className = "menu-foot";
       el.appendChild(foot);
+      mk("check for updates…", "", () => void updater.checkNow());
       mk("settings…", "⌘,", () => openSettings());
       mk("about sutra…", "", () => openAbout());
     },
@@ -1871,8 +1871,6 @@ workspaceBar = mountWorkspaceBar($("titlebar"), {
   addFolder: actions.addFolder,
   openFolder: actions.openFolder,
   newWindow: actions.newWindow,
-  openSettings: () => openSettings(),
-  checkForUpdates: () => void updater.checkNow(),
 });
 workspaceBar.setCurrentWorkspace(null);
 
