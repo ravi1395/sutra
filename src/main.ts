@@ -84,7 +84,7 @@ import {
   problemsPanelEl,
 } from "./diagnostics";
 import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPolling, sessionsPanelEl } from "./sessions";
-import { mountWorkspaceBar, type WorkspaceBarHandle } from "./menubar";
+import { mountWorkspaceBar, MENU_LABELS, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountSymbolPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
 import {
@@ -1812,15 +1812,15 @@ btnMenu.onclick = () => {
         };
         el.appendChild(row);
       };
-      mk("command palette", "⌘P", () => palette.open());
-      mk("problems", "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
-      mk("sessions", "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
+      mk(MENU_LABELS.commandPalette, "⌘P", () => palette.open());
+      mk(MENU_LABELS.problems, "", () => setProblemsPanel(problemsHost.classList.contains("hidden")));
+      mk(MENU_LABELS.sessions, "", () => setSessionsPanel(sessionsHost.classList.contains("hidden")));
       const foot = document.createElement("div");
       foot.className = "menu-foot";
       el.appendChild(foot);
-      mk("check for updates…", "", () => void updater.checkNow());
-      mk("settings…", "⌘,", () => openSettings());
-      mk("about sutra…", "", () => openAbout());
+      mk(MENU_LABELS.checkUpdates, "", () => void updater.checkNow());
+      mk(MENU_LABELS.settings, "⌘,", () => openSettings());
+      mk(MENU_LABELS.about, "", () => openAbout());
     },
     "menu-card",
   );
