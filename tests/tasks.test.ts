@@ -2,9 +2,14 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   addTasksGitignoreEntry,
+  attachClosedTurnToRunningTask,
+  attachTurnToTask,
+  detachTurnFromTask,
   parseTasksFile,
   saveTasks,
   serializeTasks,
+  setOwnedTurnReview,
+  setTaskTurnReview,
   transitionTask,
   type Task,
   type TaskPersistence,
@@ -62,6 +67,60 @@ test("status transitions reject invalid states", () => {
   assert.equal(transitionTask(task(), "ready", 101).status, "ready");
   assert.throws(() => transitionTask(task(), "running", 101), /Cannot transition/i);
   assert.throws(() => transitionTask(task({ status: "accepted" }), "running", 101), /Cannot transition/i);
+});
+
+test("a closed turn attaches once to the one running task for its root and advances it to review", () => {
+  const running = task({ id: "running", status: "running" });
+  const otherRoot = task({ id: "other", root: "/other", status: "running" });
+  const turn = { id: 7, testStatus: { state: "pass" as const } };
+  const linked = attachClosedTurnToRunningTask([running, otherRoot], "/workspace", turn, 200);
+  assert.equal(linked[0].status, "needs_review");
+  assert.deepEqual(linked[0].turnIds, [7]);
+  assert.deepEqual(linked[0].evidence, [{ kind: "turn", turnId: 7, testState: "pass" }]);
+  assert.deepEqual(linked[1], otherRoot);
+
+  // Re-delivery of the same close event cannot duplicate the durable link.
+  assert.strictEqual(attachClosedTurnToRunningTask(linked, "/workspace", turn, 201), linked);
+});
+
+test("a closed turn with no running task stays unattached", () => {
+  const ready = task({ status: "ready" });
+  const tasks = [ready];
+  assert.strictEqual(attachClosedTurnToRunningTask(tasks, "/workspace", { id: 8 }, 200), tasks);
+});
+
+test("historical turn attachment is explicit and detach removes only its initial evidence and review", () => {
+  const attached = attachTurnToTask(task(), { id: 9, testStatus: { state: "fail" } }, 200);
+  assert.deepEqual(attached.turnIds, [9]);
+  assert.deepEqual(attached.evidence, [{ kind: "turn", turnId: 9, testState: "fail" }]);
+  const reviewed = setTaskTurnReview(attached, 9, "accepted", 201);
+  assert.deepEqual(reviewed.turnReviews, { "9": "accepted" });
+
+  const detached = detachTurnFromTask(reviewed, 9, 202);
+  assert.deepEqual(detached.turnIds, []);
+  assert.deepEqual(detached.evidence, []);
+  assert.equal(detached.turnReviews, undefined);
+  assert.strictEqual(detachTurnFromTask(detached, 9, 203), detached);
+});
+
+test("turn evidence preserves initial running and skipped states", () => {
+  const running = attachTurnToTask(task(), { id: 10, testStatus: { state: "running" } }, 200);
+  const skipped = attachTurnToTask(running, { id: 11, testStatus: { state: "skipped" } }, 201);
+  assert.deepEqual(skipped.evidence, [
+    { kind: "turn", turnId: 10, testState: "running" },
+    { kind: "turn", turnId: 11, testState: "skipped" },
+  ]);
+});
+
+test("review actions select one deterministic linked owner and survive a restart round-trip", () => {
+  const linked = attachTurnToTask(task({ id: "linked", createdAt: 10 }), { id: 12 }, 200);
+  const duplicate = attachTurnToTask(task({ id: "duplicate", createdAt: 20 }), { id: 12 }, 200);
+  const foreign = attachTurnToTask(task({ id: "foreign", root: "/foreign" }), { id: 12 }, 200);
+  const reviewed = setOwnedTurnReview([duplicate, linked, foreign], "/workspace", 12, "rolled_back", 201);
+  assert.equal(reviewed[0].turnReviews, undefined);
+  assert.deepEqual(reviewed[1].turnReviews, { "12": "rolled_back" });
+  assert.equal(reviewed[2].turnReviews, undefined);
+  assert.deepEqual(parseTasksFile(serializeTasks(reviewed)), { tasks: reviewed, warnings: [] });
 });
 
 test("first-save gitignore entry is added once without duplicating existing rules", () => {

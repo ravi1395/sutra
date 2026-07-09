@@ -1,13 +1,14 @@
-// Workspace task panel. This phase intentionally owns only explicit task
-// creation/edit/start; turns, evidence, worktrees, and handoff arrive later.
-import { ptyListAgents, type AgentTerminal } from "./ipc";
+// Workspace task panel. Task creation/start stays explicit; it also exposes
+// durable turn links so historical attribution never depends on a terminal.
+import { ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
-import { loadTasks, saveTasks, transitionTask, type Task } from "./tasks";
+import { attachTurnToTask, detachTurnFromTask, loadTasks, saveTasks, transitionTask, type Task, type TurnReviewDisposition } from "./tasks";
 import type { ComposerDeliveryResult, ComposerTaskDraft } from "./composer";
 
 export interface TasksPanelOptions {
   container: HTMLElement;
   getRoot: () => string | null;
+  getTurns: (root: string) => readonly Turn[];
   getComposerDraft: () => ComposerTaskDraft | null;
   deliverPrompt: (args: { targetId: string; prompt: string; submit: boolean }) => Promise<ComposerDeliveryResult>;
 }
@@ -17,6 +18,14 @@ export interface TasksPanelHandle {
   hide(): void;
   reload(): Promise<void>;
   dispose(): void;
+}
+
+export interface LinkedTaskTurnRow {
+  id: number;
+  files: string[];
+  testState: "running" | "pass" | "fail" | "skipped" | "none";
+  disposition?: TurnReviewDisposition;
+  available: boolean;
 }
 
 const taskId = (): string => `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -69,8 +78,32 @@ function updateTask(task: Task, patch: Pick<Task, "title" | "acceptance">): Task
   return { ...task, ...patch, updatedAt: Math.max(Date.now(), task.updatedAt) };
 }
 
+/** Data rendered for a task's durable links. A turn can be absent from the
+ * in-memory tracker after restart, but its initial evidence remains useful. */
+export function linkedTaskTurnRows(task: Task, turns: readonly Turn[]): LinkedTaskTurnRow[] {
+  const byId = new Map(turns.map((turn) => [turn.id, turn]));
+  return task.turnIds.map((id) => {
+    const turn = byId.get(id);
+    const initialEvidence = task.evidence.find((evidence) => evidence.kind === "turn" && evidence.turnId === id);
+    return {
+      id,
+      files: turn?.files.map((file) => file.path) ?? [],
+      testState: turn?.testStatus?.state ?? (initialEvidence?.kind === "turn" ? initialEvidence.testState ?? "none" : "none"),
+      disposition: task.turnReviews?.[String(id)],
+      available: !!turn,
+    };
+  });
+}
+
+/** Only closed, root-local turns with no existing task owner can be manually
+ * attached. This preserves a single durable owner even for historical work. */
+export function attachableHistoricalTurns(tasks: readonly Task[], root: string, turns: readonly Turn[]): Turn[] {
+  const linked = new Set(tasks.filter((task) => task.root === root).flatMap((task) => task.turnIds));
+  return turns.filter((turn) => turn.root === root && turn.closedAt != null && turn.boundarySource !== "rollback" && !linked.has(turn.id));
+}
+
 export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
-  const { container, getRoot, getComposerDraft, deliverPrompt } = opts;
+  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
   let trusted = false;
@@ -166,6 +199,29 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry));
   }
 
+  async function attachHistoricalTurn(task: Task, turnId: number): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    const snapshot = tasks;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus("Tasks are read-only until this workspace is trusted.");
+    const turn = attachableHistoricalTurns(snapshot, root, getTurns(root)).find((candidate) => candidate.id === turnId);
+    if (!turn) return showStatus("That historical turn is no longer available to attach.");
+    const nextTask = attachTurnToTask(task, turn);
+    if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Attached Turn ${turn.id}.`);
+  }
+
+  async function detachHistoricalTurn(task: Task, turnId: number): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    const snapshot = tasks;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus("Tasks are read-only until this workspace is trusted.");
+    const nextTask = detachTurnFromTask(task, turnId);
+    if (nextTask === task) return;
+    if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Detached Turn ${turnId}.`);
+  }
+
   async function start(task: Task): Promise<void> {
     const root = getRoot();
     if (!root) return showStatus("No workspace open — tasks cannot start.");
@@ -246,7 +302,47 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       startBtn.onclick = () => void start(task);
       actions.appendChild(startBtn);
     }
-    card.append(meta, title, acceptance, actions);
+    const turns = getTurns(task.root);
+    const linked = linkedTaskTurnRows(task, turns);
+    const linkedList = el("div", "task-linked-turns");
+    const linkedHeading = el("strong");
+    linkedHeading.textContent = "Linked turns";
+    linkedList.appendChild(linkedHeading);
+    if (!linked.length) {
+      const empty = el("span");
+      empty.textContent = " None";
+      linkedList.appendChild(empty);
+    }
+    for (const row of linked) {
+      const entry = el("div", "task-linked-turn");
+      const files = row.available ? (row.files.length ? row.files.join(", ") : "no files") : "not in this session";
+      entry.textContent = `Turn ${row.id} · ${files} · test ${row.testState}${row.disposition ? ` · ${row.disposition}` : ""}`;
+      const detach = el("button");
+      detach.textContent = "Detach";
+      detach.disabled = !trusted || loading;
+      detach.onclick = () => void detachHistoricalTurn(task, row.id);
+      entry.appendChild(detach);
+      linkedList.appendChild(entry);
+    }
+    const candidates = attachableHistoricalTurns(tasks, task.root, turns);
+    if (candidates.length) {
+      const attachControls = el("div", "task-attach-turn");
+      const select = el("select");
+      select.setAttribute("aria-label", "Historical turn to attach");
+      for (const turn of candidates) {
+        const option = el("option");
+        option.value = String(turn.id);
+        option.textContent = `Attach Turn ${turn.id} (${turn.files.length} files)`;
+        select.appendChild(option);
+      }
+      const attach = el("button");
+      attach.textContent = "Attach turn";
+      attach.disabled = !trusted || loading;
+      attach.onclick = () => void attachHistoricalTurn(task, Number(select.value));
+      attachControls.append(select, attach);
+      linkedList.appendChild(attachControls);
+    }
+    card.append(meta, title, acceptance, actions, linkedList);
     return card;
   }
 

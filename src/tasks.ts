@@ -17,9 +17,22 @@ export type TaskStatus =
 
 export type Evidence =
   | { kind: "automation"; automationId: string; state: "pass" | "fail" | "cancelled"; runAt: number; outputTail: string }
-  | { kind: "turn"; turnId: number; testState?: "pass" | "fail" | "none" }
+  | { kind: "turn"; turnId: number; testState?: "running" | "pass" | "fail" | "skipped" | "none" }
   | { kind: "manual"; label: string; checkedAt: number | null; note?: string }
   | { kind: "visual"; annotationIds: string[]; capture?: string };
+
+/** A user review decision for a linked turn. Partial review deliberately has
+ * no disposition: only a whole accepted/rolled-back turn can satisfy E1's
+ * later completion gate. */
+export type TurnReviewDisposition = "accepted" | "rolled_back" | "excluded";
+
+/** The small subset of a live turn that durable task metadata records. It is
+ * intentionally terminal-blind: pty ids are session-scoped delivery details,
+ * not turn attribution data. */
+export interface TaskTurn {
+  id: number;
+  testStatus?: { state: "running" | "pass" | "fail" | "skipped" } | null;
+}
 
 export interface Task {
   id: string;
@@ -33,6 +46,8 @@ export interface Task {
   root: string;
   worktree?: { path: string; branch: string };
   turnIds: number[];
+  /** Optional for backwards-compatible task files written before T3. */
+  turnReviews?: Record<string, TurnReviewDisposition>;
   annotationIds: string[];
   evidence: Evidence[];
 }
@@ -76,6 +91,12 @@ function isFiniteTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function isTurnReviews(value: unknown): value is Record<string, TurnReviewDisposition> {
+  return isRecord(value) && Object.values(value).every(
+    (disposition) => disposition === "accepted" || disposition === "rolled_back" || disposition === "excluded",
+  );
+}
+
 function isEvidence(value: unknown): value is Evidence {
   if (!isRecord(value) || typeof value.kind !== "string") return false;
   switch (value.kind) {
@@ -86,7 +107,7 @@ function isEvidence(value: unknown): value is Evidence {
         && typeof value.outputTail === "string";
     case "turn":
       return typeof value.turnId === "number"
-        && (value.testState === undefined || value.testState === "pass" || value.testState === "fail" || value.testState === "none");
+        && (value.testState === undefined || value.testState === "running" || value.testState === "pass" || value.testState === "fail" || value.testState === "skipped" || value.testState === "none");
     case "manual":
       return typeof value.label === "string"
         && (value.checkedAt === null || isFiniteTimestamp(value.checkedAt))
@@ -111,6 +132,7 @@ function taskError(value: unknown): string | null {
   if (typeof value.root !== "string" || !value.root.trim()) return `Task ${value.id} root is required`;
   if (value.worktree !== undefined && (!isRecord(value.worktree) || typeof value.worktree.path !== "string" || typeof value.worktree.branch !== "string")) return `Task ${value.id} worktree is invalid`;
   if (!Array.isArray(value.turnIds) || !value.turnIds.every((id) => typeof id === "number")) return `Task ${value.id} turnIds are invalid`;
+  if (value.turnReviews !== undefined && !isTurnReviews(value.turnReviews)) return `Task ${value.id} turnReviews are invalid`;
   if (!isStringArray(value.annotationIds)) return `Task ${value.id} annotationIds are invalid`;
   if (!Array.isArray(value.evidence) || !value.evidence.every(isEvidence)) return `Task ${value.id} evidence is invalid`;
   return null;
@@ -176,6 +198,102 @@ export function transitionTask(task: Task, status: TaskStatus, updatedAt = Date.
   if (!canTransitionTask(task.status, status)) throw new Error(`Cannot transition task from ${task.status} to ${status}`);
   if (!isFiniteTimestamp(updatedAt) || updatedAt < task.updatedAt) throw new Error("Task updatedAt cannot move backwards");
   return { ...task, status, updatedAt };
+}
+
+function nextUpdatedAt(task: Task, updatedAt: number): number {
+  if (!isFiniteTimestamp(updatedAt)) throw new Error("Task updatedAt is invalid");
+  return Math.max(task.updatedAt, updatedAt);
+}
+
+function turnTestState(turn: TaskTurn): "running" | "pass" | "fail" | "skipped" | "none" {
+  return turn.testStatus?.state ?? "none";
+}
+
+/** Explicitly link one historical turn to a task. Existing links are a no-op,
+ * which also makes repeated close delivery idempotent. */
+export function attachTurnToTask(task: Task, turn: TaskTurn, updatedAt = Date.now()): Task {
+  if (task.turnIds.includes(turn.id)) return task;
+  return {
+    ...task,
+    turnIds: [...task.turnIds, turn.id],
+    evidence: [...task.evidence, { kind: "turn", turnId: turn.id, testState: turnTestState(turn) }],
+    updatedAt: nextUpdatedAt(task, updatedAt),
+  };
+}
+
+/** Explicitly unlinks an ambiguous historical turn and its T3 initial test
+ * evidence. It does not alter any other evidence rows. */
+export function detachTurnFromTask(task: Task, turnId: number, updatedAt = Date.now()): Task {
+  if (!task.turnIds.includes(turnId)) return task;
+  const turnReviews = task.turnReviews && { ...task.turnReviews };
+  if (turnReviews) delete turnReviews[String(turnId)];
+  const { turnReviews: _previousTurnReviews, ...withoutTurnReviews } = task;
+  return {
+    ...(turnReviews && Object.keys(turnReviews).length ? task : withoutTurnReviews),
+    turnIds: task.turnIds.filter((id) => id !== turnId),
+    evidence: task.evidence.filter((evidence) => evidence.kind !== "turn" || evidence.turnId !== turnId),
+    ...(turnReviews && Object.keys(turnReviews).length ? { turnReviews } : {}),
+    updatedAt: nextUpdatedAt(task, updatedAt),
+  };
+}
+
+/** Records an explicit review disposition for a linked turn only. */
+export function setTaskTurnReview(
+  task: Task,
+  turnId: number,
+  disposition: TurnReviewDisposition,
+  updatedAt = Date.now(),
+): Task {
+  if (!task.turnIds.includes(turnId)) return task;
+  if (task.turnReviews?.[String(turnId)] === disposition) return task;
+  return {
+    ...task,
+    turnReviews: { ...task.turnReviews, [turnId]: disposition },
+    updatedAt: nextUpdatedAt(task, updatedAt),
+  };
+}
+
+/** Root-level automatic attribution. The caller supplies the closed turn from
+ * onTurnClosed(root, turn); no terminal id participates in this decision. */
+export function attachClosedTurnToRunningTask(
+  tasks: readonly Task[],
+  root: string,
+  turn: TaskTurn,
+  updatedAt = Date.now(),
+): readonly Task[] {
+  const index = tasks.findIndex((task) => task.root === root && task.status === "running");
+  if (index < 0) return tasks;
+  const task = attachTurnToTask(tasks[index], turn, updatedAt);
+  if (task === tasks[index]) return tasks;
+  const needsReview = transitionTask(task, "needs_review", nextUpdatedAt(task, updatedAt));
+  return tasks.map((candidate, candidateIndex) => candidateIndex === index ? needsReview : candidate);
+}
+
+/** Return one stable owner for a linked turn. Normal attribution cannot create
+ * duplicates because it targets the one running task in a root. If an older
+ * hand-edited file does contain duplicates, review actions choose the oldest
+ * task (then lexical id) rather than mutating every ambiguous association. */
+export function taskOwnerForTurn(tasks: readonly Task[], root: string, turnId: number): Task | undefined {
+  return tasks
+    .filter((task) => task.root === root && task.turnIds.includes(turnId))
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0];
+}
+
+/** Apply a review action to the turn's deterministic single owner. The diff
+ * controls identify a turn but not a task, so this avoids fanning a review
+ * action out across corrupted or historical duplicate links. */
+export function setOwnedTurnReview(
+  tasks: readonly Task[],
+  root: string,
+  turnId: number,
+  disposition: TurnReviewDisposition,
+  updatedAt = Date.now(),
+): readonly Task[] {
+  const owner = taskOwnerForTurn(tasks, root, turnId);
+  if (!owner) return tasks;
+  const reviewed = setTaskTurnReview(owner, turnId, disposition, updatedAt);
+  if (reviewed === owner) return tasks;
+  return tasks.map((task) => task.id === owner.id ? reviewed : task);
 }
 
 /** Add the task ignore rule once while preserving every existing .gitignore line. */

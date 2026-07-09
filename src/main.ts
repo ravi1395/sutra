@@ -134,6 +134,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { mountTasksPanel } from "./tasks-panel";
+import { attachClosedTurnToRunningTask, loadTasks, saveTasks, setOwnedTurnReview, type Task } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
@@ -757,7 +758,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
-    void tasksPanel.reload();
+    const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
     void mcpSetRoot(dir);
     void mcpWriteAgentConfig(dir).then((warnings) => {
@@ -769,6 +770,11 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
     if (settings.restoreSession) await restoreWorkspaceTabs(dir);
+    // Persisted task links need the complete turn manifest (not only the
+    // consume-once turn_poll delta) before the panel renders files/test state.
+    await turnsHydrated;
+    if (currentRoot !== dir) return;
+    await tasksPanel.reload();
   } finally {
     suppressSessionSave = false;
   }
@@ -791,6 +797,20 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
+}
+
+/** Hydrate closed historical turns for task links after a restart. turn_poll
+ * only delivers each close once, whereas turn_list is the durable manifest.
+ * The root guard prevents an old IPC result populating a newly selected root. */
+async function hydrateTurnsForWorkspace(root: string): Promise<void> {
+  try {
+    const turns = await turnList(root);
+    if (currentRoot !== root) return;
+    replaceTurns(root, turns);
+  } catch {
+    // A non-Git root or unavailable backend still opens normally; saved task
+    // evidence remains visible without the live turn detail.
+  }
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -881,6 +901,12 @@ function renderTurnStrip(root: string): void {
         // matches what it was testing and get recorded as that turn's result.
         await cancelTurnTestsFrom(root, turn.id);
         const res = await turnRollback(root, rollbackTargetId(turn), paths);
+        // A turn has a rolled-back review disposition only when every file in
+        // that turn was restored. A partial rollback leaves it unresolved for
+        // later explicit review rather than claiming a false whole-turn result.
+        if (turn.files.length > 0 && turn.files.every((file) => res.restored.includes(file.path))) {
+          void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"));
+        }
         // turn_poll is consume-once and never re-delivers a closed turn, so
         // rolled_back (set server-side on the manifest) would otherwise never
         // reach turnsByRoot — re-fetch the full list so the strip reflects it
@@ -965,6 +991,16 @@ async function refreshDiffFileList(): Promise<void> {
           editor.setAgentChanges(next.changes);
           diffViewer.invalidate();
           void refreshDiffFileList();
+          // Per-file acceptance becomes a task-level turn disposition only
+          // after every file from that linked turn is no longer reviewable.
+          const remainingPaths = new Set(next.changes.map((change) => change.path));
+          for (const turn of getTurns(root)) {
+            if (turn.files.some((file) => file.path === path)
+              && turn.files.length > 0
+              && turn.files.every((file) => !remainingPaths.has(file.path))) {
+              void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "accepted"));
+            }
+          }
         });
       },
       onReject: (path: string, hunk) => {
@@ -1097,6 +1133,7 @@ $("view-tools").appendChild(btnTasks);
 const tasksPanel = mountTasksPanel({
   container: tasksPane,
   getRoot: () => currentRoot,
+  getTurns: (root) => getTurns(root),
   getComposerDraft: () => {
     if (!ensureComposer()) return null;
     return composerPanel?.getTaskDraft() ?? null;
@@ -1523,6 +1560,31 @@ ensureDiagnosticsExtension();
   };
 }
 
+// Serialize automatic task mutations per root. turn_poll can close several
+// turns in one tick, and a stale concurrent read/write would otherwise lose a
+// link. Corrupt task files remain read-only: automatic tracking must never
+// "repair" externally malformed metadata by overwriting it.
+const taskMetadataWrites = new Map<string, Promise<void>>();
+function queueTaskMetadataUpdate(root: string, reduce: (tasks: readonly Task[]) => readonly Task[]): Promise<void> {
+  const previous = taskMetadataWrites.get(root) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const loaded = await loadTasks(root);
+    if (loaded.warnings.length) {
+      console.warn("Task turn association skipped: tasks file has recoverable warnings", loaded.warnings);
+      return;
+    }
+    const tasks = reduce(loaded.tasks);
+    if (tasks === loaded.tasks) return;
+    await saveTasks(root, tasks);
+    if (currentRoot === root) await tasksPanel.reload();
+  });
+  taskMetadataWrites.set(root, next);
+  void next.finally(() => {
+    if (taskMetadataWrites.get(root) === next) taskMetadataWrites.delete(root);
+  }).catch(() => {});
+  return next;
+}
+
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
   void (async () => {
@@ -1534,6 +1596,15 @@ onTurnClosed((root, turn) => {
       .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
       .catch(() => {});
   })();
+});
+
+// Root-level task attribution deliberately runs independently from terminal
+// delivery and test automation. onTurnClosed carries no terminal identity, so
+// a root's one running task is the sole authoritative association target.
+onTurnClosed((root, turn) => {
+  void queueTaskMetadataUpdate(root, (tasks) => attachClosedTurnToRunningTask(tasks, root, turn)).catch((error) => {
+    console.warn("Task turn association failed", error);
+  });
 });
 
 // Runner ids (test:<root>:<turnId>) cancelled by a rollback — consulted by

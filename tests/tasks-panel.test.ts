@@ -1,6 +1,19 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { TaskStartGate, mayPersistTaskForRoot, runGuardedTaskOperation } from "../src/tasks-panel";
+import { attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, runGuardedTaskOperation } from "../src/tasks-panel";
+import { getTurns, replaceTurns } from "../src/agent-tracking";
+import type { Turn } from "../src/ipc";
+import type { Task } from "../src/tasks";
+
+const task = (overrides: Partial<Task> = {}): Task => ({
+  id: "task-1", title: "Task", status: "needs_review", createdAt: 1, updatedAt: 1,
+  prompt: "prompt", acceptance: [], profileId: null, root: "/root", turnIds: [], annotationIds: [], evidence: [], ...overrides,
+});
+
+const turn = (id: number, overrides: Partial<Turn> = {}): Turn => ({
+  id, root: "/root", agentKind: "codex", boundarySource: "hook", openedAt: 1, closedAt: 2,
+  files: [{ path: `file-${id}.ts`, snapshotted: true }], testStatus: { state: "pass", outputTail: "" }, rolledBack: false, ...overrides,
+});
 
 test("TaskStartGate rejects rapid reentrant Start claims until the first releases", () => {
   const gate = new TaskStartGate();
@@ -14,6 +27,41 @@ test("task persistence requires current root and current backend trust", () => {
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-a", true), true);
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-b", true), false);
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-a", false), false);
+});
+
+test("linked turn rows render files, live test state, and saved initial state after tracker history is absent", () => {
+  const linked = task({
+    turnIds: [1, 2],
+    turnReviews: { "1": "accepted" },
+    evidence: [
+      { kind: "turn", turnId: 1, testState: "pass" },
+      { kind: "turn", turnId: 2, testState: "skipped" },
+    ],
+  });
+  assert.deepEqual(linkedTaskTurnRows(linked, [turn(1, { testStatus: { state: "fail", outputTail: "failed" } })]), [
+    { id: 1, files: ["file-1.ts"], testState: "fail", disposition: "accepted", available: true },
+    { id: 2, files: [], testState: "skipped", disposition: undefined, available: false },
+  ]);
+});
+
+test("hydrated turn history supplies files and test state to persisted task links after restart", () => {
+  const linked = task({ turnIds: [31], evidence: [{ kind: "turn", turnId: 31, testState: "none" }] });
+  replaceTurns("/root", [turn(31, { testStatus: { state: "skipped", outputTail: "not configured" } })]);
+  assert.deepEqual(linkedTaskTurnRows(linked, getTurns("/root")), [
+    { id: 31, files: ["file-31.ts"], testState: "skipped", disposition: undefined, available: true },
+  ]);
+});
+
+test("historical attach choices are closed root-local turns with no existing owner", () => {
+  const linked = task({ turnIds: [1] });
+  const secondTask = task({ id: "task-2", turnIds: [2] });
+  const choices = attachableHistoricalTurns([linked, secondTask], "/root", [
+    turn(1), turn(2), turn(3),
+    turn(4, { boundarySource: "open", closedAt: null }),
+    turn(5, { boundarySource: "rollback" }),
+    turn(6, { root: "/other" }),
+  ]);
+  assert.deepEqual(choices.map((candidate) => candidate.id), [3]);
 });
 
 const deferred = <T>() => {
