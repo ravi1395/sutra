@@ -6,6 +6,7 @@
 // are slide-up drawers that overlay the scroll area (so they can't be
 // squeezed off when the terminal drawer steals panel height).
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
+import { loadAgentProfiles, resolveAgentProfiles, type AgentProfile } from "./agent-profiles";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
 import { orderSections, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
 import { matchFiles, matchAssets, assetToken, completionContext, type AssetOption } from "./composer-complete";
@@ -21,6 +22,7 @@ import { icon } from "./icons";
 import { mountTagManager } from "./tag-manager";
 import { IS_MAC } from "./shortcuts";
 import { readUiState, patchUiState } from "./terminal-groups";
+import { isWorkspaceTrusted } from "./workspace";
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
@@ -47,6 +49,8 @@ export function mountComposer(opts: ComposerOptions): {
   toggle: () => void;
   show: () => void;
   hide: () => void;
+  /** Trusted profile guidance loaded for this workspace; P2 renders the picker. */
+  getProfiles: () => readonly AgentProfile[];
   pausePolling: () => void;
   resumePolling: () => void;
   dispose: () => void;
@@ -71,6 +75,9 @@ export function mountComposer(opts: ComposerOptions): {
   // ── state ────────────────────────────────────────────────────────────────────
   let trusted = localStorage.getItem(TRUST_KEY(root)) === "1" || opts.trusted;
   let config: TagConfig = resolveConfig({ rawJson: null, trusted: false });
+  // P2 exposes these as the profile picker. Loading them now keeps the same
+  // trusted-config boundary as prompt tags without changing delivery behavior.
+  let profiles: readonly AgentProfile[] = resolveAgentProfiles({ rawJson: null, trusted: false, automationIds: [] });
   let assets: AgentAsset[] = [];
   let agents: AgentTerminal[] = [];
   let history: HistoryEntry[] = loadHistory(root);
@@ -209,7 +216,7 @@ export function mountComposer(opts: ComposerOptions): {
 
   async function init(): Promise<void> {
     await applyDrawerHeight();
-    await Promise.all([reloadConfig(), refreshAgents(), refreshAssets()]);
+    await Promise.all([reloadConfig(), reloadProfiles(), refreshAgents(), refreshAssets()]);
     const saved = loadDraft(root);
     if (saved) applyDraft(saved);
     else templateName = config.templates[0]?.name ?? "";
@@ -219,6 +226,10 @@ export function mountComposer(opts: ComposerOptions): {
   async function reloadConfig(): Promise<void> {
     const rawJson = await readFile(TAGS_PATH(root)).catch(() => null);
     config = resolveConfig({ rawJson, trusted });
+  }
+
+  async function reloadProfiles(): Promise<void> {
+    profiles = await loadAgentProfiles(root, { isTrusted: isWorkspaceTrusted, readFile });
   }
 
   async function refreshAgents(): Promise<void> {
@@ -724,7 +735,7 @@ export function mountComposer(opts: ComposerOptions): {
   trustBtn.onclick = () => {
     localStorage.setItem(TRUST_KEY(root), "1");
     trusted = true;
-    void reloadConfig().then(() => renderAll());
+    void Promise.all([reloadConfig(), reloadProfiles()]).then(() => renderAll());
   };
 
   gearBtn.onclick = () => {
@@ -787,6 +798,7 @@ export function mountComposer(opts: ComposerOptions): {
     toggle: () => setVisible(!visible),
     show: () => setVisible(true),
     hide: () => setVisible(false),
+    getProfiles: () => profiles,
     // Window-hidden gate: pause the agent poll without touching visible state,
     // resume only if the panel is still open.
     pausePolling: () => stopPoll(),
