@@ -133,6 +133,7 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
+import { mountTasksPanel } from "./tasks-panel";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
@@ -756,6 +757,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    void tasksPanel.reload();
     void watchStop().catch(() => {});
     void mcpSetRoot(dir);
     void mcpWriteAgentConfig(dir).then((warnings) => {
@@ -1076,6 +1078,39 @@ function setComposer(on: boolean): void {
 }
 btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
 $("composer-close").onclick = () => setComposer(false);
+
+// ---- tasks (control plane) ----
+// Keep this panel dynamically mounted so T2 stays additive: it shares the
+// editor column without taking ownership of the terminal or composer layout.
+const tasksPane = document.createElement("div");
+tasksPane.id = "tasks-panel-host";
+tasksPane.className = "hidden";
+tasksPane.style.cssText = "flex: 0 0 35%; min-width: 0; overflow: auto; padding: 10px; background: var(--bg-2); border-left: 1px solid var(--line);";
+$("editor-area").appendChild(tasksPane);
+const btnTasks = document.createElement("button");
+btnTasks.id = "btn-tasks";
+btnTasks.className = "glyph";
+btnTasks.title = "Toggle tasks";
+btnTasks.setAttribute("aria-label", "Toggle tasks");
+btnTasks.textContent = "✓";
+$("view-tools").appendChild(btnTasks);
+const tasksPanel = mountTasksPanel({
+  container: tasksPane,
+  getRoot: () => currentRoot,
+  getComposerDraft: () => {
+    if (!ensureComposer()) return null;
+    return composerPanel?.getTaskDraft() ?? null;
+  },
+  deliverPrompt: async (args) => {
+    if (!ensureComposer()) return { ok: false, reason: "No workspace open" };
+    return composerPanel?.deliverTaskPrompt(args) ?? { ok: false, reason: "Composer unavailable" };
+  },
+});
+function setTasks(on: boolean): void {
+  btnTasks.classList.toggle("on", on);
+  if (on) tasksPanel.show(); else tasksPanel.hide();
+}
+btnTasks.onclick = () => setTasks(tasksPane.classList.contains("hidden"));
 
 // ---- diff toggle ----
 const diffPane = $("diff-pane");

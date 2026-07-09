@@ -45,12 +45,25 @@ export interface ComposerOptions {
   };
 }
 
+export interface ComposerTaskDraft {
+  /** Fully rendered prompt, including the current template/context chips. */
+  prompt: string;
+  /** A useful editable starting title; the task panel never sends on create. */
+  title: string;
+}
+
+export type ComposerDeliveryResult = { ok: true } | { ok: false; reason: string };
+
 export function mountComposer(opts: ComposerOptions): {
   toggle: () => void;
   show: () => void;
   hide: () => void;
   /** Trusted profile guidance loaded for this workspace; P2 renders the picker. */
   getProfiles: () => readonly AgentProfile[];
+  /** Snapshot the current draft for task creation without delivering it. */
+  getTaskDraft: () => ComposerTaskDraft | null;
+  /** Reuse the composer delivery seam for task Start (Stage or Submit). */
+  deliverTaskPrompt: (args: { targetId: string; prompt: string; submit: boolean }) => Promise<ComposerDeliveryResult>;
   pausePolling: () => void;
   resumePolling: () => void;
   dispose: () => void;
@@ -620,7 +633,7 @@ export function mountComposer(opts: ComposerOptions): {
     sendBtn.disabled = true;
     clearStatus();
 
-    const result = await deliverToPty({ targetId, text: prompt, submit });
+    const result = await deliverTaskPrompt({ targetId, prompt, submit });
     sendBtn.disabled = false;
 
     if (result.ok) {
@@ -654,6 +667,23 @@ export function mountComposer(opts: ComposerOptions): {
   // ── draft ─────────────────────────────────────────────────────────────────────
   function captureDraft(): Draft {
     return { templateName, text: { ...text }, chips: [...chips], targetId, thinking };
+  }
+
+  function taskTitle(prompt: string): string {
+    const title = (text["task"] ?? "").trim().split(/\r?\n/, 1)[0]?.trim();
+    return title || prompt.trim().split(/\r?\n/, 1)[0]?.trim() || "Untitled task";
+  }
+
+  function getTaskDraft(): ComposerTaskDraft | null {
+    const prompt = safeBuildPrompt();
+    if (!prompt?.trim()) return null;
+    return { prompt, title: taskTitle(prompt) };
+  }
+
+  async function deliverTaskPrompt(args: { targetId: string; prompt: string; submit: boolean }): Promise<ComposerDeliveryResult> {
+    // Keep every task delivery on the same revalidated bracketed-paste path as
+    // the composer. This performs one delivery attempt; callers own retries.
+    return deliverToPty({ targetId: args.targetId, text: args.prompt, submit: args.submit });
   }
 
   function applyDraft(d: Draft): void {
@@ -799,6 +829,8 @@ export function mountComposer(opts: ComposerOptions): {
     show: () => setVisible(true),
     hide: () => setVisible(false),
     getProfiles: () => profiles,
+    getTaskDraft,
+    deliverTaskPrompt,
     // Window-hidden gate: pause the agent poll without touching visible state,
     // resume only if the panel is still open.
     pausePolling: () => stopPoll(),
