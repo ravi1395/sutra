@@ -2,12 +2,16 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   addTasksGitignoreEntry,
+  appendAutomationEvidence,
   attachClosedTurnToRunningTask,
   attachTurnToTask,
+  completionState,
   detachTurnFromTask,
+  recordManualCheck,
   parseTasksFile,
   saveTasks,
   serializeTasks,
+  setRequiredChecks,
   setOwnedTurnReview,
   setTaskTurnReview,
   transitionTask,
@@ -98,7 +102,10 @@ test("historical turn attachment is explicit and detach removes only its initial
 
   const detached = detachTurnFromTask(reviewed, 9, 202);
   assert.deepEqual(detached.turnIds, []);
-  assert.deepEqual(detached.evidence, []);
+  assert.deepEqual(detached.evidence, [
+    { kind: "turn", turnId: 9, testState: "fail" },
+    { kind: "turn_detached", turnId: 9, detachedAt: 202, reason: "Explicitly detached from task" },
+  ]);
   assert.equal(detached.turnReviews, undefined);
   assert.strictEqual(detachTurnFromTask(detached, 9, 203), detached);
 });
@@ -110,6 +117,109 @@ test("turn evidence preserves initial running and skipped states", () => {
     { kind: "turn", turnId: 10, testState: "running" },
     { kind: "turn", turnId: 11, testState: "skipped" },
   ]);
+});
+
+test("required automation evidence is append-only, tail-bounded, and retains prior runs", () => {
+  const selected = setRequiredChecks(task(), [{ kind: "automation", automationId: "unit" }], 200);
+  const failed = appendAutomationEvidence(selected, {
+    automationId: "unit", state: "fail", runAt: 210, outputTail: "first failure",
+  }, 210);
+  const passed = appendAutomationEvidence(failed, {
+    automationId: "unit", state: "pass", runAt: 220, outputTail: "x".repeat(2_000_001),
+  }, 220);
+
+  assert.equal(failed.evidence.length, 1, "recording a later run cannot mutate prior task evidence");
+  assert.equal(passed.evidence.length, 2, "prior run remains readable in history");
+  assert.equal(passed.evidence[1]?.kind, "automation");
+  assert.equal(passed.evidence[1]?.kind === "automation" && passed.evidence[1].outputTail.length, 2_000_000);
+  assert.deepEqual(completionState(passed, { now: 221 }), { complete: true, reason: null });
+});
+
+test("completion names the current failed, cancelled, missing, and stale required check", () => {
+  const selected = setRequiredChecks(task(), [{ kind: "automation", automationId: "unit" }], 200);
+  assert.deepEqual(completionState(selected, { now: 201 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d has no completed evidence.",
+  });
+
+  const failed = appendAutomationEvidence(selected, { automationId: "unit", state: "fail", runAt: 210, outputTail: "nope" }, 210);
+  assert.deepEqual(completionState(failed, { now: 211 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d failed at 210.",
+  });
+
+  const cancelled = appendAutomationEvidence(failed, { automationId: "unit", state: "cancelled", runAt: 220, outputTail: "" }, 220);
+  assert.deepEqual(completionState(cancelled, { now: 221 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d was cancelled at 220.",
+  });
+
+  const passed = appendAutomationEvidence(cancelled, { automationId: "unit", state: "pass", runAt: 230, outputTail: "ok" }, 230);
+  assert.deepEqual(completionState(passed, { now: 231, maxAutomationAgeMs: 0 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d is stale (last passed at 230; maximum age 0ms).",
+  });
+  assert.deepEqual(completionState(passed, { now: 231, freshSince: 231 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d is stale (last passed at 230; fresh after 231).",
+  });
+});
+
+test("required automation selection rejects unknown ids and later appended evidence wins over clock order", () => {
+  assert.throws(
+    () => setRequiredChecks(task(), [{ kind: "automation", automationId: "missing" }], 200, ["unit"]),
+    /unknown automation/i,
+  );
+  const selected = setRequiredChecks(task(), [{ kind: "automation", automationId: "unit" }], 200, ["unit"]);
+  const passed = appendAutomationEvidence(selected, { automationId: "unit", state: "pass", runAt: 300, outputTail: "ok" }, 300);
+  const laterFailure = appendAutomationEvidence(passed, { automationId: "unit", state: "fail", runAt: 200, outputTail: "clock rolled back" }, 301);
+  assert.deepEqual(completionState(laterFailure, { now: 302 }), {
+    complete: false,
+    reason: "Required check \u201cunit\u201d failed at 200.",
+  });
+
+  // Deselection removes the completion requirement only. The run remains a
+  // readable audit event even if its automation was later deleted.
+  const deselected = setRequiredChecks(laterFailure, [], 303, []);
+  assert.deepEqual(deselected.requiredChecks, []);
+  assert.deepEqual(deselected.evidence, laterFailure.evidence);
+  assert.deepEqual(completionState(deselected, { now: 304 }), { complete: true, reason: null });
+});
+
+test("manual rows only complete after an explicit manual record", () => {
+  const selected = setRequiredChecks(task(), [{ kind: "manual", id: "visual", label: "Visual QA" }], 200);
+  assert.deepEqual(completionState(selected, { now: 201 }), {
+    complete: false,
+    reason: "Manual check \u201cVisual QA\u201d is unchecked.",
+  });
+
+  // Terminal/automation evidence cannot auto-check a manual row.
+  const automation = appendAutomationEvidence(selected, { automationId: "visual", state: "pass", runAt: 210, outputTail: "agent said done" }, 210);
+  assert.deepEqual(completionState(automation, { now: 211 }), {
+    complete: false,
+    reason: "Manual check \u201cVisual QA\u201d is unchecked.",
+  });
+
+  const checked = recordManualCheck(automation, "visual", true, 220, "looked good");
+  assert.deepEqual(completionState(checked, { now: 221 }), { complete: true, reason: null });
+  const unchecked = recordManualCheck(checked, "visual", false, 230);
+  assert.equal(checked.evidence.length, 2, "manual toggles append a durable history row");
+  assert.deepEqual(completionState(unchecked, { now: 231 }), {
+    complete: false,
+    reason: "Manual check \u201cVisual QA\u201d is unchecked.",
+  });
+});
+
+test("empty and no-Git tasks can complete, while linked turns require a disposition", () => {
+  assert.deepEqual(completionState(task(), { now: 101 }), { complete: true, reason: null });
+
+  const linked = attachTurnToTask(task(), { id: 13 }, 200);
+  assert.deepEqual(completionState(linked, { now: 201 }), {
+    complete: false,
+    reason: "Linked turn 13 needs a review disposition.",
+  });
+  const reviewed = setTaskTurnReview(linked, 13, "accepted", 202);
+  assert.deepEqual(completionState(reviewed, { now: 203 }), { complete: true, reason: null });
 });
 
 test("review actions select one deterministic linked owner and survive a restart round-trip", () => {

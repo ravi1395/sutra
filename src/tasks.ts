@@ -5,6 +5,8 @@ import { createDir, readFile, writeFile } from "./ipc";
 
 export const TASKS_FILE = ".sutra/tasks.json";
 export const TASKS_GITIGNORE_ENTRY = ".sutra/tasks.json";
+/** Matches runner.rs's capped stdout/stderr contract before evidence is persisted. */
+export const AUTOMATION_OUTPUT_TAIL_LIMIT = 2_000_000;
 
 export type TaskStatus =
   | "draft"
@@ -16,10 +18,35 @@ export type TaskStatus =
   | "abandoned";
 
 export type Evidence =
-  | { kind: "automation"; automationId: string; state: "pass" | "fail" | "cancelled"; runAt: number; outputTail: string }
-  | { kind: "turn"; turnId: number; testState?: "running" | "pass" | "fail" | "skipped" | "none" }
-  | { kind: "manual"; label: string; checkedAt: number | null; note?: string }
-  | { kind: "visual"; annotationIds: string[]; capture?: string };
+  | { readonly kind: "automation"; readonly automationId: string; readonly state: "pass" | "fail" | "cancelled"; readonly runAt: number; readonly outputTail: string }
+  | { readonly kind: "turn"; readonly turnId: number; readonly testState?: "running" | "pass" | "fail" | "skipped" | "none" }
+  | { readonly kind: "turn_detached"; readonly turnId: number; readonly detachedAt: number; readonly reason: string }
+  | { readonly kind: "manual"; readonly checkId?: string; readonly label: string; readonly checkedAt: number | null; readonly note?: string }
+  | { readonly kind: "visual"; readonly annotationIds: string[]; readonly capture?: string };
+
+/** Required rows are configuration, while Evidence remains an append-only
+ * ledger. This lets an unchecked manual row be represented without inventing
+ * a synthetic test result, and lets old automation runs stay readable. */
+export type RequiredTaskCheck =
+  | { readonly kind: "automation"; readonly automationId: string }
+  | { readonly kind: "manual"; readonly id: string; readonly label: string };
+
+export interface CompletionState {
+  complete: boolean;
+  /** Exact user-visible blocker; null means the evidence gate is satisfied. */
+  reason: string | null;
+}
+
+export interface CompletionOptions {
+  /** Lets E3 include live tracker state instead of inferring it from status. */
+  agentRunning?: boolean;
+  /** Evaluation time; injectable for deterministic reducers/tests. */
+  now?: number;
+  /** A caller may require a newer run than the task's durable freshness mark. */
+  freshSince?: number;
+  /** Optional age policy. Undefined deliberately means no wall-clock expiry. */
+  maxAutomationAgeMs?: number;
+}
 
 /** A user review decision for a linked turn. Partial review deliberately has
  * no disposition: only a whole accepted/rolled-back turn can satisfy E1's
@@ -45,11 +72,15 @@ export interface Task {
   profileId: string | null;
   root: string;
   worktree?: { path: string; branch: string };
+  /** Optional for backwards-compatible task files written before E1. */
+  requiredChecks?: readonly RequiredTaskCheck[];
+  /** New task work/selection invalidates older evidence without touching history. */
+  evidenceFreshSince?: number;
   turnIds: number[];
   /** Optional for backwards-compatible task files written before T3. */
   turnReviews?: Record<string, TurnReviewDisposition>;
   annotationIds: string[];
-  evidence: Evidence[];
+  evidence: readonly Evidence[];
 }
 
 export interface TaskLoadResult {
@@ -97,6 +128,20 @@ function isTurnReviews(value: unknown): value is Record<string, TurnReviewDispos
   );
 }
 
+function isRequiredTaskCheck(value: unknown): value is RequiredTaskCheck {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "automation") return typeof value.automationId === "string" && !!value.automationId.trim();
+  return value.kind === "manual"
+    && typeof value.id === "string" && !!value.id.trim()
+    && typeof value.label === "string" && !!value.label.trim();
+}
+
+function isRequiredTaskChecks(value: unknown): value is readonly RequiredTaskCheck[] {
+  if (!Array.isArray(value) || !value.every(isRequiredTaskCheck)) return false;
+  const keys = value.map((check) => check.kind === "automation" ? `automation:${check.automationId.trim()}` : `manual:${check.id.trim()}`);
+  return new Set(keys).size === keys.length;
+}
+
 function isEvidence(value: unknown): value is Evidence {
   if (!isRecord(value) || typeof value.kind !== "string") return false;
   switch (value.kind) {
@@ -104,12 +149,16 @@ function isEvidence(value: unknown): value is Evidence {
       return typeof value.automationId === "string"
         && (value.state === "pass" || value.state === "fail" || value.state === "cancelled")
         && isFiniteTimestamp(value.runAt)
-        && typeof value.outputTail === "string";
+        && typeof value.outputTail === "string"
+        && value.outputTail.length <= AUTOMATION_OUTPUT_TAIL_LIMIT;
     case "turn":
       return typeof value.turnId === "number"
         && (value.testState === undefined || value.testState === "running" || value.testState === "pass" || value.testState === "fail" || value.testState === "skipped" || value.testState === "none");
+    case "turn_detached":
+      return typeof value.turnId === "number" && isFiniteTimestamp(value.detachedAt) && typeof value.reason === "string";
     case "manual":
       return typeof value.label === "string"
+        && (value.checkId === undefined || typeof value.checkId === "string")
         && (value.checkedAt === null || isFiniteTimestamp(value.checkedAt))
         && (value.note === undefined || typeof value.note === "string");
     case "visual":
@@ -131,6 +180,8 @@ function taskError(value: unknown): string | null {
   if (value.profileId !== null && typeof value.profileId !== "string") return `Task ${value.id} profileId is invalid`;
   if (typeof value.root !== "string" || !value.root.trim()) return `Task ${value.id} root is required`;
   if (value.worktree !== undefined && (!isRecord(value.worktree) || typeof value.worktree.path !== "string" || typeof value.worktree.branch !== "string")) return `Task ${value.id} worktree is invalid`;
+  if (value.requiredChecks !== undefined && !isRequiredTaskChecks(value.requiredChecks)) return `Task ${value.id} required checks are invalid`;
+  if (value.evidenceFreshSince !== undefined && !isFiniteTimestamp(value.evidenceFreshSince)) return `Task ${value.id} evidence freshness is invalid`;
   if (!Array.isArray(value.turnIds) || !value.turnIds.every((id) => typeof id === "number")) return `Task ${value.id} turnIds are invalid`;
   if (value.turnReviews !== undefined && !isTurnReviews(value.turnReviews)) return `Task ${value.id} turnReviews are invalid`;
   if (!isStringArray(value.annotationIds)) return `Task ${value.id} annotationIds are invalid`;
@@ -205,6 +256,171 @@ function nextUpdatedAt(task: Task, updatedAt: number): number {
   return Math.max(task.updatedAt, updatedAt);
 }
 
+function taskFreshSince(task: Task, override?: number): number {
+  if (override !== undefined && !isFiniteTimestamp(override)) throw new Error("Evidence freshness time is invalid");
+  return Math.max(task.createdAt, task.evidenceFreshSince ?? task.createdAt, override ?? 0);
+}
+
+function normalizeRequiredChecks(checks: readonly RequiredTaskCheck[]): RequiredTaskCheck[] {
+  if (!isRequiredTaskChecks(checks)) throw new Error("Task required checks are invalid");
+  const normalized: RequiredTaskCheck[] = checks.map((check): RequiredTaskCheck => check.kind === "automation"
+    ? { kind: "automation", automationId: check.automationId.trim() }
+    : { kind: "manual", id: check.id.trim(), label: check.label.trim() });
+  const keys = normalized.map((check) => check.kind === "automation" ? `automation:${check.automationId}` : `manual:${check.id}`);
+  if (new Set(keys).size !== keys.length) throw new Error("Task required checks are invalid");
+  return normalized;
+}
+
+/** Validate a selection against the current project automation ids. Manual
+ * rows remain user-owned and therefore do not need a project configuration. */
+export function validateRequiredChecks(checks: readonly RequiredTaskCheck[], knownAutomationIds?: readonly string[]): string | null {
+  try {
+    const normalized = normalizeRequiredChecks(checks);
+    if (knownAutomationIds) {
+      const known = new Set(knownAutomationIds);
+      const unknown = normalized.find((check) => check.kind === "automation" && !known.has(check.automationId));
+      if (unknown?.kind === "automation") return `Unknown automation: ${unknown.automationId}`;
+    }
+    return null;
+  } catch {
+    return "Task required checks are invalid";
+  }
+}
+
+/** Select the checks that must be satisfied. Selection itself marks older
+ * results stale; it never rewrites the evidence ledger. */
+export function setRequiredChecks(
+  task: Task,
+  checks: readonly RequiredTaskCheck[],
+  updatedAt = Date.now(),
+  knownAutomationIds?: readonly string[],
+): Task {
+  const normalized = normalizeRequiredChecks(checks);
+  const validationError = validateRequiredChecks(normalized, knownAutomationIds);
+  if (validationError) throw new Error(validationError);
+  const current = task.requiredChecks ?? [];
+  if (JSON.stringify(current) === JSON.stringify(normalized)) return task;
+  const next = nextUpdatedAt(task, updatedAt);
+  return {
+    ...task,
+    requiredChecks: normalized,
+    evidenceFreshSince: Math.max(taskFreshSince(task), next),
+    updatedAt: next,
+  };
+}
+
+/** Add one manual checklist row without making it pass by default. */
+export function addRequiredManualCheck(task: Task, check: { id: string; label: string }, updatedAt = Date.now()): Task {
+  return setRequiredChecks(task, [...(task.requiredChecks ?? []), { kind: "manual", ...check }], updatedAt);
+}
+
+function boundedTail(outputTail: string): string {
+  return outputTail.length <= AUTOMATION_OUTPUT_TAIL_LIMIT
+    ? outputTail
+    : outputTail.slice(outputTail.length - AUTOMATION_OUTPUT_TAIL_LIMIT);
+}
+
+/** Append a completed runner result. Never use this for a PTY/background run:
+ * E2 calls it only after runner completion, preserving the previous active
+ * result until then. */
+export function appendAutomationEvidence(
+  task: Task,
+  evidence: { automationId: string; state: "pass" | "fail" | "cancelled"; runAt: number; outputTail: string },
+  updatedAt = evidence.runAt,
+): Task {
+  if (!evidence.automationId.trim() || !isFiniteTimestamp(evidence.runAt)) throw new Error("Automation evidence is invalid");
+  const row: Evidence = {
+    kind: "automation",
+    automationId: evidence.automationId,
+    state: evidence.state,
+    runAt: evidence.runAt,
+    outputTail: boundedTail(evidence.outputTail),
+  };
+  return { ...task, evidence: [...task.evidence, row], updatedAt: nextUpdatedAt(task, updatedAt) };
+}
+
+/** Append an explicit user action for a manual row. Automation/turn evidence
+ * cannot call this reducer, so a manual requirement never auto-completes. */
+export function recordManualCheck(
+  task: Task,
+  checkId: string,
+  checked: boolean,
+  checkedAt = Date.now(),
+  note?: string,
+): Task {
+  const check = (task.requiredChecks ?? []).find((candidate): candidate is Extract<RequiredTaskCheck, { kind: "manual" }> =>
+    candidate.kind === "manual" && candidate.id === checkId,
+  );
+  if (!check || !isFiniteTimestamp(checkedAt)) throw new Error("Manual check is invalid");
+  const row: Evidence = { kind: "manual", checkId, label: check.label, checkedAt: checked ? checkedAt : null, ...(note === undefined ? {} : { note }) };
+  return { ...task, evidence: [...task.evidence, row], updatedAt: nextUpdatedAt(task, checkedAt) };
+}
+
+function latestAutomationEvidence(task: Task, automationId: string): Extract<Evidence, { kind: "automation" }> | undefined {
+  let latest: Extract<Evidence, { kind: "automation" }> | undefined;
+  for (const evidence of task.evidence) {
+    // Results are immutable append events. Runner clocks may be adjusted or
+    // externally supplied, so append order—not wall time—defines the active
+    // completed result for a required check.
+    if (evidence.kind === "automation" && evidence.automationId === automationId) latest = evidence;
+  }
+  return latest;
+}
+
+function latestManualEvidence(task: Task, check: Extract<RequiredTaskCheck, { kind: "manual" }>): Extract<Evidence, { kind: "manual" }> | undefined {
+  let latest: Extract<Evidence, { kind: "manual" }> | undefined;
+  for (const evidence of task.evidence) {
+    if (evidence.kind !== "manual" || (evidence.checkId !== check.id && (evidence.checkId !== undefined || evidence.label !== check.label))) continue;
+    // Manual actions are appended as an immutable event stream. An explicit
+    // uncheck has a null timestamp, so chronological array order—not the
+    // timestamp—is the authoritative current state.
+    latest = evidence;
+  }
+  return latest;
+}
+
+/** Current manual state is derived only from explicit append-only manual
+ * events. No terminal output or automation evidence can satisfy this row. */
+export function manualCheckIsChecked(task: Task, checkId: string): boolean {
+  const check = (task.requiredChecks ?? []).find((candidate): candidate is Extract<RequiredTaskCheck, { kind: "manual" }> =>
+    candidate.kind === "manual" && candidate.id === checkId,
+  );
+  const latest = check && latestManualEvidence(task, check);
+  return latest !== undefined && latest.checkedAt !== null;
+}
+
+/** Pure completion gate shared by the E1 ledger and E3's eventual Accept
+ * control. It intentionally does not transition or accept a task. */
+export function completionState(task: Task, options: CompletionOptions = {}): CompletionState {
+  if (options.agentRunning ?? task.status === "running") return { complete: false, reason: "Task still has a running agent." };
+  const now = options.now ?? Date.now();
+  if (!isFiniteTimestamp(now) || (options.maxAutomationAgeMs !== undefined && (!isFiniteTimestamp(options.maxAutomationAgeMs)))) {
+    throw new Error("Completion freshness policy is invalid");
+  }
+  const freshSince = taskFreshSince(task, options.freshSince);
+  for (const check of task.requiredChecks ?? []) {
+    if (check.kind !== "automation") continue;
+    const latest = latestAutomationEvidence(task, check.automationId);
+    if (!latest) return { complete: false, reason: `Required check \u201c${check.automationId}\u201d has no completed evidence.` };
+    if (latest.state === "fail") return { complete: false, reason: `Required check \u201c${check.automationId}\u201d failed at ${latest.runAt}.` };
+    if (latest.state === "cancelled") return { complete: false, reason: `Required check \u201c${check.automationId}\u201d was cancelled at ${latest.runAt}.` };
+    if (latest.runAt < freshSince) return { complete: false, reason: `Required check \u201c${check.automationId}\u201d is stale (last passed at ${latest.runAt}; fresh after ${freshSince}).` };
+    if (options.maxAutomationAgeMs !== undefined && now - latest.runAt > options.maxAutomationAgeMs) {
+      return { complete: false, reason: `Required check \u201c${check.automationId}\u201d is stale (last passed at ${latest.runAt}; maximum age ${options.maxAutomationAgeMs}ms).` };
+    }
+  }
+  for (const check of task.requiredChecks ?? []) {
+    if (check.kind !== "manual") continue;
+    const latest = latestManualEvidence(task, check);
+    if (!latest || latest.checkedAt === null) return { complete: false, reason: `Manual check \u201c${check.label}\u201d is unchecked.` };
+    if (latest.checkedAt < freshSince) return { complete: false, reason: `Manual check \u201c${check.label}\u201d is stale (completed at ${latest.checkedAt}; fresh after ${freshSince}).` };
+  }
+  for (const turnId of task.turnIds) {
+    if (!task.turnReviews?.[String(turnId)]) return { complete: false, reason: `Linked turn ${turnId} needs a review disposition.` };
+  }
+  return { complete: true, reason: null };
+}
+
 function turnTestState(turn: TaskTurn): "running" | "pass" | "fail" | "skipped" | "none" {
   return turn.testStatus?.state ?? "none";
 }
@@ -213,16 +429,18 @@ function turnTestState(turn: TaskTurn): "running" | "pass" | "fail" | "skipped" 
  * which also makes repeated close delivery idempotent. */
 export function attachTurnToTask(task: Task, turn: TaskTurn, updatedAt = Date.now()): Task {
   if (task.turnIds.includes(turn.id)) return task;
+  const next = nextUpdatedAt(task, updatedAt);
   return {
     ...task,
     turnIds: [...task.turnIds, turn.id],
     evidence: [...task.evidence, { kind: "turn", turnId: turn.id, testState: turnTestState(turn) }],
-    updatedAt: nextUpdatedAt(task, updatedAt),
+    evidenceFreshSince: Math.max(taskFreshSince(task), next),
+    updatedAt: next,
   };
 }
 
-/** Explicitly unlinks an ambiguous historical turn and its T3 initial test
- * evidence. It does not alter any other evidence rows. */
+/** Explicitly unlinks an ambiguous historical turn but retains its original
+ * evidence plus an append-only audit marker for later review. */
 export function detachTurnFromTask(task: Task, turnId: number, updatedAt = Date.now()): Task {
   if (!task.turnIds.includes(turnId)) return task;
   const turnReviews = task.turnReviews && { ...task.turnReviews };
@@ -231,7 +449,7 @@ export function detachTurnFromTask(task: Task, turnId: number, updatedAt = Date.
   return {
     ...(turnReviews && Object.keys(turnReviews).length ? task : withoutTurnReviews),
     turnIds: task.turnIds.filter((id) => id !== turnId),
-    evidence: task.evidence.filter((evidence) => evidence.kind !== "turn" || evidence.turnId !== turnId),
+    evidence: [...task.evidence, { kind: "turn_detached", turnId, detachedAt: updatedAt, reason: "Explicitly detached from task" }],
     ...(turnReviews && Object.keys(turnReviews).length ? { turnReviews } : {}),
     updatedAt: nextUpdatedAt(task, updatedAt),
   };

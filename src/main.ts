@@ -1142,6 +1142,7 @@ const tasksPanel = mountTasksPanel({
     if (!ensureComposer()) return { ok: false, reason: "No workspace open" };
     return composerPanel?.deliverTaskPrompt(args) ?? { ok: false, reason: "Composer unavailable" };
   },
+  getAutomationChoices: () => automations.map((automation) => ({ id: automation.id, label: automation.name })),
 });
 function setTasks(on: boolean): void {
   btnTasks.classList.toggle("on", on);

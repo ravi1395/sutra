@@ -2,7 +2,21 @@
 // durable turn links so historical attribution never depends on a terminal.
 import { ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
-import { attachTurnToTask, detachTurnFromTask, loadTasks, saveTasks, transitionTask, type Task, type TurnReviewDisposition } from "./tasks";
+import {
+  addRequiredManualCheck,
+  attachTurnToTask,
+  completionState,
+  detachTurnFromTask,
+  loadTasks,
+  manualCheckIsChecked,
+  recordManualCheck,
+  saveTasks,
+  setRequiredChecks,
+  transitionTask,
+  type RequiredTaskCheck,
+  type Task,
+  type TurnReviewDisposition,
+} from "./tasks";
 import type { ComposerDeliveryResult, ComposerTaskDraft } from "./composer";
 
 export interface TasksPanelOptions {
@@ -11,7 +25,12 @@ export interface TasksPanelOptions {
   getTurns: (root: string) => readonly Turn[];
   getComposerDraft: () => ComposerTaskDraft | null;
   deliverPrompt: (args: { targetId: string; prompt: string; submit: boolean }) => Promise<ComposerDeliveryResult>;
+  /** Safe, current project automation choices. E1 selects configuration only;
+   * E2 is solely responsible for executing any selected check. */
+  getAutomationChoices: () => readonly TaskAutomationChoice[];
 }
+
+export interface TaskAutomationChoice { id: string; label: string; }
 
 export interface TasksPanelHandle {
   show(): void;
@@ -103,7 +122,7 @@ export function attachableHistoricalTurns(tasks: readonly Task[], root: string, 
 }
 
 export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
-  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt } = opts;
+  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
   let trusted = false;
@@ -274,6 +293,159 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     }
   }
 
+  async function updateRequiredChecks(task: Task, checks: readonly RequiredTaskCheck[]): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    const snapshot = tasks;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; required checks were not saved.");
+    try {
+      const nextTask = setRequiredChecks(task, checks, Date.now(), getAutomationChoices().map((choice) => choice.id));
+      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus("Required checks updated.");
+    } catch (error) {
+      showStatus(`Could not update required checks: ${String(error)}`);
+    }
+  }
+
+  async function addManualCheck(task: Task, label: string): Promise<void> {
+    const root = getRoot();
+    if (!root || !label.trim()) return showStatus("Give the manual check a label.");
+    const snapshot = tasks;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; manual check was not added.");
+    try {
+      const id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const nextTask = addRequiredManualCheck(task, { id, label: label.trim() });
+      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus("Manual check added.");
+    } catch (error) {
+      showStatus(`Could not add manual check: ${String(error)}`);
+    }
+  }
+
+  async function setManualCheckResult(task: Task, checkId: string, checked: boolean): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    const snapshot = tasks;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; manual result was not saved.");
+    try {
+      const nextTask = recordManualCheck(task, checkId, checked);
+      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Manual check ${checked ? "recorded" : "cleared"}.`);
+    } catch (error) {
+      showStatus(`Could not record manual check: ${String(error)}`);
+    }
+  }
+
+  /** E1 is intentionally display-only: E2 supplies runner execution and E3
+   * supplies explicit acceptance. The ledger still renders every prior row,
+   * including optional/manual evidence, so a rerun never hides its history. */
+  function renderEvidenceLedger(task: Task): HTMLElement {
+    const ledger = el("div", "task-evidence-ledger");
+    const heading = el("strong");
+    heading.textContent = "Evidence ledger";
+    ledger.appendChild(heading);
+    const gate = completionState(task);
+    const summary = el("div");
+    summary.textContent = gate.complete ? "Completion evidence is satisfied." : gate.reason ?? "Completion evidence is incomplete.";
+    ledger.appendChild(summary);
+
+    const selected = task.requiredChecks ?? [];
+    const required = el("div", "task-required-checks");
+    required.textContent = selected.length
+      ? `Required: ${selected.map((check) => check.kind === "automation" ? `automation ${check.automationId}` : `manual ${check.label}`).join(" · ")}`
+      : "No required checks selected.";
+    ledger.appendChild(required);
+
+    if (trusted && !loading) {
+      const selectedRows = el("div", "task-selected-checks");
+      for (const check of selected) {
+        const row = el("div", "task-selected-check");
+        const remove = el("button");
+        remove.textContent = check.kind === "automation" ? "Remove automation" : "Remove manual check";
+        remove.onclick = () => void updateRequiredChecks(task, selected.filter((candidate) => {
+          if (check.kind === "automation") return candidate.kind !== "automation" || candidate.automationId !== check.automationId;
+          return candidate.kind !== "manual" || candidate.id !== check.id;
+        }));
+        row.append(check.kind === "automation" ? `Required automation: ${check.automationId}` : `Required manual: ${check.label}`, remove);
+        selectedRows.appendChild(row);
+      }
+      if (selected.length) ledger.appendChild(selectedRows);
+
+      const controls = el("div", "task-evidence-controls");
+      const available = getAutomationChoices().filter((choice) => !selected.some((check) => check.kind === "automation" && check.automationId === choice.id));
+      const automation = el("select");
+      automation.setAttribute("aria-label", "Required automation");
+      const none = el("option");
+      none.value = "";
+      none.textContent = available.length ? "Choose required automation" : "No other automations";
+      automation.appendChild(none);
+      for (const choice of available) {
+        const option = el("option");
+        option.value = choice.id;
+        option.textContent = choice.label;
+        automation.appendChild(option);
+      }
+      const addAutomation = el("button");
+      addAutomation.textContent = "Require automation";
+      addAutomation.disabled = !available.length;
+      addAutomation.onclick = () => {
+        if (!automation.value) return;
+        void updateRequiredChecks(task, [...selected, { kind: "automation", automationId: automation.value }]);
+      };
+      const manual = el("input");
+      manual.placeholder = "Optional manual check";
+      manual.setAttribute("aria-label", "Optional manual check");
+      const addManual = el("button");
+      addManual.textContent = "Add manual check";
+      addManual.onclick = () => void addManualCheck(task, manual.value);
+      controls.append(automation, addAutomation, manual, addManual);
+      ledger.appendChild(controls);
+
+      for (const check of selected) {
+        if (check.kind !== "manual") continue;
+        const row = el("div", "task-manual-check");
+        const label = el("label");
+        const input = el("input");
+        input.type = "checkbox";
+        input.checked = manualCheckIsChecked(task, check.id);
+        input.onchange = () => void setManualCheckResult(task, check.id, input.checked);
+        label.append(input, ` ${check.label}`);
+        row.appendChild(label);
+        ledger.appendChild(row);
+      }
+    }
+
+    if (!task.evidence.length) {
+      const empty = el("span");
+      empty.textContent = " No evidence yet.";
+      ledger.appendChild(empty);
+      return ledger;
+    }
+    const history = el("div", "task-evidence-history");
+    for (const evidence of task.evidence) {
+      const row = el("div", "task-evidence-row");
+      if (evidence.kind === "automation") {
+        row.textContent = `Automation ${evidence.automationId} · ${evidence.state} · ${evidence.runAt}`;
+        if (evidence.outputTail) {
+          const output = el("pre");
+          output.textContent = evidence.outputTail;
+          row.appendChild(output);
+        }
+      } else if (evidence.kind === "manual") {
+        row.textContent = `Manual ${evidence.label} · ${evidence.checkedAt === null ? "unchecked" : `checked ${evidence.checkedAt}`}${evidence.note ? ` · ${evidence.note}` : ""}`;
+      } else if (evidence.kind === "turn") {
+        row.textContent = `Turn ${evidence.turnId} · test ${evidence.testState ?? "none"}`;
+      } else if (evidence.kind === "turn_detached") {
+        row.textContent = `Turn ${evidence.turnId} detached ${evidence.detachedAt} · ${evidence.reason}`;
+      } else {
+        row.textContent = `Visual annotations · ${evidence.annotationIds.length}`;
+      }
+      history.appendChild(row);
+    }
+    ledger.appendChild(history);
+    return ledger;
+  }
+
   function renderTask(task: Task, running: Task | undefined): HTMLElement {
     const card = el("section", "tasks-panel-card");
     const title = el("input");
@@ -342,7 +514,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       attachControls.append(select, attach);
       linkedList.appendChild(attachControls);
     }
-    card.append(meta, title, acceptance, actions, linkedList);
+    card.append(meta, title, acceptance, actions, linkedList, renderEvidenceLedger(task));
     return card;
   }
 
