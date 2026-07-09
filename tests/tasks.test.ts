@@ -14,6 +14,9 @@ import {
   setRequiredChecks,
   setOwnedTurnReview,
   setTaskTurnReview,
+  taskCheckEvidence,
+  taskCheckRunId,
+  TaskCheckRunRegistry,
   transitionTask,
   type Task,
   type TaskPersistence,
@@ -133,6 +136,45 @@ test("required automation evidence is append-only, tail-bounded, and retains pri
   assert.equal(passed.evidence[1]?.kind, "automation");
   assert.equal(passed.evidence[1]?.kind === "automation" && passed.evidence[1].outputTail.length, 2_000_000);
   assert.deepEqual(completionState(passed, { now: 221 }), { complete: true, reason: null });
+});
+
+test("runner-backed checks reserve task/root scope without replacing active evidence", () => {
+  const prior = appendAutomationEvidence(
+    setRequiredChecks(task(), [{ kind: "automation", automationId: "unit" }], 200),
+    { automationId: "unit", state: "pass", runAt: 210, outputTail: "previous pass" },
+  );
+  const registry = new TaskCheckRunRegistry();
+  const run = registry.start("/workspace:with-colon", "task-1", "unit");
+  assert.equal(run.id, "task-check:/workspace:with-colon:task-1:unit");
+  assert.equal(prior.evidence.length, 1, "starting a rerun is in-memory only");
+  assert.throws(() => registry.start("/workspace:with-colon", "task-1", "unit"), /already running/i);
+
+  const completed = registry.complete({
+    id: run.id, exitCode: 0, stdout: "fresh pass", stderr: "", timedOut: false, cancelled: false,
+  });
+  assert.deepEqual(completed, run);
+  const rerun = appendAutomationEvidence(prior, {
+    automationId: run.automationId,
+    ...taskCheckEvidence({ id: run.id, exitCode: 0, stdout: "fresh pass", stderr: "", timedOut: false, cancelled: false }, 220),
+  });
+  assert.equal(rerun.evidence.length, 2, "only completed runner output appends evidence");
+  assert.equal(registry.size, 0);
+});
+
+test("task-check evidence is scoped and records explicit cancellation", () => {
+  assert.equal(taskCheckRunId("/workspace", "task-a", "unit"), "task-check:/workspace:task-a:unit");
+  assert.equal(taskCheckRunId("/other", "task-a", "unit"), "task-check:/other:task-a:unit");
+  assert.throws(() => taskCheckRunId("/workspace", "task:a", "unit"), /invalid/i);
+
+  assert.deepEqual(
+    taskCheckEvidence({ id: "task-check:/workspace:task-a:unit", exitCode: null, stdout: "", stderr: "killed", timedOut: false, cancelled: true }, 300),
+    { state: "cancelled", runAt: 300, outputTail: "killed" },
+  );
+  assert.equal(
+    taskCheckEvidence({ id: "task-check:/workspace:task-a:unit", exitCode: null, stdout: "", stderr: "timed out", timedOut: true, cancelled: false }, 301).state,
+    "fail",
+    "timeouts are not user cancellation",
+  );
 });
 
 test("completion names the current failed, cancelled, missing, and stale required check", () => {

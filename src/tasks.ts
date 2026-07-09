@@ -7,6 +7,25 @@ export const TASKS_FILE = ".sutra/tasks.json";
 export const TASKS_GITIGNORE_ENTRY = ".sutra/tasks.json";
 /** Matches runner.rs's capped stdout/stderr contract before evidence is persisted. */
 export const AUTOMATION_OUTPUT_TAIL_LIMIT = 2_000_000;
+export const TASK_CHECK_TIMEOUT_MS = 600_000;
+
+/** Opaque identity for one active runner-backed required check. The Rust
+ * command constructs the same value and owns process execution. */
+export interface TaskCheckRun {
+  readonly id: string;
+  readonly root: string;
+  readonly taskId: string;
+  readonly automationId: string;
+}
+
+export interface TaskCheckCompletion {
+  readonly id: string;
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+  readonly cancelled: boolean;
+}
 
 export type TaskStatus =
   | "draft"
@@ -318,6 +337,58 @@ function boundedTail(outputTail: string): string {
   return outputTail.length <= AUTOMATION_OUTPUT_TAIL_LIMIT
     ? outputTail
     : outputTail.slice(outputTail.length - AUTOMATION_OUTPUT_TAIL_LIMIT);
+}
+
+/** Keep the runner id opaque to callers: task/root/automation correlation is
+ * retained locally rather than recovered by splitting a path-containing id. */
+export function taskCheckRunId(root: string, taskId: string, automationId: string): string {
+  if (!root.trim()) throw new Error("Task check root is required");
+  for (const [label, value] of [["task", taskId], ["automation", automationId]] as const) {
+    if (!value.trim() || value.includes(":") || /[\r\n]/.test(value)) throw new Error(`Task check ${label} id is invalid`);
+  }
+  return `task-check:${root}:${taskId}:${automationId}`;
+}
+
+/** In-memory correlation for runner events. Starting a rerun does not touch
+ * durable evidence; it merely reserves the scoped job until completion. */
+export class TaskCheckRunRegistry {
+  private readonly active = new Map<string, TaskCheckRun>();
+
+  start(root: string, taskId: string, automationId: string): TaskCheckRun {
+    const id = taskCheckRunId(root, taskId, automationId);
+    if (this.active.has(id)) throw new Error("Required check is already running");
+    const run = { id, root, taskId, automationId };
+    this.active.set(id, run);
+    return run;
+  }
+
+  activeRun(root: string, taskId: string, automationId: string): TaskCheckRun | undefined {
+    return this.active.get(taskCheckRunId(root, taskId, automationId));
+  }
+
+  complete(done: TaskCheckCompletion): TaskCheckRun | undefined {
+    const run = this.active.get(done.id);
+    if (run) this.active.delete(done.id);
+    return run;
+  }
+
+  get size(): number { return this.active.size; }
+}
+
+/** Turn a completed headless runner result into immutable task evidence.
+ * `cancelled` is an explicit runner signal; a timeout and every other
+ * nonzero/spawn failure remain failures. */
+export function taskCheckEvidence(done: TaskCheckCompletion, runAt = Date.now()): {
+  state: "pass" | "fail" | "cancelled";
+  runAt: number;
+  outputTail: string;
+} {
+  if (!isFiniteTimestamp(runAt)) throw new Error("Task check completion time is invalid");
+  return {
+    state: done.cancelled ? "cancelled" : (!done.timedOut && done.exitCode === 0 ? "pass" : "fail"),
+    runAt,
+    outputTail: boundedTail(`${done.stdout}${done.stderr}`),
+  };
 }
 
 /** Append a completed runner result. Never use this for a PTY/background run:

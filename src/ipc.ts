@@ -407,7 +407,7 @@ export async function deliverToPty(args: {
 // against these exact shapes. Rust structs serialize camelCase.
 export interface Diagnostic { path: string; line: number; col: number; severity: "error" | "warning"; message: string; source: string }
 export interface DiagJob { source: string; command: string; cwd: string; parser: "tsc" | "cargo" | "go" | "ruff" | "regex"; regex?: string }
-export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean }
+export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean; cancelled: boolean }
 export interface TestStatus { state: "running" | "pass" | "fail" | "skipped"; exitCode?: number | null; durationMs?: number; outputTail: string }
 export interface TurnFileEntry { path: string; beforeHash?: string | null; afterHash?: string | null; snapshotted: boolean; unsafeBefore?: boolean }
 export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
@@ -421,6 +421,13 @@ export async function runnerRun(id: string, cmd: string, cwd: string, timeoutMs:
 }
 export async function runnerCancel(id: string): Promise<boolean> {
   return invoke<boolean>("runner_cancel", { id });
+}
+/** Required task checks run headlessly via runner.rs, never through a PTY. */
+export async function taskCheckRun(root: string, taskId: string, automationId: string, cmd: string, timeoutMs: number): Promise<string> {
+  return invoke<string>("task_check_run", { root, taskId, automationId, cmd, timeoutMs });
+}
+export async function taskCheckCancel(root: string, taskId: string, automationId: string): Promise<boolean> {
+  return invoke<boolean>("task_check_cancel", { root, taskId, automationId });
 }
 export async function diagDetect(root: string): Promise<DiagJob[]> {
   return invoke<DiagJob[]>("diag_detect", { root });

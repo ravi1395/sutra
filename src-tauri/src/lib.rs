@@ -296,6 +296,8 @@ pub fn run() {
             pty::pty_list_agents,
             runner::runner_run,
             runner::runner_cancel,
+            runner::task_check_run,
+            runner::task_check_cancel,
             runner::diag_detect,
             runner::diag_run,
             turns::turn_poll,

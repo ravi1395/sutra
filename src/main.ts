@@ -64,6 +64,8 @@ import {
   turnDiskHashes,
   runnerRun,
   runnerCancel,
+  taskCheckRun,
+  taskCheckCancel,
   onRunnerDone,
   recentsPush,
   listFiles,
@@ -134,7 +136,17 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { mountTasksPanel } from "./tasks-panel";
-import { attachClosedTurnToRunningTask, loadTasks, saveTasks, setOwnedTurnReview, type Task } from "./tasks";
+import {
+  appendAutomationEvidence,
+  attachClosedTurnToRunningTask,
+  loadTasks,
+  saveTasks,
+  setOwnedTurnReview,
+  TaskCheckRunRegistry,
+  taskCheckEvidence,
+  TASK_CHECK_TIMEOUT_MS,
+  type Task,
+} from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
@@ -1586,6 +1598,54 @@ function queueTaskMetadataUpdate(root: string, reduce: (tasks: readonly Task[]) 
   return next;
 }
 
+// Required-check execution is deliberately separate from the automation bar:
+// PTY/background automations have no authoritative exit code and can never
+// write task evidence. This in-memory registry preserves the last completed
+// evidence throughout a rerun, then correlates the runner-done event without
+// splitting a root-containing job id.
+const activeTaskChecks = new TaskCheckRunRegistry();
+
+/** Programmatic seam for the task panel's later E2 run control. The selected
+ * automation must still be required by this exact task in the current trusted
+ * root; a terminal automation cannot enter this path. */
+export async function runTaskRequiredCheck(task: Task, automationId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const root = task.root;
+  if (currentRoot !== root) return { ok: false, reason: "Open this task's workspace before running its checks." };
+  if (!(await isWorkspaceTrusted(root))) return { ok: false, reason: "Tasks are read-only until this workspace is trusted." };
+  if (!(task.requiredChecks ?? []).some((check) => check.kind === "automation" && check.automationId === automationId)) {
+    return { ok: false, reason: "This automation is not required by the task." };
+  }
+  const automation = automations.find((candidate) => candidate.id === automationId);
+  if (!automation) return { ok: false, reason: `Required automation “${automationId}” no longer exists.` };
+
+  let run;
+  try {
+    run = activeTaskChecks.start(root, task.id, automationId);
+  } catch (error) {
+    return { ok: false, reason: String(error) };
+  }
+  try {
+    const runnerId = await taskCheckRun(root, task.id, automationId, automation.command, TASK_CHECK_TIMEOUT_MS);
+    if (runnerId !== run.id) throw new Error("Task check runner returned an unexpected job id");
+    return { ok: true };
+  } catch (error) {
+    // No runner-done event is guaranteed when the command could not be
+    // scheduled, so release only this unstarted reservation. Existing durable
+    // evidence was intentionally never touched.
+    activeTaskChecks.complete({ id: run.id, exitCode: null, stdout: "", stderr: "", timedOut: false, cancelled: false });
+    return { ok: false, reason: `Could not start required check: ${String(error)}` };
+  }
+}
+
+/** Cancellation remains pending until runner-done appends immutable
+ * `cancelled` evidence. Returning false leaves an already-completed result
+ * untouched. */
+export async function cancelTaskRequiredCheck(task: Task, automationId: string): Promise<boolean> {
+  const run = activeTaskChecks.activeRun(task.root, task.id, automationId);
+  if (!run) return false;
+  return taskCheckCancel(run.root, run.taskId, run.automationId).catch(() => false);
+}
+
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
   void (async () => {
@@ -1631,6 +1691,21 @@ async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<voi
 
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
 void onRunnerDone((p) => {
+  const taskCheck = activeTaskChecks.complete(p);
+  if (taskCheck) {
+    const evidence = taskCheckEvidence(p);
+    void queueTaskMetadataUpdate(taskCheck.root, (tasks) => {
+      const task = tasks.find((candidate) => candidate.id === taskCheck.taskId && candidate.root === taskCheck.root);
+      if (!task) return tasks;
+      // An explicit deselection while the process ran does not delete the
+      // completed audit event; only the completion gate stops requiring it.
+      return tasks.map((candidate) => candidate === task
+        ? appendAutomationEvidence(candidate, { automationId: taskCheck.automationId, ...evidence })
+        : candidate);
+    }).catch((error) => console.warn("Task check evidence failed", error));
+    if (currentRoot === taskCheck.root) void tasksPanel.reload();
+    return;
+  }
   if (!p.id.startsWith("test:")) return;
   // A rollback-driven cancel must not stamp a stale pass/fail for the turn
   // whose code state it just replaced.
