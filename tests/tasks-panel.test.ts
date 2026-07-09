@@ -1,9 +1,9 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, runGuardedTaskOperation } from "../src/tasks-panel";
+import { acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, runGuardedTaskOperation } from "../src/tasks-panel";
 import { getTurns, replaceTurns } from "../src/agent-tracking";
 import type { Turn } from "../src/ipc";
-import type { Task } from "../src/tasks";
+import { attachTurnToTask, type Task } from "../src/tasks";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "task-1", title: "Task", status: "needs_review", createdAt: 1, updatedAt: 1,
@@ -113,4 +113,49 @@ test("root switch during persisted Start prevents delivery without cross-root wr
   assert.equal(await operation, "rejected");
   assert.deepEqual(writes, ["/a"]);
   assert.equal(deliveries, 0);
+});
+
+test("acceptance rebases on serialized task metadata so a deferred closed turn cannot be overwritten", async () => {
+  let current = task();
+  const allowRebasedRead = deferred<void>();
+  const accepting = acceptTaskWithAuthoritativeUpdate({
+    root: "/root", taskId: current.id, getRoot: () => "/root", isTrusted: async () => true,
+    update: async (_root, reduce) => {
+      await allowRebasedRead.promise;
+      current = reduce([current])[0] as Task;
+      return true;
+    },
+  });
+
+  // This represents an already-queued turn close completing before the
+  // serialized acceptance reducer reads its authoritative task list.
+  await Promise.resolve();
+  current = attachTurnToTask(current, { id: 42, testStatus: { state: "pass" } }, 2);
+  allowRebasedRead.resolve();
+
+  await assert.rejects(accepting, /Linked turn 42 needs a review disposition/);
+  assert.equal(current.status, "needs_review");
+  assert.deepEqual(current.turnIds, [42]);
+  assert.equal(current.acceptedAt, undefined, "the stale rendered task did not overwrite the linked turn");
+});
+
+test("acceptance reports rejected when trust/root guard fails after the rebased reducer but before save", async () => {
+  const current = task();
+  const allowPreSaveGuard = deferred<void>();
+  let proposed: readonly Task[] | undefined;
+  const accepting = acceptTaskWithAuthoritativeUpdate({
+    root: "/root", taskId: current.id, getRoot: () => "/root", isTrusted: async () => true,
+    update: async (_root, reduce) => {
+      proposed = reduce([current]);
+      await allowPreSaveGuard.promise;
+      return false; // mirrors queueTaskMetadataUpdate's second canWrite check
+    },
+  });
+
+  await Promise.resolve();
+  allowPreSaveGuard.resolve();
+  assert.equal(await accepting, "rejected");
+  assert.equal(proposed?.[0]?.status, "accepted", "the proposed metadata can be valid");
+  assert.equal(current.status, "needs_review", "the uncommitted proposal never replaces authoritative metadata");
+  assert.equal(current.acceptedAt, undefined);
 });

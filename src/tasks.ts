@@ -98,6 +98,10 @@ export interface Task {
   turnIds: number[];
   /** Optional for backwards-compatible task files written before T3. */
   turnReviews?: Record<string, TurnReviewDisposition>;
+  /** Immutable receipt from the last explicit acceptance. A later linked turn
+   * supersedes the accepted status but deliberately retains this audit data. */
+  acceptedAt?: number;
+  acceptedEvidenceDigest?: string;
   annotationIds: string[];
   evidence: readonly Evidence[];
 }
@@ -203,6 +207,9 @@ function taskError(value: unknown): string | null {
   if (value.evidenceFreshSince !== undefined && !isFiniteTimestamp(value.evidenceFreshSince)) return `Task ${value.id} evidence freshness is invalid`;
   if (!Array.isArray(value.turnIds) || !value.turnIds.every((id) => typeof id === "number")) return `Task ${value.id} turnIds are invalid`;
   if (value.turnReviews !== undefined && !isTurnReviews(value.turnReviews)) return `Task ${value.id} turnReviews are invalid`;
+  if ((value.acceptedAt === undefined) !== (value.acceptedEvidenceDigest === undefined)) return `Task ${value.id} acceptance receipt is incomplete`;
+  if (value.acceptedAt !== undefined && !isFiniteTimestamp(value.acceptedAt)) return `Task ${value.id} acceptance timestamp is invalid`;
+  if (value.acceptedEvidenceDigest !== undefined && (typeof value.acceptedEvidenceDigest !== "string" || !value.acceptedEvidenceDigest)) return `Task ${value.id} acceptance evidence digest is invalid`;
   if (!isStringArray(value.annotationIds)) return `Task ${value.id} annotationIds are invalid`;
   if (!Array.isArray(value.evidence) || !value.evidence.every(isEvidence)) return `Task ${value.id} evidence is invalid`;
   return null;
@@ -492,6 +499,35 @@ export function completionState(task: Task, options: CompletionOptions = {}): Co
   return { complete: true, reason: null };
 }
 
+/** A stable, non-secret summary of the proof state captured at acceptance.
+ * This is an audit fingerprint, not a cryptographic security boundary. */
+export function taskEvidenceDigest(task: Task): string {
+  const summary = JSON.stringify({
+    acceptance: task.acceptance,
+    requiredChecks: task.requiredChecks ?? [],
+    turnIds: task.turnIds,
+    turnReviews: Object.entries(task.turnReviews ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+    annotationIds: task.annotationIds,
+    evidence: task.evidence,
+  });
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < summary.length; index += 1) {
+    hash ^= summary.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/** Final user-only completion action. It deliberately operates solely on task
+ * metadata: accepting never stages, commits, or otherwise touches Git state. */
+export function acceptTask(task: Task, acceptedAt = Date.now()): Task {
+  if (task.status !== "needs_review") throw new Error(`Task cannot be accepted from ${task.status.replace("_", " ")}.`);
+  const gate = completionState(task, { now: acceptedAt });
+  if (!gate.complete) throw new Error(gate.reason ?? "Task completion evidence is incomplete.");
+  const accepted = transitionTask(task, "accepted", acceptedAt);
+  return { ...accepted, acceptedAt, acceptedEvidenceDigest: taskEvidenceDigest(task) };
+}
+
 function turnTestState(turn: TaskTurn): "running" | "pass" | "fail" | "skipped" | "none" {
   return turn.testStatus?.state ?? "none";
 }
@@ -501,13 +537,16 @@ function turnTestState(turn: TaskTurn): "running" | "pass" | "fail" | "skipped" 
 export function attachTurnToTask(task: Task, turn: TaskTurn, updatedAt = Date.now()): Task {
   if (task.turnIds.includes(turn.id)) return task;
   const next = nextUpdatedAt(task, updatedAt);
-  return {
+  const linked: Task = {
     ...task,
     turnIds: [...task.turnIds, turn.id],
     evidence: [...task.evidence, { kind: "turn", turnId: turn.id, testState: turnTestState(turn) }],
     evidenceFreshSince: Math.max(taskFreshSince(task), next),
     updatedAt: next,
   };
+  // Acceptance is superseded, never silently erased: the durable receipt
+  // still records which evidence the user explicitly accepted before new work.
+  return task.status === "accepted" ? { ...linked, status: "needs_review" } : linked;
 }
 
 /** Explicitly unlinks an ambiguous historical turn but retains its original

@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
+  acceptTask,
   addTasksGitignoreEntry,
   appendAutomationEvidence,
   attachClosedTurnToRunningTask,
@@ -16,6 +17,7 @@ import {
   setTaskTurnReview,
   taskCheckEvidence,
   taskCheckRunId,
+  taskEvidenceDigest,
   TaskCheckRunRegistry,
   transitionTask,
   type Task,
@@ -262,6 +264,30 @@ test("empty and no-Git tasks can complete, while linked turns require a disposit
   });
   const reviewed = setTaskTurnReview(linked, 13, "accepted", 202);
   assert.deepEqual(completionState(reviewed, { now: 203 }), { complete: true, reason: null });
+});
+
+test("explicit acceptance records immutable evidence metadata and new linked work supersedes it", () => {
+  const reviewable = setTaskTurnReview(
+    attachTurnToTask(task({ status: "needs_review" }), { id: 14, testStatus: { state: "pass" } }, 200),
+    14,
+    "accepted",
+    201,
+  );
+  const accepted = acceptTask(reviewable, 202);
+  assert.equal(accepted.status, "accepted");
+  assert.equal(accepted.acceptedAt, 202);
+  assert.equal(accepted.acceptedEvidenceDigest, taskEvidenceDigest(reviewable));
+  assert.equal(reviewable.status, "needs_review", "the pure reducer has no external side effect");
+  assert.throws(() => acceptTask(task({ status: "needs_review", requiredChecks: [{ kind: "manual", id: "visual", label: "Visual QA" }] }), 202), /unchecked/i);
+
+  const superseded = attachTurnToTask(accepted, { id: 15, testStatus: { state: "none" } }, 203);
+  assert.equal(superseded.status, "needs_review");
+  assert.equal(superseded.acceptedAt, 202, "the prior acceptance receipt remains auditable");
+  assert.equal(superseded.acceptedEvidenceDigest, accepted.acceptedEvidenceDigest);
+  assert.deepEqual(completionState(superseded, { now: 204 }), {
+    complete: false,
+    reason: "Linked turn 15 needs a review disposition.",
+  });
 });
 
 test("review actions select one deterministic linked owner and survive a restart round-trip", () => {

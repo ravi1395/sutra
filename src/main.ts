@@ -135,7 +135,7 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
-import { mountTasksPanel } from "./tasks-panel";
+import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
 import {
   appendAutomationEvidence,
   attachClosedTurnToRunningTask,
@@ -1155,6 +1155,10 @@ const tasksPanel = mountTasksPanel({
     return composerPanel?.deliverTaskPrompt(args) ?? { ok: false, reason: "Composer unavailable" };
   },
   getAutomationChoices: () => automations.map((automation) => ({ id: automation.id, label: automation.name })),
+  updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
+    const trusted = await isWorkspaceTrusted(root).catch(() => false);
+    return mayPersistTaskForRoot(root, currentRoot, trusted);
+  }),
 });
 function setTasks(on: boolean): void {
   btnTasks.classList.toggle("on", on);
@@ -1577,19 +1581,28 @@ ensureDiagnosticsExtension();
 // turns in one tick, and a stale concurrent read/write would otherwise lose a
 // link. Corrupt task files remain read-only: automatic tracking must never
 // "repair" externally malformed metadata by overwriting it.
-const taskMetadataWrites = new Map<string, Promise<void>>();
-function queueTaskMetadataUpdate(root: string, reduce: (tasks: readonly Task[]) => readonly Task[]): Promise<void> {
-  const previous = taskMetadataWrites.get(root) ?? Promise.resolve();
+const taskMetadataWrites = new Map<string, Promise<boolean>>();
+function queueTaskMetadataUpdate(
+  root: string,
+  reduce: (tasks: readonly Task[]) => readonly Task[],
+  canWrite?: () => Promise<boolean>,
+): Promise<boolean> {
+  const previous = taskMetadataWrites.get(root) ?? Promise.resolve(false);
   const next = previous.catch(() => {}).then(async () => {
     const loaded = await loadTasks(root);
     if (loaded.warnings.length) {
       console.warn("Task turn association skipped: tasks file has recoverable warnings", loaded.warnings);
-      return;
+      return false;
     }
+    if (canWrite && !(await canWrite())) return false;
     const tasks = reduce(loaded.tasks);
-    if (tasks === loaded.tasks) return;
+    if (tasks === loaded.tasks) return false;
+    // The acceptance callback is trust/root gated again immediately before
+    // persistence, after its serialized re-read and reducer execution.
+    if (canWrite && !(await canWrite())) return false;
     await saveTasks(root, tasks);
     if (currentRoot === root) await tasksPanel.reload();
+    return true;
   });
   taskMetadataWrites.set(root, next);
   void next.finally(() => {

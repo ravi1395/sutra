@@ -3,6 +3,7 @@
 import { ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
 import {
+  acceptTask,
   addRequiredManualCheck,
   attachTurnToTask,
   completionState,
@@ -28,6 +29,9 @@ export interface TasksPanelOptions {
   /** Safe, current project automation choices. E1 selects configuration only;
    * E2 is solely responsible for executing any selected check. */
   getAutomationChoices: () => readonly TaskAutomationChoice[];
+  /** Serialized, re-read-before-write metadata path shared with turn/evidence
+   * ingestion. User actions must not overwrite a concurrently closed turn. */
+  updateTaskMetadata: (root: string, reduce: (tasks: readonly Task[]) => readonly Task[]) => Promise<boolean>;
 }
 
 export interface TaskAutomationChoice { id: string; label: string; }
@@ -89,6 +93,36 @@ export async function runGuardedTaskOperation(args: {
   return "delivered";
 }
 
+/** Accept against the task list read by the serialized metadata writer, never
+ * the panel's rendered snapshot. A close/evidence update queued before this
+ * reducer therefore wins and can block acceptance rather than be overwritten. */
+export async function acceptTaskWithAuthoritativeUpdate(args: {
+  root: string;
+  taskId: string;
+  getRoot: () => string | null;
+  isTrusted: () => Promise<boolean>;
+  update: (root: string, reduce: (tasks: readonly Task[]) => readonly Task[]) => Promise<boolean>;
+}): Promise<"accepted" | "missing" | "rejected"> {
+  const trusted = await args.isTrusted();
+  if (!mayPersistTaskForRoot(args.root, args.getRoot(), trusted)) return "rejected";
+  let outcome: "accepted" | "missing" | "rejected" = "rejected";
+  const committed = await args.update(args.root, (tasks) => {
+    if (args.getRoot() !== args.root) return tasks;
+    const current = tasks.find((task) => task.id === args.taskId);
+    if (!current) {
+      outcome = "missing";
+      return tasks;
+    }
+    const accepted = acceptTask(current);
+    outcome = "accepted";
+    return tasks.map((task) => task.id === current.id ? accepted : task);
+  });
+  // TypeScript does not follow assignment from the queued reducer callback.
+  const result = outcome as "accepted" | "missing" | "rejected";
+  if (result === "missing") return "missing";
+  return committed && result === "accepted" ? "accepted" : "rejected";
+}
+
 function rootTask(tasks: readonly Task[], root: string): Task | undefined {
   return tasks.find((task) => task.root === root && task.status === "running");
 }
@@ -122,7 +156,7 @@ export function attachableHistoricalTurns(tasks: readonly Task[], root: string, 
 }
 
 export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
-  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices } = opts;
+  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices, updateTaskMetadata } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
   let trusted = false;
@@ -336,6 +370,25 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     }
   }
 
+  /** Acceptance is intentionally task-metadata-only. This panel has no Git
+   * capability on this path; all reducer preconditions are rechecked here. */
+  async function accept(task: Task): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    try {
+      const outcome = await acceptTaskWithAuthoritativeUpdate({
+        root, taskId: task.id, getRoot,
+        isTrusted: () => isWorkspaceTrusted(root).catch(() => false),
+        update: updateTaskMetadata,
+      });
+      if (outcome === "accepted") return showStatus("Task accepted. No Git state was changed.");
+      if (outcome === "missing") return showStatus("Task no longer exists; reload before accepting.");
+      showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; task was not accepted.");
+    } catch (error) {
+      showStatus(`Task cannot be accepted: ${String(error)}`);
+    }
+  }
+
   /** E1 is intentionally display-only: E2 supplies runner execution and E3
    * supplies explicit acceptance. The ledger still renders every prior row,
    * including optional/manual evidence, so a rerun never hides its history. */
@@ -446,6 +499,41 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     return ledger;
   }
 
+  function renderAcceptanceGate(task: Task): HTMLElement {
+    const gate = el("div", "task-acceptance-gate");
+    if (task.status === "accepted") {
+      gate.classList.add("is-accepted");
+      const receipt = el("div", "task-acceptance-receipt");
+      receipt.textContent = task.acceptedAt !== undefined && task.acceptedEvidenceDigest
+        ? `Accepted ${task.acceptedAt} · evidence ${task.acceptedEvidenceDigest}`
+        : "Accepted (legacy task has no evidence receipt).";
+      gate.appendChild(receipt);
+      return gate;
+    }
+
+    const blocker = el("div", "task-acceptance-blocker");
+    if (task.status !== "needs_review") {
+      blocker.textContent = `Acceptance blocked: task is ${task.status.replace("_", " ")}; move it to needs review first.`;
+      gate.appendChild(blocker);
+      return gate;
+    }
+    const completion = completionState(task);
+    if (!completion.complete) {
+      blocker.textContent = `Acceptance blocked: ${completion.reason ?? "Completion evidence is incomplete."}`;
+      gate.appendChild(blocker);
+      return gate;
+    }
+
+    const ready = el("div", "task-acceptance-ready");
+    ready.textContent = "All completion evidence is satisfied. Acceptance records metadata only; it does not commit code.";
+    const acceptButton = el("button", "task-accept-button");
+    acceptButton.textContent = "Accept task";
+    acceptButton.disabled = !trusted || loading;
+    acceptButton.onclick = () => void accept(task);
+    gate.append(ready, acceptButton);
+    return gate;
+  }
+
   function renderTask(task: Task, running: Task | undefined): HTMLElement {
     const card = el("section", "tasks-panel-card");
     const title = el("input");
@@ -514,7 +602,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       attachControls.append(select, attach);
       linkedList.appendChild(attachControls);
     }
-    card.append(meta, title, acceptance, actions, linkedList, renderEvidenceLedger(task));
+    card.append(meta, title, acceptance, actions, linkedList, renderEvidenceLedger(task), renderAcceptanceGate(task));
     return card;
   }
 

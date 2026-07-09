@@ -2455,6 +2455,24 @@ button:hover {
 #browser-resizer.hidden {
   display: none;
 }
+
+/* Task acceptance is a deliberate user gate: blockers remain prominent and
+   the final action is visually distinct from ordinary task editing. */
+.task-acceptance-gate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+}
+.task-acceptance-blocker { color: var(--warn, #d99a36); }
+.task-acceptance-ready { color: var(--fg-dim); flex: 1; }
+.task-acceptance-receipt { color: var(--fg-dim); font-family: var(--mono); }
+.task-acceptance-gate.is-accepted { border-color: var(--em-dim); }
+.task-accept-button { margin-left: auto; }
 /* Maximized browser: hide panes + resizers, let browser-area fill editor-area */
 #editor-area.browser-maximized #panes        { display: none; }
 #editor-area.browser-maximized #diff-resizer { display: none; }
