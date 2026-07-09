@@ -313,6 +313,14 @@ export function validateRequiredChecks(checks: readonly RequiredTaskCheck[], kno
   }
 }
 
+/** Required-check execution and cancellation both use the freshly loaded task
+ * configuration, never a stale panel card. */
+export function hasRequiredAutomationCheck(task: Task, automationId: string): boolean {
+  return (task.requiredChecks ?? []).some(
+    (check) => check.kind === "automation" && check.automationId === automationId,
+  );
+}
+
 /** Select the checks that must be satisfied. Selection itself marks older
  * results stale; it never rewrites the evidence ledger. */
 export function setRequiredChecks(

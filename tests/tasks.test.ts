@@ -8,6 +8,7 @@ import {
   attachTurnToTask,
   completionState,
   detachTurnFromTask,
+  hasRequiredAutomationCheck,
   recordManualCheck,
   parseTasksFile,
   saveTasks,
@@ -228,6 +229,13 @@ test("required automation selection rejects unknown ids and later appended evide
   assert.deepEqual(deselected.requiredChecks, []);
   assert.deepEqual(deselected.evidence, laterFailure.evidence);
   assert.deepEqual(completionState(deselected, { now: 304 }), { complete: true, reason: null });
+});
+
+test("fresh task configuration rejects a removed automation for both run and cancel paths", () => {
+  const selected = setRequiredChecks(task(), [{ kind: "automation", automationId: "unit" }], 200, ["unit"]);
+  assert.equal(hasRequiredAutomationCheck(selected, "unit"), true);
+  const deselected = setRequiredChecks(selected, [], 201, []);
+  assert.equal(hasRequiredAutomationCheck(deselected, "unit"), false);
 });
 
 test("manual rows only complete after an explicit manual record", () => {
