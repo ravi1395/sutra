@@ -32,9 +32,14 @@ export interface TasksPanelOptions {
   /** Serialized, re-read-before-write metadata path shared with turn/evidence
    * ingestion. User actions must not overwrite a concurrently closed turn. */
   updateTaskMetadata: (root: string, reduce: (tasks: readonly Task[]) => readonly Task[]) => Promise<boolean>;
+  /** E2 runner-only check controls. These never target a terminal or PTY. */
+  runRequiredCheck: (task: Task, automationId: string) => Promise<TaskCheckActionResult>;
+  cancelRequiredCheck: (task: Task, automationId: string) => Promise<boolean>;
+  isRequiredCheckRunning: (task: Task, automationId: string) => boolean;
 }
 
 export interface TaskAutomationChoice { id: string; label: string; }
+export type TaskCheckActionResult = { ok: true } | { ok: false; reason: string };
 
 export interface TasksPanelHandle {
   show(): void;
@@ -73,6 +78,14 @@ export class TaskStartGate {
 /** A trust decision is valid only for the root it was made for. */
 export function mayPersistTaskForRoot(capturedRoot: string, currentRoot: string | null, trusted: boolean): boolean {
   return trusted && currentRoot === capturedRoot;
+}
+
+/** A panel may only offer execution for a selected automation in its current,
+ * trusted root. The main callback repeats this guard against durable state. */
+export function mayRunRequiredAutomation(task: Task, automationId: string, root: string | null, trusted: boolean): boolean {
+  return root === task.root
+    && trusted
+    && (task.requiredChecks ?? []).some((check) => check.kind === "automation" && check.automationId === automationId);
 }
 
 /** Runs a captured-root write and, when applicable, revalidates before send. */
@@ -156,7 +169,10 @@ export function attachableHistoricalTurns(tasks: readonly Task[], root: string, 
 }
 
 export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
-  const { container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices, updateTaskMetadata } = opts;
+  const {
+    container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices,
+    updateTaskMetadata, runRequiredCheck, cancelRequiredCheck, isRequiredCheckRunning,
+  } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
   let trusted = false;
@@ -370,6 +386,29 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     }
   }
 
+  async function runCheck(task: Task, automationId: string): Promise<void> {
+    const root = getRoot();
+    const allowed = root && await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayRunRequiredAutomation(task, automationId, root, !!allowed)) {
+      return showStatus(root === task.root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; required check was not started.");
+    }
+    const result = await runRequiredCheck(task, automationId);
+    if (!result.ok) return showStatus(result.reason);
+    showStatus(`Running required automation “${automationId}”. Previous evidence remains active until runner completion.`);
+    render();
+  }
+
+  async function cancelCheck(task: Task, automationId: string): Promise<void> {
+    const root = getRoot();
+    const allowed = root && await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayRunRequiredAutomation(task, automationId, root, !!allowed)) {
+      return showStatus(root === task.root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; required check was not cancelled.");
+    }
+    if (!(await cancelRequiredCheck(task, automationId))) return showStatus("Required check already completed; its evidence is unchanged.");
+    showStatus(`Cancelling required automation “${automationId}”. Cancelled evidence will be recorded only when the runner finishes.`);
+    render();
+  }
+
   /** Acceptance is intentionally task-metadata-only. This panel has no Git
    * capability on this path; all reducer preconditions are rechecked here. */
   async function accept(task: Task): Promise<void> {
@@ -419,7 +458,20 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
           if (check.kind === "automation") return candidate.kind !== "automation" || candidate.automationId !== check.automationId;
           return candidate.kind !== "manual" || candidate.id !== check.id;
         }));
-        row.append(check.kind === "automation" ? `Required automation: ${check.automationId}` : `Required manual: ${check.label}`, remove);
+        if (check.kind === "automation") {
+          const active = isRequiredCheckRunning(task, check.automationId);
+          const run = el("button");
+          run.textContent = active ? "Running" : "Run check";
+          run.disabled = active;
+          run.onclick = () => void runCheck(task, check.automationId);
+          const cancel = el("button");
+          cancel.textContent = "Cancel check";
+          cancel.disabled = !active;
+          cancel.onclick = () => void cancelCheck(task, check.automationId);
+          row.append(`Required automation: ${check.automationId}`, run, cancel, remove);
+        } else {
+          row.append(`Required manual: ${check.label}`, remove);
+        }
         selectedRows.appendChild(row);
       }
       if (selected.length) ledger.appendChild(selectedRows);

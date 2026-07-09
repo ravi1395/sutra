@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, runGuardedTaskOperation } from "../src/tasks-panel";
+import { acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, mayRunRequiredAutomation, runGuardedTaskOperation } from "../src/tasks-panel";
 import { getTurns, replaceTurns } from "../src/agent-tracking";
 import type { Turn } from "../src/ipc";
 import { attachTurnToTask, type Task } from "../src/tasks";
@@ -27,6 +27,14 @@ test("task persistence requires current root and current backend trust", () => {
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-a", true), true);
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-b", true), false);
   assert.equal(mayPersistTaskForRoot("/root-a", "/root-a", false), false);
+});
+
+test("required automation execution is offered only in the selected trusted root", () => {
+  const required = task({ requiredChecks: [{ kind: "automation", automationId: "unit" }] });
+  assert.equal(mayRunRequiredAutomation(required, "unit", "/root", true), true);
+  assert.equal(mayRunRequiredAutomation(required, "unit", "/other", true), false);
+  assert.equal(mayRunRequiredAutomation(required, "unit", "/root", false), false);
+  assert.equal(mayRunRequiredAutomation(required, "other", "/root", true), false);
 });
 
 test("linked turn rows render files, live test state, and saved initial state after tracker history is absent", () => {

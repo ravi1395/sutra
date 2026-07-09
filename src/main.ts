@@ -139,6 +139,7 @@ import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
 import {
   appendAutomationEvidence,
   attachClosedTurnToRunningTask,
+  hasRequiredAutomationCheck,
   loadTasks,
   saveTasks,
   setOwnedTurnReview,
@@ -1155,6 +1156,9 @@ const tasksPanel = mountTasksPanel({
     return composerPanel?.deliverTaskPrompt(args) ?? { ok: false, reason: "Composer unavailable" };
   },
   getAutomationChoices: () => automations.map((automation) => ({ id: automation.id, label: automation.name })),
+  runRequiredCheck: runTaskRequiredCheck,
+  cancelRequiredCheck: cancelTaskRequiredCheck,
+  isRequiredCheckRunning: (task, automationId) => !!activeTaskChecks.activeRun(task.root, task.id, automationId),
   updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
     const trusted = await isWorkspaceTrusted(root).catch(() => false);
     return mayPersistTaskForRoot(root, currentRoot, trusted);
@@ -1624,8 +1628,12 @@ const activeTaskChecks = new TaskCheckRunRegistry();
 export async function runTaskRequiredCheck(task: Task, automationId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   const root = task.root;
   if (currentRoot !== root) return { ok: false, reason: "Open this task's workspace before running its checks." };
-  if (!(await isWorkspaceTrusted(root))) return { ok: false, reason: "Tasks are read-only until this workspace is trusted." };
-  if (!(task.requiredChecks ?? []).some((check) => check.kind === "automation" && check.automationId === automationId)) {
+  const loaded = await loadTasks(root);
+  if (loaded.warnings.length) return { ok: false, reason: "Task metadata has recoverable errors; repair it before running checks." };
+  const currentTask = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+  if (!currentTask) return { ok: false, reason: "Task no longer exists; reload before running its check." };
+  if (currentRoot !== root || !(await isWorkspaceTrusted(root))) return { ok: false, reason: "Tasks are read-only until this workspace is trusted." };
+  if (!hasRequiredAutomationCheck(currentTask, automationId)) {
     return { ok: false, reason: "This automation is not required by the task." };
   }
   const automation = automations.find((candidate) => candidate.id === automationId);
@@ -1633,12 +1641,12 @@ export async function runTaskRequiredCheck(task: Task, automationId: string): Pr
 
   let run;
   try {
-    run = activeTaskChecks.start(root, task.id, automationId);
+    run = activeTaskChecks.start(root, currentTask.id, automationId);
   } catch (error) {
     return { ok: false, reason: String(error) };
   }
   try {
-    const runnerId = await taskCheckRun(root, task.id, automationId, automation.command, TASK_CHECK_TIMEOUT_MS);
+    const runnerId = await taskCheckRun(root, currentTask.id, automationId, automation.command, TASK_CHECK_TIMEOUT_MS);
     if (runnerId !== run.id) throw new Error("Task check runner returned an unexpected job id");
     return { ok: true };
   } catch (error) {
@@ -1654,7 +1662,12 @@ export async function runTaskRequiredCheck(task: Task, automationId: string): Pr
  * `cancelled` evidence. Returning false leaves an already-completed result
  * untouched. */
 export async function cancelTaskRequiredCheck(task: Task, automationId: string): Promise<boolean> {
-  const run = activeTaskChecks.activeRun(task.root, task.id, automationId);
+  const root = task.root;
+  if (currentRoot !== root || !(await isWorkspaceTrusted(root))) return false;
+  const loaded = await loadTasks(root);
+  const currentTask = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+  if (loaded.warnings.length || !currentTask || !hasRequiredAutomationCheck(currentTask, automationId)) return false;
+  const run = activeTaskChecks.activeRun(root, task.id, automationId);
   if (!run) return false;
   return taskCheckCancel(run.root, run.taskId, run.automationId).catch(() => false);
 }
