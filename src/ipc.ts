@@ -110,6 +110,20 @@ export const gitBranches = (root: string) =>
 export const gitCheckout = (root: string, branch: string) =>
   invoke<void>("git_checkout", { root, branch });
 
+// --- Explicit stage/unstage/commit (whole files only, no push/remote) ---
+export const gitStageFiles = (root: string, paths: string[]) =>
+  invoke<void>("git_stage_files", { root, paths });
+export const gitUnstageFiles = (root: string, paths: string[]) =>
+  invoke<void>("git_unstage_files", { root, paths });
+export interface IndexStatus {
+  staged: GitStatusEntry[];
+  unstaged: GitStatusEntry[];
+}
+export const gitIndexStatus = (root: string) =>
+  invoke<IndexStatus>("git_index_status", { root });
+export const gitCommit = (root: string, message: string) =>
+  invoke<string>("git_commit", { root, message });
+
 export interface AgentChange extends ChangedFile {
   humanTouched: boolean;
   binary: boolean;
