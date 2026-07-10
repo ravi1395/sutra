@@ -876,8 +876,8 @@ impl SutraMcp {
 
     #[tool(
         description = "Get current dev-browser annotations for the active route: \
-                       number, design feedback, selector, tag, element HTML, computed \
-                       styles, and locator hints."
+                       number, design feedback, selector, tag, and locator hints. \
+                       Element HTML and computed styles are redacted."
     )]
     async fn get_annotations(&self) -> Result<CallToolResult, McpError> {
         self.active_root()?;
