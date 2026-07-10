@@ -64,12 +64,29 @@ test("isEmptyDraftContent is true only with no text and no chips", () => {
   assert.equal(isEmptyDraftContent({}, 1), false);
 });
 
-// Regression: every BUILTIN_AGENT_PROFILES template ("Explain", "Feature",
-// "Review") omits "success_criteria" — without withTemplateTag, a profile's
-// stamped defaultAcceptance text is silently dropped from both the rendered
-// composer UI and the built prompt (both walk templateTags()).
-test("Feature template does not define success_criteria by default (the gap withTemplateTag closes)", () => {
-  assert.equal(templateTags(DEFAULT_CONFIG, "Feature").some((t) => t.id === "success_criteria"), false);
+// Regression (P2.2): the profile-mapped templates "Feature" and "Review" MUST
+// define "success_criteria" so a profile's stamped defaultAcceptance survives
+// through templateTags() into both the rendered composer UI and the built
+// prompt — WITHOUT depending on the session-local withTemplateTag augmentation
+// (which reloadConfig/applyDraft wipe). Explain carries no acceptance rows.
+test("profile-mapped templates define success_criteria by default", () => {
+  assert.ok(templateTags(DEFAULT_CONFIG, "Feature").some((t) => t.id === "success_criteria"));
+  assert.ok(templateTags(DEFAULT_CONFIG, "Review").some((t) => t.id === "success_criteria"));
+});
+
+// Restore seam (the exact P2.2 failure): a profiled draft rebuilt against the
+// on-disk DEFAULT_CONFIG — as init()->reloadConfig()->applyDraft() produces,
+// with NO withTemplateTag patch — must still emit the acceptance rows.
+test("restored profiled draft emits success_criteria against unpatched DEFAULT_CONFIG", () => {
+  const restored = profileDefaults({ template: "Feature", defaultAcceptance: ["Do the thing", "Verify it"] });
+  const prompt = buildPrompt({
+    config: DEFAULT_CONFIG,
+    templateName: restored.templateName,
+    text: { task: "do X", ...restored.text },
+    chips: [],
+    thinking: false,
+  });
+  assert.match(prompt, /<success_criteria>\n- Do the thing\n- Verify it\n<\/success_criteria>/);
 });
 
 test("withTemplateTag makes a profile's acceptance rows actually render and reach the built prompt", () => {
