@@ -1,9 +1,12 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate, mayPersistTaskForRoot, mayRunRequiredAutomation, runGuardedTaskOperation } from "../src/tasks-panel";
+import {
+  acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate,
+  mayPersistTaskForRoot, mayRunRequiredAutomation, mountTasksPanel, type TaskAutomationChoice, type TasksPanelOptions,
+} from "../src/tasks-panel";
 import { getTurns, replaceTurns } from "../src/agent-tracking";
 import type { Turn } from "../src/ipc";
-import { attachTurnToTask, type Task } from "../src/tasks";
+import { attachTurnToTask, serializeTasks, type Task } from "../src/tasks";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "task-1", title: "Task", status: "needs_review", createdAt: 1, updatedAt: 1,
@@ -78,49 +81,309 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-test("create-style operation writes nothing when its root changes during trust lookup", async () => {
-  let root: string | null = "/a";
-  const trust = deferred<boolean>();
-  let writes = 0;
-  const operation = runGuardedTaskOperation({ root: "/a", getRoot: () => root, isTrusted: () => trust.promise, write: async () => { writes++; } });
-  root = "/b";
-  trust.resolve(true);
-  assert.equal(await operation, "rejected");
-  assert.equal(writes, 0);
+// --- mountTasksPanel: minimal browser fakes (mirrors tests/rollback-dialog.test.ts) ---
+// Drives the REAL start()/updateRequiredChecks closures through the rendered
+// DOM, rather than the removed runGuardedTaskOperation stand-in, which only
+// ever exercised itself.
+
+class FakeElement {
+  tagName: string;
+  className = "";
+  classList = { add(): void {}, remove(): void {}, contains(): boolean { return false; } };
+  children: FakeElement[] = [];
+  value = "";
+  disabled = false;
+  checked = false;
+  type = "";
+  name = "";
+  rows = 0;
+  placeholder = "";
+  title = "";
+  onclick: (() => void) | null = null;
+  onchange: (() => void) | null = null;
+  private text = "";
+
+  constructor(tagName: string) {
+    this.tagName = tagName;
+  }
+
+  get textContent(): string {
+    return this.text;
+  }
+  set textContent(v: string) {
+    this.text = v;
+    this.children = [];
+  }
+
+  appendChild(child: FakeElement): FakeElement {
+    this.children.push(child);
+    return child;
+  }
+  // Real Node#append accepts raw strings (auto-wrapped as text nodes); the
+  // panel does this for inline labels beside checkboxes/radios/buttons.
+  append(...items: (FakeElement | string)[]): void {
+    for (const item of items) {
+      if (typeof item === "string") {
+        const textNode = new FakeElement("#text");
+        textNode.textContent = item;
+        this.children.push(textNode);
+      } else {
+        this.children.push(item);
+      }
+    }
+  }
+  setAttribute(): void {}
+}
+
+function findByClass(el: FakeElement, cls: string): FakeElement | undefined {
+  if (el.className.split(" ").includes(cls)) return el;
+  for (const child of el.children) {
+    const found = findByClass(child, cls);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findByText(el: FakeElement, text: string): FakeElement | undefined {
+  if (el.textContent === text) return el;
+  for (const child of el.children) {
+    const found = findByText(child, text);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findByTag(el: FakeElement, tag: string): FakeElement | undefined {
+  if (el.tagName === tag) return el;
+  for (const child of el.children) {
+    const found = findByTag(child, tag);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function setupTasksPanelDom() {
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: (tag: string) => new FakeElement(tag) } as unknown as Document;
+  return {
+    installInvoke(invokeImpl: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>): void {
+      globalThis.window = { __TAURI_INTERNALS__: { invoke: invokeImpl } } as unknown as Window & typeof globalThis;
+    },
+    restore(): void {
+      globalThis.window = previousWindow;
+      globalThis.document = previousDocument;
+    },
+  };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Fake Tauri IPC boundary: `trust_list` responses are consumed in call order
+ * (reload's check, then each isWorkspaceTrusted call inside start()/updateRequiredChecks),
+ * capped at the last supplied entry so a short list stays constant thereafter. */
+function makeFakeInvoke(opts: { trustResponses: string[][]; taskFileContent: string; agents?: unknown[] }) {
+  let trustCall = 0;
+  return async (cmd: string): Promise<unknown> => {
+    switch (cmd) {
+      case "trust_list": {
+        const idx = Math.min(trustCall, opts.trustResponses.length - 1);
+        trustCall++;
+        return opts.trustResponses[idx];
+      }
+      case "read_file":
+        return opts.taskFileContent;
+      case "pty_list_agents":
+        return opts.agents ?? [];
+      case "git_branch":
+        return null;
+      default:
+        throw new Error(`unmocked invoke command in tasks-panel test: ${cmd}`);
+    }
+  };
+}
+
+function baseTasksPanelOptions(overrides: Partial<TasksPanelOptions> & Pick<TasksPanelOptions, "container" | "getRoot" | "updateTaskMetadata" | "deliverPrompt">): TasksPanelOptions {
+  return {
+    getTurns: () => [],
+    getComposerDraft: () => null,
+    getAutomationChoices: () => [] as readonly TaskAutomationChoice[],
+    runRequiredCheck: async () => ({ ok: true as const }),
+    cancelRequiredCheck: async () => false,
+    isRequiredCheckRunning: () => false,
+    dispatchWorktree: async () => {},
+    openWorktree: async () => {},
+    removeWorktree: async () => ({ path: "", status: "removed" as const, dirty: false }),
+    cancelWorktreeSetup: async () => false,
+    isWorktreeSetupActive: () => false,
+    confirmDiscard: async () => false,
+    ...overrides,
+  };
+}
+
+/** Selects an agent terminal via the real target <select> in the top controls
+ * bar, then locates the rendered "Start" button — mirroring an actual user
+ * driving the panel before start()'s claim/delivery guards run. */
+function selectAgentAndFindStart(container: FakeElement, agentId: string): FakeElement {
+  const controls = findByClass(container, "tasks-panel-controls");
+  assert.ok(controls, "tasks-panel-controls must render");
+  const select = findByTag(controls!, "select");
+  assert.ok(select, "agent target select must render");
+  select!.value = agentId;
+  select!.onchange?.();
+  const startBtn = findByText(container, "Start");
+  assert.ok(startBtn, "Start button must render for a ready task");
+  return startBtn!;
+}
+
+test("start() cancels delivery, and leaves the claim in place, when trust is revoked between the persisted claim and the send", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const testTask = task({ id: "t-start-trust", status: "ready" });
+    dom.installInvoke(makeFakeInvoke({
+      // [reload's check, start()'s pre-claim check, start()'s pre-delivery check]
+      trustResponses: [["/root"], ["/root"], []],
+      taskFileContent: serializeTasks([testTask]),
+      agents: [{ id: "agent-1", kind: "claude", cwd: "/root", state: "idle" }],
+    }));
+
+    let metadataEntries: Task[] = [testTask];
+    const deliveries: unknown[] = [];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        return true;
+      },
+      deliverPrompt: async (args) => {
+        deliveries.push(args);
+        return { ok: true };
+      },
+    }));
+
+    await handle.reload(true); // skipReconcile: avoids a second serialized write racing the test's mock
+    const startBtn = selectAgentAndFindStart(container, "agent-1");
+    startBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(deliveries.length, 0, "delivery must not happen once trust is revoked before send");
+    const finalTask = metadataEntries.find((t) => t.id === testTask.id);
+    assert.equal(finalTask?.status, "running", "current start() does not revert the persisted claim on a post-claim trust failure");
+  } finally {
+    dom.restore();
+  }
 });
 
-test("trust revocation during persisted Start prevents delivery and follow-up writes", async () => {
-  let trusted = true;
-  const write = deferred<void>();
-  let writes = 0;
-  let deliveries = 0;
-  const operation = runGuardedTaskOperation({
-    root: "/a", getRoot: () => "/a", isTrusted: async () => trusted,
-    write: async () => { writes++; await write.promise; }, deliver: async () => { deliveries++; },
-  });
-  await Promise.resolve();
-  trusted = false;
-  write.resolve();
-  assert.equal(await operation, "rejected");
-  assert.equal(writes, 1);
-  assert.equal(deliveries, 0);
+test("start() cancels delivery, and leaves the claim in place, when the workspace root changes between the persisted claim and the send", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const testTask = task({ id: "t-start-root", status: "ready" });
+    dom.installInvoke(makeFakeInvoke({
+      trustResponses: [["/root"]], // always trusted; only the root changes in this test
+      taskFileContent: serializeTasks([testTask]),
+      agents: [{ id: "agent-1", kind: "claude", cwd: "/root", state: "idle" }],
+    }));
+
+    let currentRoot: string | null = "/root";
+    let metadataEntries: Task[] = [testTask];
+    const deliveries: unknown[] = [];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => currentRoot,
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        // The workspace root switches while the persisted claim write is in
+        // flight, before start()'s pre-delivery recheck reads getRoot() again.
+        currentRoot = "/other";
+        return true;
+      },
+      deliverPrompt: async (args) => {
+        deliveries.push(args);
+        return { ok: true };
+      },
+    }));
+
+    await handle.reload(true);
+    const startBtn = selectAgentAndFindStart(container, "agent-1");
+    startBtn.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(deliveries.length, 0, "delivery must not happen once the root changed before send");
+    const finalTask = metadataEntries.find((t) => t.id === testTask.id);
+    assert.equal(finalTask?.status, "running", "current start() does not revert the persisted claim on a post-claim root switch");
+  } finally {
+    dom.restore();
+  }
 });
 
-test("root switch during persisted Start prevents delivery without cross-root write", async () => {
-  let root: string | null = "/a";
-  const write = deferred<void>();
-  const writes: string[] = [];
-  let deliveries = 0;
-  const operation = runGuardedTaskOperation({
-    root: "/a", getRoot: () => root, isTrusted: async () => true,
-    write: async () => { writes.push("/a"); await write.promise; }, deliver: async () => { deliveries++; },
-  });
-  await Promise.resolve();
-  root = "/b";
-  write.resolve();
-  assert.equal(await operation, "rejected");
-  assert.deepEqual(writes, ["/a"]);
-  assert.equal(deliveries, 0);
+test("updateRequiredChecks: a remove queued from a stale render derives against authoritative state, so a concurrently added check survives", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const manualY = { kind: "manual" as const, id: "y", label: "Y" };
+    const testTask = task({ id: "t-checks", status: "needs_review", requiredChecks: [manualY] });
+    dom.installInvoke(makeFakeInvoke({
+      trustResponses: [["/root"]], // always trusted
+      taskFileContent: serializeTasks([testTask]),
+    }));
+
+    let metadataEntries: Task[] = [testTask];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      getAutomationChoices: () => [{ id: "unit", label: "Unit tests" }],
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        return true;
+      },
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+
+    await handle.reload(true);
+
+    // Both controls are captured from the SAME render, before either mutation
+    // has been queued: the automation dropdown/"Require automation" button,
+    // and the "Remove manual check" button for Y (whose onclick closes over
+    // this render's stale task/selected snapshot).
+    const evidenceControls = findByClass(container, "task-evidence-controls");
+    assert.ok(evidenceControls, "evidence controls must render");
+    const automationSelect = findByTag(evidenceControls!, "select");
+    assert.ok(automationSelect, "automation select must render");
+    automationSelect!.value = "unit";
+    const addAutomationBtn = findByText(container, "Require automation");
+    assert.ok(addAutomationBtn, "Require automation button must render");
+    const removeYBtn = findByText(container, "Remove manual check");
+    assert.ok(removeYBtn, "Remove manual check button must render for Y");
+
+    // Queue "add automation X" first and let it commit.
+    addAutomationBtn!.onclick?.();
+    await flush();
+    await flush();
+    assert.deepEqual(
+      metadataEntries.find((t) => t.id === testTask.id)?.requiredChecks,
+      [manualY, { kind: "automation", automationId: "unit" }],
+      "automation X must be added before the stale remove is queued",
+    );
+
+    // Queue the stale "remove Y" second, from the button captured before X existed.
+    removeYBtn!.onclick?.();
+    await flush();
+    await flush();
+
+    const finalTask = metadataEntries.find((t) => t.id === testTask.id);
+    assert.deepEqual(
+      finalTask?.requiredChecks,
+      [{ kind: "automation", automationId: "unit" }],
+      "the stale remove must drop only Y, not clobber the concurrently added X",
+    );
+  } finally {
+    dom.restore();
+  }
 });
 
 test("acceptance rebases on serialized task metadata so a deferred closed turn cannot be overwritten", async () => {

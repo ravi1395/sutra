@@ -101,24 +101,6 @@ export function mayRunRequiredAutomation(task: Task, automationId: string, root:
     && (task.requiredChecks ?? []).some((check) => check.kind === "automation" && check.automationId === automationId);
 }
 
-/** Runs a captured-root write and, when applicable, revalidates before send. */
-export async function runGuardedTaskOperation(args: {
-  root: string;
-  getRoot: () => string | null;
-  isTrusted: () => Promise<boolean>;
-  write: () => Promise<void>;
-  deliver?: () => Promise<void>;
-}): Promise<"rejected" | "written" | "delivered"> {
-  const trustedBeforeWrite = await args.isTrusted();
-  if (!mayPersistTaskForRoot(args.root, args.getRoot(), trustedBeforeWrite)) return "rejected";
-  await args.write();
-  if (!args.deliver) return "written";
-  const trustedBeforeDelivery = await args.isTrusted();
-  if (!mayPersistTaskForRoot(args.root, args.getRoot(), trustedBeforeDelivery)) return "rejected";
-  await args.deliver();
-  return "delivered";
-}
-
 /** Accept against the task list read by the serialized metadata writer, never
  * the panel's rendered snapshot. A close/evidence update queued before this
  * reducer therefore wins and can block acceptance rather than be overwritten. */
@@ -377,7 +359,18 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     }
   }
 
-  async function updateRequiredChecks(task: Task, checks: readonly RequiredTaskCheck[]): Promise<void> {
+  function sameRequiredCheck(a: RequiredTaskCheck, b: RequiredTaskCheck): boolean {
+    if (a.kind !== b.kind) return false;
+    return a.kind === "automation" && b.kind === "automation"
+      ? a.automationId === b.automationId
+      : a.kind === "manual" && b.kind === "manual" ? a.id === b.id : false;
+  }
+
+  /** Add/remove a single check, resolved against the authoritative task read
+   * by the serialized metadata queue at write time — never a rendered card's
+   * captured `requiredChecks`, so two quick edits from one stale render can't
+   * clobber each other. */
+  async function updateRequiredChecks(task: Task, edit: { type: "add" | "remove"; check: RequiredTaskCheck }): Promise<void> {
     const root = getRoot();
     if (!root) return;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
@@ -387,7 +380,11 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       const wrote = await updateTaskMetadata(root, (entries) => {
         const idx = entries.findIndex((e) => e.id === task.id);
         if (idx < 0) return entries;
-        const nextTask = setRequiredChecks(entries[idx], checks, Date.now(), knownAutomationIds);
+        const current = entries[idx].requiredChecks ?? [];
+        const next = edit.type === "add"
+          ? [...current, edit.check]
+          : current.filter((candidate) => !sameRequiredCheck(candidate, edit.check));
+        const nextTask = setRequiredChecks(entries[idx], next, Date.now(), knownAutomationIds);
         if (nextTask === entries[idx]) return entries;
         const copy = entries.slice(); copy[idx] = nextTask; return copy;
       });
@@ -530,10 +527,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
         const row = el("div", "task-selected-check");
         const remove = el("button");
         remove.textContent = check.kind === "automation" ? "Remove automation" : "Remove manual check";
-        remove.onclick = () => void updateRequiredChecks(task, selected.filter((candidate) => {
-          if (check.kind === "automation") return candidate.kind !== "automation" || candidate.automationId !== check.automationId;
-          return candidate.kind !== "manual" || candidate.id !== check.id;
-        }));
+        remove.onclick = () => void updateRequiredChecks(task, { type: "remove", check });
         if (check.kind === "automation") {
           const active = isRequiredCheckRunning(task, check.automationId);
           const run = el("button");
@@ -571,7 +565,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       addAutomation.disabled = !available.length;
       addAutomation.onclick = () => {
         if (!automation.value) return;
-        void updateRequiredChecks(task, [...selected, { kind: "automation", automationId: automation.value }]);
+        void updateRequiredChecks(task, { type: "add", check: { kind: "automation", automationId: automation.value } });
       };
       const manual = el("input");
       manual.placeholder = "Optional manual check";
