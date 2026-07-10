@@ -300,9 +300,9 @@ test("detectLanguage covers requested syntax highlighted extensions", () => {
   }
 });
 
-test("preview-created split does not clone the active file into the preview pane", () => {
+test("blank secondary split does not clone the active file", () => {
   assert.equal(splitClonesActiveTab("editor"), true);
-  assert.equal(splitClonesActiveTab("preview"), false);
+  assert.equal(splitClonesActiveTab("blank"), false);
 });
 
 test("preview tabs expose their source and refresh markdown live but html from disk", () => {
