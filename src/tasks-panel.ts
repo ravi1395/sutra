@@ -40,6 +40,7 @@ import {
   loadTasks,
   manualCheckIsChecked,
   recordManualCheck,
+  resetRunningTask,
   rootTask,
   setRequiredChecks,
   reconcileInterruptedWorktreeSetup,
@@ -357,6 +358,30 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       const copy = entries.slice(); copy[idx] = nextTask; return copy;
     });
     if (wrote) showStatus(`Detached Turn ${turnId}.`);
+  }
+
+  /** Manual recovery for a task stranded "running" with no live agent (see
+   * resetRunningTask). Confirms first, since this can discard a claim an
+   * agent is still mid-delivery on; resolves against the authoritative task
+   * read by the serialized queue, so a genuine concurrent turn-close always
+   * wins and this becomes a silent no-op. */
+  async function resetTask(task: Task): Promise<void> {
+    const root = getRoot();
+    if (!root) return;
+    if (!(await confirmDiscard("Reset this task? If an agent is still working, its closing turn will no longer auto-attach, but it will remain available to attach manually."))) return;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) {
+      showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; task was not reset.");
+      return;
+    }
+    const wrote = await updateTaskMetadata(root, (entries) => {
+      const idx = entries.findIndex((e) => e.id === task.id);
+      if (idx < 0) return entries;
+      const nextTask = resetRunningTask(entries[idx]);
+      if (nextTask === entries[idx]) return entries;
+      const copy = entries.slice(); copy[idx] = nextTask; return copy;
+    });
+    if (wrote) showStatus("Task reset. Start is available again.");
   }
 
   /** Append a handoff receipt to task evidence. Never touches Git — used
@@ -998,6 +1023,14 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       startBtn.title = !targetId ? "Choose an existing integrated agent terminal first." : "";
       startBtn.onclick = () => void start(task);
       actions.appendChild(startBtn);
+    }
+    if (trusted && task.status === "running") {
+      const reset = el("button");
+      reset.textContent = "Reset";
+      reset.disabled = loading;
+      reset.title = "Manually recover a task stranded running with no live agent.";
+      reset.onclick = () => void resetTask(task);
+      actions.appendChild(reset);
     }
     if (trusted && isGitRoot && task.status === "ready") {
       const dispatch = el("button");

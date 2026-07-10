@@ -321,6 +321,174 @@ test("start() cancels delivery, and leaves the claim in place, when the workspac
   }
 });
 
+// --- Reset: manual recovery for a task stranded "running" with no live
+// agent (the two start() tests above document how it gets stranded — a
+// post-claim trust/root failure leaves the persisted claim in place). ---
+
+test("Reset renders only for a running, trusted/writable task", async () => {
+  const dom = setupTasksPanelDom();
+  const mountFor = async (overrides: Partial<Task>, trustResponses: string[][]) => {
+    const testTask = task({ id: "t-reset-visibility", ...overrides });
+    dom.installInvoke(makeFakeInvoke({ trustResponses, taskFileContent: serializeTasks([testTask]) }));
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      updateTaskMetadata: async () => true,
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+    await handle.reload(true);
+    return container;
+  };
+  try {
+    assert.ok(await mountFor({ status: "running" }, [["/root"]]).then((c) => findByText(c, "Reset")), "Reset must render for a running, trusted task");
+    assert.equal(await mountFor({ status: "draft" }, [["/root"]]).then((c) => findByText(c, "Reset")), undefined, "Reset must not render for a draft task");
+    assert.equal(await mountFor({ status: "needs_review" }, [["/root"]]).then((c) => findByText(c, "Reset")), undefined, "Reset must not render for a needs_review task");
+    assert.equal(await mountFor({ status: "accepted" }, [["/root"]]).then((c) => findByText(c, "Reset")), undefined, "Reset must not render for an accepted task");
+    assert.equal(await mountFor({ status: "running" }, []).then((c) => findByText(c, "Reset")), undefined, "Reset must not render for an untrusted (read-only) panel");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("clicking Reset (confirmed) with no linked turns persists running->ready through the queued update, so Start is available again", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const stranded = task({ id: "t-reset-ready", status: "running", turnIds: [] });
+    dom.installInvoke(makeFakeInvoke({ trustResponses: [["/root"]], taskFileContent: serializeTasks([stranded]) }));
+
+    let metadataEntries: Task[] = [stranded];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      confirmDiscard: async () => true,
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        return true;
+      },
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+
+    await handle.reload(true);
+    const resetBtn = findByText(container, "Reset");
+    assert.ok(resetBtn, "Reset button must render for a running task");
+    resetBtn!.onclick?.();
+    await flush();
+    await flush();
+
+    const finalTask = metadataEntries.find((t) => t.id === stranded.id);
+    // "ready" is the status the Start button renders for (draft or ready),
+    // so this status is exactly what makes Start reachable again.
+    assert.equal(finalTask?.status, "ready", "reset with no linked turns must return to the startable ready status");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("clicking Reset with linked turns persists running->needs_review, preserving the turns as review evidence", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const stranded = task({ id: "t-reset-review", status: "running", turnIds: [11] });
+    dom.installInvoke(makeFakeInvoke({ trustResponses: [["/root"]], taskFileContent: serializeTasks([stranded]) }));
+
+    let metadataEntries: Task[] = [stranded];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      confirmDiscard: async () => true,
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        return true;
+      },
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+
+    await handle.reload(true);
+    findByText(container, "Reset")!.onclick?.();
+    await flush();
+    await flush();
+
+    const finalTask = metadataEntries.find((t) => t.id === stranded.id);
+    assert.equal(finalTask?.status, "needs_review");
+    assert.deepEqual(finalTask?.turnIds, [11]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("cancelling the Reset confirm dialog writes nothing", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const stranded = task({ id: "t-reset-cancel", status: "running" });
+    dom.installInvoke(makeFakeInvoke({ trustResponses: [["/root"]], taskFileContent: serializeTasks([stranded]) }));
+
+    let updateCalls = 0;
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      confirmDiscard: async () => false,
+      updateTaskMetadata: async (_root, reduce) => {
+        updateCalls++;
+        reduce([stranded]);
+        return true;
+      },
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+
+    await handle.reload(true);
+    findByText(container, "Reset")!.onclick?.();
+    await flush();
+    await flush();
+
+    assert.equal(updateCalls, 0, "declining the confirm dialog must never reach the metadata queue");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("Reset resolves against authoritative state: a turn-close racing the confirm dialog wins, and Reset becomes a silent no-op", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const stranded = task({ id: "t-reset-race", status: "running", turnIds: [] });
+    dom.installInvoke(makeFakeInvoke({ trustResponses: [["/root"]], taskFileContent: serializeTasks([stranded]) }));
+
+    let metadataEntries: Task[] = [stranded];
+    const container = new FakeElement("div");
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: container as unknown as HTMLElement,
+      getRoot: () => "/root",
+      // A turn closes and attaches while the confirm dialog is open, moving
+      // the authoritative task to needs_review before Reset's own queued
+      // update ever reads it.
+      confirmDiscard: async () => {
+        metadataEntries = metadataEntries.map((entry) => entry.id === stranded.id
+          ? { ...entry, status: "needs_review" as const, turnIds: [42], updatedAt: entry.updatedAt + 1 }
+          : entry);
+        return true;
+      },
+      updateTaskMetadata: async (_root, reduce) => {
+        metadataEntries = reduce(metadataEntries) as Task[];
+        return true;
+      },
+      deliverPrompt: async () => ({ ok: true }),
+    }));
+
+    await handle.reload(true);
+    findByText(container, "Reset")!.onclick?.();
+    await flush();
+    await flush();
+
+    const finalTask = metadataEntries.find((t) => t.id === stranded.id);
+    assert.equal(finalTask?.status, "needs_review", "the turn-close race must win; Reset must not revert it");
+    assert.deepEqual(finalTask?.turnIds, [42]);
+  } finally {
+    dom.restore();
+  }
+});
+
 test("updateRequiredChecks: a remove queued from a stale render derives against authoritative state, so a concurrently added check survives", async () => {
   const dom = setupTasksPanelDom();
   try {

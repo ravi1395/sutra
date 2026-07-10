@@ -168,7 +168,11 @@ const STATUSES: readonly TaskStatus[] = ["draft", "ready", "running", "needs_rev
 const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   draft: ["ready", "abandoned"],
   ready: ["draft", "running", "blocked", "abandoned"],
-  running: ["needs_review", "blocked", "abandoned"],
+  // "ready" here is the manual Reset escape hatch (resetRunningTask), not an
+  // automatic path: a task stranded running with no live agent (crash before
+  // delivery, or trust/root revoked in start()'s pre-delivery window) would
+  // otherwise block every other Start in its root forever.
+  running: ["needs_review", "blocked", "abandoned", "ready"],
   needs_review: ["running", "blocked", "accepted", "abandoned"],
   blocked: ["ready", "running", "abandoned"],
   accepted: ["needs_review", "blocked", "abandoned"],
@@ -756,6 +760,21 @@ export function claimRunningTask(tasks: readonly Task[], id: string, root: strin
   const copy = tasks.slice();
   copy[index] = next;
   return { tasks: copy, refused: null, started: true };
+}
+
+/** Manual escape hatch for a task stranded "running" with no live agent — an
+ * app crash/quit before prompt delivery, or trust revoked / root changed in
+ * start()'s pre-delivery window (start() deliberately leaves the persisted
+ * claim in place rather than reverting it). Since claimRunningTask refuses
+ * every other Start in the root while one task is running, this reducer is
+ * the sole recovery besides hand-editing tasks.json or a closing turn. A
+ * linked turn is preserved as review evidence rather than discarded; a
+ * bare claim with no turns simply releases back to startable. A no-op
+ * outside "running" lets a genuine concurrent turn-close win the race. */
+export function resetRunningTask(task: Task, updatedAt = Date.now()): Task {
+  if (task.status !== "running") return task;
+  const target: TaskStatus = task.turnIds.length > 0 ? "needs_review" : "ready";
+  return transitionTask(task, target, updatedAt);
 }
 
 /** Root-level automatic attribution. The caller supplies the closed turn from

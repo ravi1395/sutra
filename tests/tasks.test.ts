@@ -16,6 +16,7 @@ import {
   hasRequiredAutomationCheck,
   recordManualCheck,
   parseTasksFile,
+  resetRunningTask,
   completeWorktreeSetup,
   markMissingWorktree,
   reconcileInterruptedWorktreeSetup,
@@ -460,4 +461,26 @@ test("claimRunningTask scopes the running slot per root", () => {
   assert.equal(result.started, true);
   assert.equal(result.refused, null);
   assert.equal(result.tasks.find((entry) => entry.id === "task-b")?.status, "running");
+});
+
+test("resetRunningTask with linked turns returns to needs_review, preserving turns as review evidence", () => {
+  const stranded = task({ status: "running", turnIds: [3], updatedAt: 100 });
+  const reset = resetRunningTask(stranded, 300);
+  assert.equal(reset.status, "needs_review");
+  assert.equal(reset.updatedAt, 300);
+  assert.deepEqual(reset.turnIds, [3]);
+});
+
+test("resetRunningTask with no linked turns returns to the startable ready status", () => {
+  const stranded = task({ status: "running", turnIds: [], updatedAt: 100 });
+  const reset = resetRunningTask(stranded, 300);
+  assert.equal(reset.status, "ready");
+  assert.equal(reset.updatedAt, 300);
+});
+
+test("resetRunningTask is a same-reference no-op for any non-running status", () => {
+  for (const status of ["draft", "ready", "needs_review", "blocked", "accepted", "abandoned"] as const) {
+    const notRunning = task({ status });
+    assert.strictEqual(resetRunningTask(notRunning, 300), notRunning);
+  }
 });
