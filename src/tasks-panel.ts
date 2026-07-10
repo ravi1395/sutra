@@ -1,7 +1,8 @@
 // Workspace task panel. Task creation/start stays explicit; it also exposes
 // durable turn links so historical attribution never depends on a terminal.
-import { ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
+import { gitBranch, ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
+import { openWorktreeDispatchDialog, TaskWorktreeDispatchGate, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
   acceptTask,
   addRequiredManualCheck,
@@ -36,6 +37,8 @@ export interface TasksPanelOptions {
   runRequiredCheck: (task: Task, automationId: string) => Promise<TaskCheckActionResult>;
   cancelRequiredCheck: (task: Task, automationId: string) => Promise<boolean>;
   isRequiredCheckRunning: (task: Task, automationId: string) => boolean;
+  dispatchWorktree: (task: Task, input: WorktreeDispatchInput) => Promise<void>;
+  openWorktree: (task: Task) => Promise<void>;
 }
 
 export interface TaskAutomationChoice { id: string; label: string; }
@@ -171,13 +174,15 @@ export function attachableHistoricalTurns(tasks: readonly Task[], root: string, 
 export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   const {
     container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices,
-    updateTaskMetadata, runRequiredCheck, cancelRequiredCheck, isRequiredCheckRunning,
+    updateTaskMetadata, runRequiredCheck, cancelRequiredCheck, isRequiredCheckRunning, dispatchWorktree, openWorktree,
   } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
   let trusted = false;
+  let isGitRoot = false;
   let loading = false;
   const startGate = new TaskStartGate();
+  const worktreeDispatchGate = new TaskWorktreeDispatchGate();
   let status = "";
   let submit = false;
   let targetId: string | null = null;
@@ -205,14 +210,16 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       render();
       return;
     }
-    const [loaded, nextTrusted, nextAgents] = await Promise.all([
+    const [loaded, nextTrusted, nextAgents, branch] = await Promise.all([
       loadTasks(root),
       isWorkspaceTrusted(root).catch(() => false),
       ptyListAgents().catch(() => []),
+      gitBranch(root).catch(() => null),
     ]);
     if (getRoot() !== root) return;
     tasks = loaded.tasks.filter((task) => task.root === root);
     trusted = nextTrusted;
+    isGitRoot = branch !== null;
     agents = nextAgents;
     if (targetId && !agents.some((agent) => agent.id === targetId)) targetId = null;
     loading = false;
@@ -613,6 +620,31 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       startBtn.title = !targetId ? "Choose an existing integrated agent terminal first." : "";
       startBtn.onclick = () => void start(task);
       actions.appendChild(startBtn);
+    }
+    if (trusted && isGitRoot && task.status === "ready") {
+      const dispatch = el("button");
+      dispatch.textContent = task.worktree ? "Open worktree" : "Run in isolated worktree";
+      dispatch.disabled = loading;
+      dispatch.onclick = () => {
+        if (task.worktree) {
+          void openWorktree(task).catch((error) => showStatus(`Could not open worktree: ${String(error)}`));
+          return;
+        }
+        openWorktreeDispatchDialog({
+          root: task.root,
+          task,
+          onConfirm: async (input) => {
+            if (!worktreeDispatchGate.claim(task.id)) throw new Error("This task is already creating a worktree.");
+            try {
+              await dispatchWorktree(task, input);
+              showStatus("Linked worktree opened for this task.");
+            } finally {
+              worktreeDispatchGate.release(task.id);
+            }
+          },
+        });
+      };
+      actions.appendChild(dispatch);
     }
     const turns = getTurns(task.root);
     const linked = linkedTaskTurnRows(task, turns);

@@ -42,6 +42,7 @@ import {
   copyPath,
   gitChangedFiles,
   gitCheckout,
+  gitCreateWorktree,
   spawnWindow,
   onPreviewOpen,
   onDrive,
@@ -137,6 +138,7 @@ import {
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
 import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
+import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
   appendAutomationEvidence,
   attachClosedTurnToRunningTask,
@@ -796,6 +798,10 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   await terminals.reset(dir, drawerState.open);
+  // A trusted primary dispatch writes this link before launching the worktree
+  // process. Give the new root an integrated terminal immediately; it is ready
+  // for the user to launch their selected terminal-native agent there.
+  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
   await recentsPush(dir, basename(dir));
   void loadRecents().then((r) => { recentsCache = r; });
   void refreshGitState(dir);
@@ -1159,6 +1165,30 @@ const tasksPanel = mountTasksPanel({
   runRequiredCheck: runTaskRequiredCheck,
   cancelRequiredCheck: cancelTaskRequiredCheck,
   isRequiredCheckRunning: (task, automationId) => !!activeTaskChecks.activeRun(task.root, task.id, automationId),
+  dispatchWorktree: async (task, input: WorktreeDispatchInput) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    const current = (await loadTasks(root)).tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+    if (!current) throw new Error("Task no longer exists; reload before dispatching it.");
+    if (current.worktree) {
+      await spawnWindow(current.worktree.path);
+      return;
+    }
+    const created = await gitCreateWorktree(root, input.branch, input.target, input.baseRef);
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Workspace trust changed after the worktree was created; it was left unlinked.");
+    await createDir(`${created.path}/.sutra`);
+    await writeFile(`${created.path}/${WORKTREE_TASK_LINK_FILE}`, serializeWorktreeTaskLink(root, task.id));
+    const linked = await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => {
+      if (candidate.id !== task.id || candidate.worktree) return candidate;
+      return { ...candidate, worktree: { path: created.path, branch: created.branch }, updatedAt: Math.max(Date.now(), candidate.updatedAt) };
+    }), async () => currentRoot === root && await isWorkspaceTrusted(root));
+    if (!linked) throw new Error("Worktree was created but the task link was not saved; it was left intact for recovery.");
+    await spawnWindow(created.path);
+  },
+  openWorktree: async (task) => {
+    if (!task.worktree) throw new Error("This task has no linked worktree.");
+    await spawnWindow(task.worktree.path);
+  },
   updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
     const trusted = await isWorkspaceTrusted(root).catch(() => false);
     return mayPersistTaskForRoot(root, currentRoot, trusted);
