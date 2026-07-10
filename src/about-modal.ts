@@ -41,6 +41,11 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.0",
+    date: "2026-07-11",
+    notes: ["Internal cleanup and stability fixes."],
+  },
+  {
     version: "2.2.0",
     date: "2026-07-09",
     notes: [
