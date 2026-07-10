@@ -1636,7 +1636,7 @@ export class EditorManager {
   /** Open a real workspace file (MCP open_preview) and switch it into preview mode. */
   async openFileWithPreview(path: string): Promise<void> {
     await this.openFile(path);
-    const tab = this.tabByPath(path);
+    const tab = this.focused.tabByPath(path);
     if (tab && previewKind(tab.name)) {
       tab.previewMode = true;
       await this.focused.showPreview(tab, this.contentOf(tab));
