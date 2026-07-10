@@ -439,7 +439,7 @@ export function isPreviewable(name: string): boolean {
   return ext === "md" || ext === "markdown" || ext === "html" || ext === "htm";
 }
 
-export type SplitPurpose = "editor" | "preview";
+export type SplitPurpose = "editor" | "blank";
 export type PaneSide = "left" | "right";
 export type PreviewRefreshMode = "live" | "save";
 
@@ -1055,8 +1055,6 @@ export class EditorManager {
   onDocChanged?: () => void;
   /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
   onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
-  /** Fires when an HTML preview should open in the browser pane (main.ts wires it). */
-  onHtmlPreview?: (url: string) => void;
 
   private container: HTMLElement;
   private splitter: HTMLElement | null = null;
@@ -1603,20 +1601,59 @@ export class EditorManager {
     this.renderAllTabs();
   }
 
-  /** Show agent-supplied preview content in the right-hand preview pane. */
+  /** Show agent-supplied content (prompt_user's interactive URL iframe) in the focused pane. */
   async showAgentPreview(payload: {
     kind: "html" | "md" | "diagram";
     url?: string;
     source?: string;
   }): Promise<void> {
     const text = payload.kind === "html" ? (payload.url ?? "") : (payload.source ?? "");
-    const target = this.ensureRightPane();
-    await target.showAgentPreview(payload.kind, text, "(agent)");
+    await this.focused.showAgentPreview(payload.kind, text, "(agent)");
+    this.renderAllTabs();
+  }
+
+  /** Render an MCP push (render_markdown/render_diagram) as an ephemeral tab: no disk file, never dirty. */
+  async openEphemeralPreview(kind: "md" | "diagram", source: string): Promise<void> {
+    const pane = this.focused;
+    const name = kind === "md" ? "Agent.md" : "Agent.mmd";
+    const tab: Tab = {
+      id: `t${++idSeq}`,
+      path: null,
+      name,
+      state: pane.makeState(source, name),
+      dirty: false,
+      gitHead: null,
+      override: null,
+      savedContent: source,
+      lastMtime: null,
+      hunks: [],
+      previewMode: true,
+    };
+    pane.addTab(tab);
+    this.activateInPane(pane, tab);
+  }
+
+  /** Open a real workspace file (MCP open_preview) and switch it into preview mode. */
+  async openFileWithPreview(path: string): Promise<void> {
+    await this.openFile(path);
+    const tab = this.tabByPath(path);
+    if (tab && previewKind(tab.name)) {
+      tab.previewMode = true;
+      await this.focused.showPreview(tab, this.contentOf(tab));
+      this.renderAllTabs();
+    }
+  }
+
+  /** Dismiss any pane showing agent-pushed preview content (prompt_user reply). */
+  dismissAgentPreview(): void {
+    for (const pane of this.panes) {
+      if (pane.previewSource?.id === "agent") pane.hidePreview();
+    }
     this.renderAllTabs();
   }
 
   private ensureRightPane(): Pane {
-    if (!this.isSplit) this.openSplit("preview");
+    if (!this.isSplit) this.openSplit("blank");
     return this.panes[1];
   }
 
