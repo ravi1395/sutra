@@ -83,6 +83,8 @@ export class TerminalManager {
   private blinkPaused = false;
   cwd: string | null = null;
   onTabsChanged?: () => void;
+  /** Fires after a Claude/Codex command is delivered to an integrated terminal. */
+  onAgentAttached?: () => void;
   onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
 
   constructor(host: HTMLElement, area: HTMLElement, mainEl: HTMLElement) {
@@ -296,7 +298,13 @@ export class TerminalManager {
       if (submittedCommand && this.cwd && isIntegratedAgentCommand(submittedCommand)) {
         t.agentAttached = true;
         this.renderTabs();
-        void agentTrackingBegin(this.cwd).then(send, send);
+        void agentTrackingBegin(this.cwd).then(() => {
+          send();
+          this.onAgentAttached?.();
+        }, () => {
+          send();
+          this.onAgentAttached?.();
+        });
       } else {
         send();
       }

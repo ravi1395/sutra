@@ -1,6 +1,7 @@
 // App entry: instantiates the tree / editor / terminal / diff modules and wires
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
+import "./styles.css";
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
@@ -1134,15 +1135,14 @@ $("composer-close").onclick = () => setComposer(false);
 const tasksPane = document.createElement("div");
 tasksPane.id = "tasks-panel-host";
 tasksPane.className = "hidden";
-tasksPane.style.cssText = "flex: 0 0 35%; min-width: 0; overflow: auto; padding: 10px; background: var(--bg-2); border-left: 1px solid var(--line);";
 $("editor-area").appendChild(tasksPane);
 const btnTasks = document.createElement("button");
 btnTasks.id = "btn-tasks";
 btnTasks.className = "glyph";
 btnTasks.title = "Toggle tasks";
 btnTasks.setAttribute("aria-label", "Toggle tasks");
-btnTasks.textContent = "✓";
-$("view-tools").appendChild(btnTasks);
+btnTasks.innerHTML = icon("check", 17);
+$("view-tools").insertBefore(btnTasks, $("btn-menu"));
 const tasksPanel = mountTasksPanel({
   container: tasksPane,
   getRoot: () => currentRoot,
@@ -1164,6 +1164,15 @@ const tasksPanel = mountTasksPanel({
     return mayPersistTaskForRoot(root, currentRoot, trusted);
   }),
 });
+let tasksAgentRefreshTimer: number | undefined;
+terminals.onAgentAttached = () => {
+  window.clearTimeout(tasksAgentRefreshTimer);
+  // The PTY's foreground process changes just after the command is written.
+  // Wait briefly so pty_list_agents sees Claude/Codex rather than the shell.
+  tasksAgentRefreshTimer = window.setTimeout(() => {
+    if (!tasksPane.classList.contains("hidden")) void tasksPanel.reload();
+  }, 250);
+};
 function setTasks(on: boolean): void {
   btnTasks.classList.toggle("on", on);
   if (on) tasksPanel.show(); else tasksPanel.hide();

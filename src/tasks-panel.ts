@@ -588,7 +588,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
 
   function renderTask(task: Task, running: Task | undefined): HTMLElement {
     const card = el("section", "tasks-panel-card");
-    const title = el("input");
+    const title = el("input", "task-title");
     title.value = task.title;
     title.disabled = !trusted || loading;
     title.setAttribute("aria-label", "Task title");

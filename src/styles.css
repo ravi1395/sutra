@@ -2456,6 +2456,117 @@ button:hover {
   display: none;
 }
 
+/* ---- task control plane ---- */
+#tasks-panel-host {
+  flex: 0 0 35%;
+  min-width: 280px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--bg-1);
+  border-left: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+#tasks-panel-host > p {
+  margin: 10px 0;
+  line-height: 1.45;
+}
+.tasks-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -2px 0 12px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--line);
+}
+.tasks-panel-header strong {
+  color: var(--fg);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tasks-panel-header button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-faint);
+  font-size: 17px;
+  line-height: 1;
+}
+.tasks-panel-header button:hover { color: var(--fg); background: var(--bg-3); }
+.tasks-panel-controls {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+}
+.tasks-panel-controls select {
+  grid-column: 1 / -1;
+}
+#tasks-panel-host button,
+#tasks-panel-host select,
+#tasks-panel-host input,
+#tasks-panel-host textarea {
+  font: inherit;
+}
+#tasks-panel-host button,
+#tasks-panel-host select,
+#tasks-panel-host .task-title,
+#tasks-panel-host textarea {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--fg);
+}
+#tasks-panel-host button { padding: 5px 8px; }
+#tasks-panel-host button:hover:not(:disabled) { border-color: var(--em-dim); background: var(--bg-3); }
+#tasks-panel-host button:disabled,
+#tasks-panel-host select:disabled,
+#tasks-panel-host input:disabled,
+#tasks-panel-host textarea:disabled { opacity: 0.48; cursor: not-allowed; }
+#tasks-panel-host select,
+#tasks-panel-host .task-title,
+#tasks-panel-host textarea { box-sizing: border-box; width: 100%; padding: 6px 8px; }
+#tasks-panel-host textarea { resize: vertical; min-height: 64px; line-height: 1.45; }
+.tasks-panel-controls label { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-faint); }
+.tasks-panel-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.tasks-panel-card > div:first-child {
+  color: var(--em);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.tasks-panel-card > div:nth-child(4) { display: flex; gap: 6px; }
+.tasks-panel-status {
+  margin-top: 10px;
+  padding: 7px 8px;
+  border-left: 2px solid var(--em-dim);
+  background: var(--em-wash);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.task-linked-turns,
+.task-linked-turn,
+.task-attach-turn {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+}
+.task-linked-turn { grid-template-columns: 1fr auto; align-items: center; color: var(--fg-faint); }
+.task-attach-turn { grid-template-columns: 1fr auto; align-items: center; }
+.task-acceptance-gate { background: var(--bg-1); }
+
 /* Task acceptance is a deliberate user gate: blockers remain prominent and
    the final action is visually distinct from ordinary task editing. */
 .task-acceptance-gate {

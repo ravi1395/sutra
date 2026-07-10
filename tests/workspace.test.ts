@@ -90,6 +90,23 @@ test("app layout keeps whisper bar below body and terminal inside webview bounds
   assert.match(mainTs, /vResizer\(vres, sidebar, \{[^}]*onResize:\s*\(\) => terminals\.refit\(\)/s);
 });
 
+test("the app entrypoint loads the stylesheet as a Vite module", () => {
+  const html = readFileSync("index.html", "utf8");
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  assert.doesNotMatch(html, /rel="stylesheet" href="\/src\/styles\.css"/);
+  assert.match(mainTs, /import "\.\/styles\.css";/);
+});
+
+test("a visible tasks panel refreshes when an integrated agent starts", () => {
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const terminalTs = readFileSync("src/terminal.ts", "utf8");
+
+  assert.match(terminalTs, /onAgentAttached\?: \(\) => void;/);
+  assert.match(terminalTs, /this\.onAgentAttached\?\.\(\);/);
+  assert.match(mainTs, /terminals\.onAgentAttached = \(\) => \{[\s\S]*?!tasksPane\.classList\.contains\("hidden"\)[\s\S]*?tasksPanel\.reload\(\)/);
+});
+
 test("pathBelongsToRoot rejects sibling path prefixes", () => {
   assert.equal(pathBelongsToRoot("/tmp/project/src/main.ts", "/tmp/project"), true);
   assert.equal(pathBelongsToRoot("/tmp/project-old/src/main.ts", "/tmp/project"), false);
