@@ -452,7 +452,8 @@ export function previewTabName(name: string): string {
 export function previewRefreshModeForName(name: string): PreviewRefreshMode | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "md" || ext === "markdown") return "live";
-  if (ext === "html" || ext === "htm") return "save";
+  if (ext === "html" || ext === "htm") return "live";
+  if (ext === "mmd") return "live";
   return null;
 }
 
