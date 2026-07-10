@@ -54,6 +54,7 @@ import { filterWorkspaceTabs, pathBelongsToRoot } from "./workspace";
 import { marginEntries, type AiRange } from "./marginalia";
 import type { AgentChange } from "./ipc";
 import type { InlineHint } from "./debug-hints";
+import { previewKind } from "./preview";
 
 export interface Tab {
   id: string;
@@ -67,6 +68,7 @@ export interface Tab {
   lastMtime: number | null;
   hunks: Hunk[];
   readOnly?: boolean; // soft-lock while an integrated agent is editing this file
+  previewMode?: boolean; // render as read-only preview instead of the editor
 }
 
 /**
@@ -850,20 +852,27 @@ export class Pane {
   /** Show `tab` in this pane's view, checkpointing the outgoing tab's state. */
   activate(tab: Tab): void {
     this.closeLens();
-    if (this.previewSource) this.hidePreview();
+    const wantPreview = !!tab.previewMode && !!previewKind(tab.name);
+    // Only clear a preview pointing at a different tab — reactivating the
+    // already-previewed tab must not flash back to the editor first.
+    if (this.previewSource && this.previewSource !== tab) this.hidePreview();
     if (this.active && this.active !== tab) this.active.state = this.view.state;
     this.active = tab;
     this.view.setState(tab.state);
     this.view.dispatch({ effects: this.readOnlyCompartment.reconfigure(EditorState.readOnly.of(tab.readOnly ?? false)) });
     this.applyEditorTheme();
-    this.hostEl.classList.remove("hidden");
-    this.previewEl.classList.add("hidden");
-    this.view.dom.style.display = "";
-    this.welcomeEl.classList.add("hidden");
-    this.remeasureOnShow();
+    if (wantPreview) {
+      void this.showPreview(tab, tab.state.doc.toString());
+    } else {
+      this.hostEl.classList.remove("hidden");
+      this.previewEl.classList.add("hidden");
+      this.view.dom.style.display = "";
+      this.welcomeEl.classList.add("hidden");
+      this.remeasureOnShow();
+      // Detect conflicts in the newly activated tab
+      this.detectAndRenderConflicts();
+    }
     this.syncMarginalia();
-    // Detect conflicts in the newly activated tab
-    this.detectAndRenderConflicts();
   }
 
   /**
@@ -900,11 +909,12 @@ export class Pane {
   /** Enter preview mode bound to `source`, rendering `text`. */
   async showPreview(source: Tab, text: string): Promise<void> {
     this.closeLens();
-    const { PreviewController, previewKind } = await import("./preview");
+    const { PreviewController } = await import("./preview");
+    if (this.active !== source) return; // stale: tab switched during the dynamic import
     const kind = previewKind(source.name);
     if (!kind) return;
     this.previewSource = source;
-    this.previewCtl = new PreviewController(this.previewEl, kind);
+    this.previewCtl = new PreviewController(this.previewEl, kind, kind === "html" ? { htmlMode: "srcdoc" } : undefined);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
     this.view.dom.style.display = "none";
@@ -1571,34 +1581,25 @@ export class EditorManager {
   }
 
   /**
-   * Toggle preview for the focused active tab. Renders into the right pane
-   * (opening the split if needed). Pressing again for the same source closes it.
+   * Toggle preview for the focused tab, in place. Pressing again for the same
+   * source restores the editor.
    */
   async togglePreview(): Promise<void> {
     const source = this.focused.active;
     if (!source) return;
-    const { previewKind } = await import("./preview");
-    if (!previewKind(source.name)) return; // not md/html → no-op
+    if (!previewKind(source.name)) return; // not md/mmd/html → no-op
 
-    // HTML previews go to the browser pane, not the editor split.
-    if (previewKind(source.name) === "html") {
-      const url = await this.previewRenderValue(source);
-      this.onHtmlPreview?.(url);
+    // already previewing this source in the focused pane → restore the editor
+    if (this.focused.previewSource === source) {
+      this.focused.hidePreview();
+      source.previewMode = false;
+      this.renderAllTabs();
       return;
     }
 
-    // already previewing this exact source in the right pane → close it
-    const right = this.panes[1];
-    if (right && right.previewSource === source) {
-      right.hidePreview();
-      if (right.tabs.length === 0) void this.closeSplit();
-      return;
-    }
-
-    const text = await this.previewRenderValue(source);
-    if (!this.isSplit) this.openSplit("preview");
-    const target = this.panes[1];
-    await target.showPreview(source, text);
+    const text = this.contentOf(source);
+    await this.focused.showPreview(source, text);
+    source.previewMode = true;
     this.renderAllTabs();
   }
 

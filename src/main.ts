@@ -300,11 +300,6 @@ async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
   if (!result.ok) await alertNative(`Could not stage visual feedback: ${result.reason}`);
 }
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
-editor.onHtmlPreview = (url) => {
-  setBrowser(true);
-  browser.show();
-  browser.loadDirect(url);
-};
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
