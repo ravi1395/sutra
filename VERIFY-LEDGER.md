@@ -37,3 +37,20 @@ Agent control plane V1–P3 (commits `00b58c6`…`084f34c`, branch worktree-agen
 | 2026-07-10 | 2.3.0 | FIXED in 8aa83be, live re-verify: MCP get_annotations html/styles now redacted | B | — | BLOCKED(drive MCP get_annotations on an annotated route with a filled form field → payload has no html/styles keys; number/feedback/selector/tag/locator hints still present) |
 | 2026-07-10 | 2.3.0 | FIXED in 8aa83be, live re-verify: corrupt annotations.json warns + quarantines to .bak, no silent overwrite | B | — | BLOCKED(corrupt .sutra/annotations.json → relaunch → alert lists load warnings, annotations.json.bak holds the original; add a new annotation → .bak untouched) |
 | 2026-07-10 | 2.3.0 | Reset control recovers a task stranded in running (9e04b73) | B | — | BLOCKED(hand-edit a task to status running with no live agent → Reset button shows (trusted root only) → confirm → task returns to ready (no turns) or needs_review (linked turns); Start available again; cancel confirm → nothing written) |
+
+Inline preview render (branch `feat/inline-preview`, commits `5ba5cf8..c0a70ea`). Logic GATE PASS by adversarial Opus review (AC-1..4 executed green; prompt_user origin/dismiss, targeted-emit fallback, srcdoc sanitization all cleared). Rows below are the live-GUI/IPC criteria the review could not verify — drive each in `npm run tauri dev` and record what you observe.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-11 | 2.3.0 | L-1 md inline render in SAME pane, no 2nd pane | UI | — | BLOCKED(open a .md, ⇧⌘V → renders in place; no split/second pane appears) |
+| 2026-07-11 | 2.3.0 | L-2 toggle back to editable source | UI | — | BLOCKED(⇧⌘V again on the previewing tab → editable CM6 source returns, same tab) |
+| 2026-07-11 | 2.3.0 | L-3 .mmd mermaid renders inline | UI | — | BLOCKED(open a .mmd, ⇧⌘V → mermaid SVG renders inline) |
+| 2026-07-11 | 2.3.0 | L-4 .html static srcdoc render | UI | — | BLOCKED(open a .html, ⇧⌘V → sanitized static render, scripts OFF) |
+| 2026-07-11 | 2.3.0 | L-5 non-md/mmd/html no-op | UI | — | BLOCKED(open a .ts, ⇧⌘V → nothing happens, no pane, no error) |
+| 2026-07-11 | 2.3.0 | L-6 per-tab persistence + no flash on switch | UI | — | BLOCKED(md-preview tab + code tab → switch back and forth; each restores its mode; watch for raw-source flash) |
+| 2026-07-11 | 2.3.0 | L-7 render_markdown → ephemeral tab, preview on, no split, no disk file | IPC | — | BLOCKED(MCP render_markdown → new "Agent.md" tab in focused pane, preview on; git status unchanged) |
+| 2026-07-11 | 2.3.0 | L-8 render_diagram mermaid ephemeral | IPC | — | BLOCKED(MCP render_diagram → ephemeral mermaid inline, no split) |
+| 2026-07-11 | 2.3.0 | L-9 prompt_user renders, reply returns, form dismisses | IPC | — | BLOCKED(MCP prompt_user → form in focused pane; submit → agent gets reply AND form dismisses to editor) |
+| 2026-07-11 | 2.3.0 | L-10 two same-process windows → only focused/main renders | IPC | — | BLOCKED(two windows same process → MCP push renders in ONE window only; record if one-window-per-process makes this N/A) |
+| 2026-07-11 | 2.3.0 | L-11 render_html+url → browser unaffected | IPC | — | BLOCKED(MCP render_html with url → opens localhost browser pane as before) |
+| 2026-07-11 | 2.3.0 | L-12 open_preview opens the REAL savable file with preview on (incl. split-pane, post-fix 7d56013) | IPC | — | BLOCKED(MCP open_preview on a real .md/.mmd/.html → actual file opens (has path, savable) with preview on; test with file already open in a non-focused split pane) |
