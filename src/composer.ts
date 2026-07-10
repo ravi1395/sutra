@@ -7,7 +7,7 @@
 // squeezed off when the terminal drawer steals panel height).
 import { ask } from "@tauri-apps/plugin-dialog";
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
-import { loadAgentProfiles, resolveAgentProfiles, type AgentProfile } from "./agent-profiles";
+import { loadAgentProfiles, resolveAgentProfiles, summarizeContextPackFromChips, type AgentProfile } from "./agent-profiles";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
 import { orderSections, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
 import { matchFiles, matchAssets, assetToken, completionContext, type AssetOption } from "./composer-complete";
@@ -58,6 +58,12 @@ export interface ComposerTaskDraft {
   prompt: string;
   /** A useful editable starting title; the task panel never sends on create. */
   title: string;
+  /** P3: storage-safe context-pack receipt (selector + label + byte-count
+   * metadata only — see agent-profiles.ts renderContextPackSummary for the
+   * redaction guarantee: never raw chip content, terminal output, secrets,
+   * or page form values). Empty string when nothing was explicitly attached
+   * to <context>. */
+  contextPackSummary: string;
 }
 
 export type ComposerDeliveryResult = { ok: true } | { ok: false; reason: string };
@@ -590,10 +596,20 @@ export function mountComposer(opts: ComposerOptions): {
     if (open) renderHistory();
   }
 
+  // P3: what would actually go out under <context> if sent right now — only
+  // explicit user-attached file/selection chips, bounded by agent-profiles.ts's
+  // deterministic caps, with omissions listed. Reuses this existing Preview
+  // drawer (no parallel inclusions/omissions panel).
+  function contextPackPreview(): string {
+    return summarizeContextPackFromChips(chips);
+  }
+
   function renderPreview(): void {
     if (!prevOpen) return;
     const p = safeBuildPrompt();
-    previewPre.textContent = p?.trim() ? p : "Nothing to preview — write the ask first.";
+    const body = p?.trim() ? p : "Nothing to preview — write the ask first.";
+    const pack = contextPackPreview();
+    previewPre.textContent = pack ? `${pack}\n\n${body}` : body;
   }
 
   function renderHistory(): void {
@@ -780,7 +796,7 @@ export function mountComposer(opts: ComposerOptions): {
   function getTaskDraft(): ComposerTaskDraft | null {
     const prompt = safeBuildPrompt();
     if (!prompt?.trim()) return null;
-    return { prompt, title: taskTitle(prompt) };
+    return { prompt, title: taskTitle(prompt), contextPackSummary: contextPackPreview() };
   }
 
   async function deliverTaskPrompt(args: { targetId: string; prompt: string; submit: boolean }): Promise<ComposerDeliveryResult> {
