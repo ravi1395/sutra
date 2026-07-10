@@ -2,7 +2,7 @@
 // (validated postMessage) and the side list. DOM-bound; verified manually.
 import { reduce, isTrustedMessage, type Annotation, type AnnAction } from "./annotation-core";
 import { annotationId, buildAnnotationContextPack } from "./annotation-context";
-import { annotationsForRoute, loadAnnotations, saveAnnotations } from "./annotation-store";
+import { annotationsForRoute, backupCorruptAnnotationsFile, loadAnnotations, saveAnnotations, type AnnotationPersistence } from "./annotation-store";
 import type { Task } from "./tasks";
 
 export class AnnotationsPanel {
@@ -16,11 +16,19 @@ export class AnnotationsPanel {
   private onDetach: ((task: Task, annotation: Annotation, reason?: string) => Promise<void>) | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
   private onDeliver: ((task: Task, prompt: string) => Promise<void>) | null = null;
+  /** Surfaces recoverable load warnings (corrupt/partial annotations file) to the shell. */
+  onWarnings: ((warnings: string[]) => void) | null = null;
+  /** Resolves once the in-flight setRoot() hydration completes. Inbound browser
+   * messages are gated on this so a picked/reanchorResult mid-load can never
+   * mutate state that setRoot is about to overwrite (or save a partial file
+   * before a corrupt-file backup has been written). */
+  private hydrating: Promise<void> | null = null;
 
   constructor(
     private iframe: HTMLIFrameElement,
     private listEl: HTMLElement,
     private toggleBtn: HTMLButtonElement,
+    private persistence?: AnnotationPersistence,
   ) {
     this.toggleBtn.addEventListener("click", () => this.toggle());
     window.addEventListener("message", (e) => this.onMessage(e));
@@ -36,11 +44,25 @@ export class AnnotationsPanel {
     this.state = [];
     this.route = "";
     this.render();
-    if (!root) return;
-    const loaded = await loadAnnotations(root);
-    if (this.root !== root) return;
-    this.state = loaded.annotations;
-    this.render();
+    if (!root) { this.hydrating = null; return; }
+    let resolveHydrating!: () => void;
+    this.hydrating = new Promise((resolve) => { resolveHydrating = resolve; });
+    try {
+      const loaded = await loadAnnotations(root, this.persistence);
+      if (this.root !== root) return;
+      if (loaded.warnings.length > 0) {
+        this.onWarnings?.(loaded.warnings);
+        // Must complete before hydration releases gated messages, so a
+        // corrupt file is quarantined before any save can overwrite it.
+        await backupCorruptAnnotationsFile(root, this.persistence).catch((error) =>
+          console.warn("Annotation backup failed", error));
+      }
+      this.state = loaded.annotations;
+      this.render();
+    } finally {
+      if (this.root === root) this.hydrating = null;
+      resolveHydrating();
+    }
   }
 
   setTaskContext(
@@ -87,7 +109,8 @@ export class AnnotationsPanel {
     if (this.root) {
       const root = this.root;
       const state = [...this.state];
-      this.saveQueue = this.saveQueue.catch(() => {}).then(() => saveAnnotations(root, state));
+      const persistence = this.persistence;
+      this.saveQueue = this.saveQueue.catch(() => {}).then(() => saveAnnotations(root, state, persistence));
       void this.saveQueue.catch((error) => console.warn("Annotation save failed", error));
     }
     this.render();
@@ -95,7 +118,16 @@ export class AnnotationsPanel {
 
   private onMessage(e: MessageEvent) {
     if (!isTrustedMessage(e, this.proxyOrigin, this.iframe.contentWindow)) return;
-    const m = e.data as any;
+    // A message that arrives while setRoot() is hydrating must wait: acting on
+    // it now would mutate/save state that setRoot is about to overwrite. Retry
+    // through onMessage (not straight to handleMessage) so a root switch that
+    // starts a *second* hydration while this one is queued gates it again
+    // instead of firing into the stale window between the two loads.
+    if (this.hydrating) { void this.hydrating.then(() => this.onMessage(e)); return; }
+    this.handleMessage(e.data as any);
+  }
+
+  private handleMessage(m: any) {
     switch (m.type) {
       case "ready":
         this.route = m.route;
@@ -171,6 +203,11 @@ export class AnnotationsPanel {
       del.dataset.n = String(a.n);
       del.addEventListener("click", (e) => {
         e.stopPropagation(); // don't trigger the row's scroll-to-pin
+        // Cascade-detach first: a deleted annotation must never leave a
+        // dangling id in a task's annotationIds, which would otherwise block
+        // "Stage feedback" forever with no way to recover in the UI.
+        const owners = this.tasks.filter((candidate) => candidate.annotationIds.includes(annotationId(a)));
+        for (const owner of owners) void this.onDetach?.(owner, a, "Annotation deleted");
         this.dispatch({ type: "remove", n: a.n });
         this.postToAgent({ type: "removePin", n: a.n });
       });

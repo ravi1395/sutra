@@ -20,6 +20,7 @@ import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
+import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
@@ -261,6 +262,11 @@ const annotations = new AnnotationsPanel(
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
 );
+// Corrupt/partial annotations.json is quarantined to a .bak by the panel
+// itself; this only needs to tell the user it happened. Reuses the same
+// alertNative surface as other recoverable-file-load issues in this file.
+annotations.onWarnings = (warnings) =>
+  void alertNative(`Annotations file has issues and was backed up to annotations.json.bak:\n${warnings.join("\n")}`);
 annotations.setTaskContext([], annotationsAttach, annotationsDeliver, annotationsDetach);
 
 async function annotationsAttach(task: Task, annotation: import("./annotation-core").Annotation): Promise<void> {
@@ -411,7 +417,7 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations() : [],
+    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations().map(redactAnnotationForExternal) : [],
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });

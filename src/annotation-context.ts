@@ -14,6 +14,17 @@ export function annotationId(annotation: Pick<Annotation, "route" | "n">): strin
   return `${annotation.route}#${annotation.n}`;
 }
 
+export type RedactedAnnotation = Omit<Annotation, "html" | "styles">;
+
+/** Same redaction policy as buildAnnotationContextPack: raw HTML/computed
+ * styles must never leave the app (may embed form values/data-* attrs), so
+ * every external reader — including the MCP get_annotations provider — goes
+ * through this instead of the raw Annotation shape. */
+export function redactAnnotationForExternal(annotation: Annotation): RedactedAnnotation {
+  const { html: _html, styles: _styles, ...redacted } = annotation;
+  return redacted;
+}
+
 function line(label: string, value: string | undefined): string {
   return value ? `${label}: ${value}` : "";
 }
