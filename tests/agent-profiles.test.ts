@@ -4,12 +4,20 @@ import {
   AGENT_PROFILES_PATH,
   AUTOMATION_ID_LIMIT,
   BUILTIN_AGENT_PROFILES,
+  CONTEXT_PACK_BYTE_CAP,
+  CONTEXT_PACK_ITEM_CAP,
   CONTEXT_SELECTOR_LIMIT,
   DEFAULT_ACCEPTANCE_LIMIT,
   PROFILE_LIMIT,
+  assembleContextPack,
+  contextPackItemsFromChips,
   loadAgentProfiles,
+  renderContextPackSummary,
   resolveAgentProfiles,
+  summarizeContextPackFromChips,
+  type ContextPackItem,
 } from "../src/agent-profiles";
+import type { RoutedChip } from "../src/prompt-builder";
 
 test("built-in profiles are available without project configuration", () => {
   const profiles = resolveAgentProfiles({ rawJson: null, trusted: true, automationIds: [] });
@@ -153,4 +161,63 @@ test("allowedAutomationIds over AUTOMATION_ID_LIMIT falls back to built-ins", ()
     resolveAgentProfiles({ rawJson: raw, trusted: true, automationIds: tooManyAutomationIds }),
     BUILTIN_AGENT_PROFILES,
   );
+});
+
+// ── P3: bounded context-pack preview + task receipt ─────────────────────────
+
+test("assembleContextPack caps by item count deterministically", () => {
+  const items: ContextPackItem[] = Array.from({ length: CONTEXT_PACK_ITEM_CAP + 5 }, (_, i) => ({
+    id: `item-${i}`, selector: "chosen-files", label: `@file${i}.ts`, content: "x",
+  }));
+  const first = assembleContextPack(items);
+  const second = assembleContextPack(items);
+  assert.deepEqual(first, second);
+  assert.equal(first.includedIds.length, CONTEXT_PACK_ITEM_CAP);
+  assert.equal(first.omittedIds.length, 5);
+  assert.deepEqual(first.includedIds, items.slice(0, CONTEXT_PACK_ITEM_CAP).map((i) => i.id));
+});
+
+test("assembleContextPack caps by byte budget deterministically, exact fill allowed", () => {
+  const big = "x".repeat(CONTEXT_PACK_BYTE_CAP); // fills the whole budget alone
+  const items: ContextPackItem[] = [
+    { id: "a", selector: "selection", label: "@a", content: big },
+    { id: "b", selector: "selection", label: "@b", content: "y" }, // pushes over cap
+  ];
+  const pack = assembleContextPack(items);
+  assert.deepEqual(pack.includedIds, ["a"]);
+  assert.deepEqual(pack.omittedIds, ["b"]);
+  assert.equal(pack.includedBytes, CONTEXT_PACK_BYTE_CAP);
+  assert.deepEqual(assembleContextPack(items), pack); // determinism
+});
+
+test("renderContextPackSummary never leaks raw content — labels only", () => {
+  const items: ContextPackItem[] = [
+    { id: "a", selector: "chosen-files", label: "@secrets.env", content: "API_KEY=sk-abcdef123456\nterminal output dump" },
+  ];
+  const pack = assembleContextPack(items);
+  const summary = renderContextPackSummary(items, pack);
+  assert.ok(!summary.includes("sk-abcdef123456"));
+  assert.ok(!summary.includes("terminal output dump"));
+  assert.ok(summary.includes("@secrets.env"));
+});
+
+test("contextPackItemsFromChips only includes explicit context-routed file/selection chips", () => {
+  const chips: RoutedChip[] = [
+    { chip: { kind: "file", path: "src/a.ts" }, section: "context" },
+    { chip: { kind: "selection", path: "src/b.ts", lang: "ts", startLine: 1, endLine: 5, text: "const x = 1;" }, section: "context" },
+    { chip: { kind: "file", path: "src/c.ts" }, section: "task" }, // routed away from context — excluded
+    { chip: { kind: "skill", invocation: "/foo" }, section: "context" }, // no selector identity — excluded
+  ];
+  const items = contextPackItemsFromChips(chips);
+  assert.deepEqual(items.map((i) => i.label), ["@src/a.ts", "@src/b.ts:1-5"]);
+  assert.deepEqual(items.map((i) => i.selector), ["chosen-files", "selection"]);
+});
+
+test("summarizeContextPackFromChips is deterministic and empty when nothing is attached", () => {
+  assert.equal(summarizeContextPackFromChips([]), "");
+  const chips: RoutedChip[] = [{ chip: { kind: "file", path: "src/a.ts" }, section: "context" }];
+  const first = summarizeContextPackFromChips(chips);
+  const second = summarizeContextPackFromChips(chips);
+  assert.equal(first, second);
+  assert.ok(first.includes("1 included, 0 omitted"));
 });

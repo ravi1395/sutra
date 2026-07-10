@@ -55,8 +55,8 @@ export const DEFAULT_CONFIG: TagConfig = {
   ],
   templates: [
     { name: "Bug fix", tags: ["role", "context", "task", "constraints", "success_criteria", "output"] },
-    { name: "Feature", tags: ["role", "context", "task", "constraints", "examples", "output"] },
-    { name: "Review", tags: ["role", "context", "task", "output"] },
+    { name: "Feature", tags: ["role", "context", "task", "constraints", "examples", "success_criteria", "output"] },
+    { name: "Review", tags: ["role", "context", "task", "success_criteria", "output"] },
     { name: "Explain", tags: ["role", "context", "task"] },
   ],
   activeTemplate: "Feature",

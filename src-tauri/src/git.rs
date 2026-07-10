@@ -667,6 +667,234 @@ pub fn git_remove_worktree(root: String, target: String, discard: bool) -> Resul
     Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "removed".to_string(), dirty })
 }
 
+// --- Explicit stage/unstage/commit (G2) ---
+//
+// Whole-file index operations only: every command takes explicit paths, and
+// nothing here ever behaves like `git add -A` / `git commit -a`. Signing is
+// out of scope for this release — if the repo config demands it
+// (`commit.gpgsign`), git_commit fails with an explicit error instead of
+// silently writing an unsigned commit (open-question default from the G2
+// plan: no signing support yet, surface the failure rather than swallow it).
+
+/// Canonicalize `p`, tolerating a `p` that doesn't exist (e.g. a path being
+/// staged as a deletion) by canonicalizing the deepest existing ancestor and
+/// re-appending the missing suffix — mirrors `resolved_target_parent` above.
+fn canon_maybe_missing(p: &Path) -> PathBuf {
+    if p.exists() {
+        return canon(p);
+    }
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => resolved_target_parent(parent)
+            .map(|base| base.join(name))
+            .unwrap_or_else(|_| p.to_path_buf()),
+        _ => p.to_path_buf(),
+    }
+}
+
+/// Resolve a UI-supplied path (absolute or already-relative) to a path
+/// relative to `workdir`, as `git2::Index` paths must be. Canonicalizes both
+/// sides first: on macOS `TempDir` paths live under a `/var/...` symlink
+/// that `git2::Repository::workdir()` resolves to `/private/var/...`, so a
+/// naive `strip_prefix` would spuriously reject every path.
+fn relative_to_workdir(workdir: &Path, path: &str) -> Result<PathBuf, String> {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        canon_maybe_missing(p)
+            .strip_prefix(canon(workdir))
+            .map(Path::to_path_buf)
+            .map_err(|_| format!("{path} is outside the repository."))
+    } else {
+        Ok(p.to_path_buf())
+    }
+}
+
+/// Stage explicit whole files into the index. A path missing from disk is
+/// staged as a deletion (matches `git add` on an already-deleted file). An
+/// empty `paths` list is a true no-op — the index is never opened or
+/// written, so a UI "cancel" with nothing selected touches nothing.
+#[tauri::command]
+pub fn git_stage_files(root: String, paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("Bare repositories have no index to stage into.")?
+        .to_path_buf();
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    for path in &paths {
+        let rel = relative_to_workdir(&workdir, path)?;
+        if workdir.join(&rel).exists() {
+            index.add_path(&rel).map_err(|e| e.to_string())?;
+        } else {
+            index.remove_path(&rel).map_err(|e| e.to_string())?;
+        }
+    }
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Unstage explicit whole files (`git reset -- <paths>`); the working tree
+/// is never touched. An empty `paths` list is a true no-op.
+#[tauri::command]
+pub fn git_unstage_files(root: String, paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("Bare repositories have no index to unstage from.")?
+        .to_path_buf();
+    let rels = paths
+        .iter()
+        .map(|p| relative_to_workdir(&workdir, p))
+        .collect::<Result<Vec<_>, _>>()?;
+    match repo.head().ok().and_then(|h| h.peel(git2::ObjectType::Commit).ok()) {
+        Some(head_commit) => {
+            let specs = rels.iter().map(|p| p.to_string_lossy().into_owned());
+            repo.reset_default(Some(&head_commit), specs)
+                .map_err(|e| e.to_string())?;
+        }
+        None => {
+            // Unborn HEAD: nothing to reset to, so unstaging means dropping
+            // the named paths from the index entirely.
+            let mut index = repo.index().map_err(|e| e.to_string())?;
+            for rel in &rels {
+                index.remove_path(rel).ok();
+            }
+            index.write().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Debug)]
+pub struct IndexStatus {
+    pub staged: Vec<StatusEntry>,
+    pub unstaged: Vec<StatusEntry>,
+}
+
+fn index_status_letter(flags: git2::Status) -> &'static str {
+    if flags.contains(git2::Status::INDEX_DELETED) {
+        "D"
+    } else if flags.contains(git2::Status::INDEX_NEW) {
+        "A"
+    } else {
+        "M"
+    }
+}
+
+fn worktree_status_letter(flags: git2::Status) -> &'static str {
+    if flags.contains(git2::Status::WT_DELETED) {
+        "D"
+    } else if flags.contains(git2::Status::WT_NEW) {
+        "A"
+    } else {
+        "M"
+    }
+}
+
+/// Classify every changed path as staged (index vs HEAD) and/or
+/// unstaged-or-untracked (working tree vs index); a path can be in both
+/// buckets (e.g. staged then further modified).
+#[tauri::command]
+pub fn git_index_status(root: String) -> Result<IndexStatus, String> {
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("Bare repositories have no working tree status.")?
+        .to_path_buf();
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+    let index_mask = git2::Status::INDEX_NEW
+        | git2::Status::INDEX_MODIFIED
+        | git2::Status::INDEX_DELETED
+        | git2::Status::INDEX_RENAMED
+        | git2::Status::INDEX_TYPECHANGE;
+    let wt_mask = git2::Status::WT_NEW
+        | git2::Status::WT_MODIFIED
+        | git2::Status::WT_DELETED
+        | git2::Status::WT_RENAMED
+        | git2::Status::WT_TYPECHANGE;
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+    for entry in statuses.iter() {
+        let flags = entry.status();
+        let rel = match entry.path() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let full = workdir.join(rel).to_string_lossy().into_owned();
+        if flags.intersects(index_mask) {
+            staged.push(StatusEntry { path: full.clone(), status: index_status_letter(flags).to_string() });
+        }
+        if flags.intersects(wt_mask) {
+            unstaged.push(StatusEntry { path: full, status: worktree_status_letter(flags).to_string() });
+        }
+    }
+    Ok(IndexStatus { staged, unstaged })
+}
+
+/// Commit the current index. Fails cleanly — nothing is written to the odb,
+/// index, or refs — when: the index has unresolved conflicts, the index is
+/// empty (nothing ever staged), committer identity (user.name/user.email)
+/// is not configured, or the repo config demands signing. The identity and
+/// emptiness checks run before any tree/commit object is written, so a
+/// failure here never leaves a partial commit behind.
+#[tauri::command]
+pub fn git_commit(root: String, message: String) -> Result<String, String> {
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    if repo.workdir().is_none() {
+        return Err("Bare repositories cannot commit.".to_string());
+    }
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+    if repo
+        .config()
+        .and_then(|c| c.get_bool("commit.gpgsign"))
+        .unwrap_or(false)
+    {
+        return Err(
+            "Repository requires signed commits (commit.gpgsign=true); Sutra does not support commit signing yet. Commit manually or disable commit.gpgsign."
+                .to_string(),
+        );
+    }
+
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    if index.has_conflicts() {
+        return Err("Index has unresolved merge conflicts; resolve them before committing.".to_string());
+    }
+    if index.len() == 0 {
+        return Err("Nothing staged; stage files before committing.".to_string());
+    }
+
+    let signature = repo
+        .signature()
+        .map_err(|e| format!("Committer identity is not configured (user.name/user.email): {e}"))?;
+
+    let tree_oid = index.write_tree().map_err(|e| e.to_string())?;
+    let tree = repo.find_tree(tree_oid).map_err(|e| e.to_string())?;
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    if let Some(ref p) = parent {
+        if p.tree_id() == tree_oid {
+            return Err("Nothing to commit; the index matches HEAD.".to_string());
+        }
+    }
+
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    let oid = repo
+        .commit(Some("HEAD"), &signature, &signature, message, &tree, &parents)
+        .map_err(|e| e.to_string())?;
+    Ok(oid.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,5 +1144,190 @@ mod tests {
         assert!(!target.exists());
         assert_eq!(git_branch(root.clone()).unwrap().as_deref(), Some("main"));
         assert!(Repository::open(&dir).unwrap().find_branch("task/remove-missing", BranchType::Local).is_ok());
+    }
+
+    // --- G2: stage/unstage/commit ---
+
+    #[test]
+    fn git_stage_files_with_no_paths_is_a_true_noop() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        let before = fs::read(dir.path().join(".git/index")).unwrap();
+
+        git_stage_files(root, vec![]).unwrap();
+
+        let after = fs::read(dir.path().join(".git/index")).unwrap();
+        assert_eq!(before, after, "empty path list must not touch the index");
+    }
+
+    #[test]
+    fn git_unstage_files_with_no_paths_is_a_true_noop() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        let before = fs::read(dir.path().join(".git/index")).unwrap();
+
+        git_unstage_files(root, vec![]).unwrap();
+
+        let after = fs::read(dir.path().join(".git/index")).unwrap();
+        assert_eq!(before, after, "empty path list must not touch the index");
+    }
+
+    #[test]
+    fn git_stage_files_only_stages_named_paths() {
+        // Proves staging is never "add all": two files change, only one is
+        // named, and only that one ends up in the index.
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "new\n").unwrap();
+
+        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+
+        let status = git_index_status(root).unwrap();
+        assert_eq!(status.staged.len(), 1, "only the named path is staged: {:?}", status.staged);
+        assert!(status.staged[0].path.ends_with("a.txt"));
+        assert!(status.unstaged.iter().any(|s| s.path.ends_with("b.txt")), "b.txt stays untracked");
+        assert!(!status.unstaged.iter().any(|s| s.path.ends_with("a.txt")), "a.txt is fully staged, not also unstaged");
+    }
+
+    #[test]
+    fn git_unstage_files_only_unstages_named_paths() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "new\n").unwrap();
+        let a = dir.path().join("a.txt").to_string_lossy().into_owned();
+        let b = dir.path().join("b.txt").to_string_lossy().into_owned();
+        git_stage_files(root.clone(), vec![a.clone(), b.clone()]).unwrap();
+
+        git_unstage_files(root.clone(), vec![a]).unwrap();
+
+        let status = git_index_status(root).unwrap();
+        assert!(!status.staged.iter().any(|s| s.path.ends_with("a.txt")), "a.txt was unstaged");
+        assert!(status.staged.iter().any(|s| s.path.ends_with("b.txt")), "b.txt stays staged");
+    }
+
+    #[test]
+    fn git_stage_files_stages_a_missing_path_as_a_deletion() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::remove_file(dir.path().join("a.txt")).unwrap();
+
+        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+
+        let status = git_index_status(root).unwrap();
+        let a = status.staged.iter().find(|s| s.path.ends_with("a.txt")).unwrap();
+        assert_eq!(a.status, "D");
+    }
+
+    #[test]
+    fn git_commit_writes_staged_changes_and_advances_head() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        let before = Repository::open(dir.path()).unwrap().head().unwrap().target().unwrap();
+
+        let oid = git_commit(root.clone(), "update a".into()).unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let head_oid = repo.head().unwrap().target().unwrap();
+        assert_eq!(head_oid.to_string(), oid);
+        assert_ne!(head_oid, before, "HEAD advanced");
+        assert_eq!(repo.find_commit(head_oid).unwrap().message().unwrap(), "update a");
+        assert!(git_index_status(root).unwrap().staged.is_empty(), "index now matches HEAD");
+    }
+
+    #[test]
+    fn git_commit_fails_on_empty_index_without_creating_a_commit() {
+        // Acceptance criterion: commit with an EMPTY index fails cleanly and
+        // never mutates repo state (HEAD stays unborn).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        run(p, &["init", "-q", "-b", "main"]);
+        run(p, &["config", "user.email", "t@t.t"]);
+        run(p, &["config", "user.name", "t"]);
+        let root = p.to_string_lossy().into_owned();
+
+        let err = git_commit(root, "empty".into()).unwrap_err();
+
+        assert!(err.to_lowercase().contains("staged") || err.to_lowercase().contains("empty"), "got: {err}");
+        assert!(Repository::open(p).unwrap().head().is_err(), "HEAD must stay unborn");
+    }
+
+    #[test]
+    fn git_commit_fails_on_conflicted_index_without_mutating_head() {
+        // Acceptance criterion: commit on an unresolved/conflict state fails
+        // cleanly and leaves HEAD untouched (no partial commit).
+        let dir = repo_with_branch();
+        run(dir.path(), &["checkout", "-q", "feature"]);
+        fs::write(dir.path().join("a.txt"), "feature change\n").unwrap();
+        run(dir.path(), &["commit", "-qam", "feature change"]);
+        run(dir.path(), &["checkout", "-q", "main"]);
+        fs::write(dir.path().join("a.txt"), "main change\n").unwrap();
+        run(dir.path(), &["commit", "-qam", "main change"]);
+        let merge_ok = Command::new("git")
+            .args(["merge", "-q", "feature"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!merge_ok, "merge of diverging changes must conflict");
+        let root = dir.path().to_string_lossy().into_owned();
+        let before = Repository::open(dir.path()).unwrap().head().unwrap().target();
+
+        let err = git_commit(root.clone(), "should not happen".into()).unwrap_err();
+
+        assert!(err.to_lowercase().contains("conflict"), "got: {err}");
+        assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap().target(), before, "HEAD must not move");
+    }
+
+    #[test]
+    fn git_commit_fails_without_committer_identity_configured() {
+        // Acceptance criterion: commit with a MISSING committer identity
+        // fails cleanly. Config search paths are redirected to an empty temp
+        // dir so a real developer's global git identity on the test host
+        // can't leak into this repo and make the assertion flaky (mirrors
+        // git2-rs's own test harness use of `opts::set_search_path`).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        run(p, &["init", "-q", "-b", "main"]);
+        let empty_cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            git2::opts::set_search_path(git2::ConfigLevel::Global, empty_cfg.path()).unwrap();
+            git2::opts::set_search_path(git2::ConfigLevel::XDG, empty_cfg.path()).unwrap();
+            git2::opts::set_search_path(git2::ConfigLevel::System, empty_cfg.path()).unwrap();
+        }
+        fs::write(p.join("a.txt"), "hello\n").unwrap();
+        let root = p.to_string_lossy().into_owned();
+        git_stage_files(root.clone(), vec![p.join("a.txt").to_string_lossy().into_owned()]).unwrap();
+
+        let result = git_commit(root, "test commit".into());
+
+        unsafe {
+            git2::opts::reset_search_path(git2::ConfigLevel::Global).unwrap();
+            git2::opts::reset_search_path(git2::ConfigLevel::XDG).unwrap();
+            git2::opts::reset_search_path(git2::ConfigLevel::System).unwrap();
+        }
+        let err = result.unwrap_err();
+        assert!(err.to_lowercase().contains("identity"), "got: {err}");
+    }
+
+    #[test]
+    fn git_commit_fails_when_signing_is_required_but_unsupported() {
+        let dir = repo_with_branch();
+        run(dir.path(), &["config", "commit.gpgsign", "true"]);
+        let root = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        let before = Repository::open(dir.path()).unwrap().head().unwrap().target();
+
+        let err = git_commit(root, "signed?".into()).unwrap_err();
+
+        assert!(err.to_lowercase().contains("sign"), "got: {err}");
+        assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap().target(), before, "no commit created");
     }
 }

@@ -5,13 +5,15 @@
 // task→rest order (task is not hoisted ahead of context); Preview / History
 // are slide-up drawers that overlay the scroll area (so they can't be
 // squeezed off when the terminal drawer steals panel height).
+import { ask } from "@tauri-apps/plugin-dialog";
 import { templateTags, resolveConfig, type TagConfig } from "./prompt-tags";
-import { loadAgentProfiles, resolveAgentProfiles, type AgentProfile } from "./agent-profiles";
+import { loadAgentProfiles, resolveAgentProfiles, summarizeContextPackFromChips, type AgentProfile } from "./agent-profiles";
 import { buildPrompt, defaultSection, type Chip, type RoutedChip } from "./prompt-builder";
 import { orderSections, isFirstRunDraft, clampDrawerHeight } from "./composer-layout";
 import { matchFiles, matchAssets, assetToken, completionContext, type AssetOption } from "./composer-complete";
 import {
   saveDraft, loadDraft, clearDraft, loadHistory, saveHistory, pushHistory,
+  profileDefaults, isEmptyDraftContent, withTemplateTag,
   type Draft, type HistoryEntry,
 } from "./composer-store";
 import {
@@ -23,6 +25,12 @@ import { mountTagManager } from "./tag-manager";
 import { IS_MAC } from "./shortcuts";
 import { readUiState, patchUiState } from "./terminal-groups";
 import { isWorkspaceTrusted } from "./workspace";
+
+/** Native confirm via the dialog plugin — window.confirm is unreliable in
+ * WKWebView (mirrors main.ts's confirmNative). */
+function confirmNative(msg: string): Promise<boolean> {
+  return ask(msg, { title: "Sutra", kind: "warning" });
+}
 
 const TRUST_KEY = (root: string) => `composer-trusted:${root}`;
 const TAGS_PATH = (root: string) => `${root}/.sutra/prompt-tags.json`;
@@ -50,6 +58,12 @@ export interface ComposerTaskDraft {
   prompt: string;
   /** A useful editable starting title; the task panel never sends on create. */
   title: string;
+  /** P3: storage-safe context-pack receipt (selector + label + byte-count
+   * metadata only — see agent-profiles.ts renderContextPackSummary for the
+   * redaction guarantee: never raw chip content, terminal output, secrets,
+   * or page form values). Empty string when nothing was explicitly attached
+   * to <context>. */
+  contextPackSummary: string;
 }
 
 export type ComposerDeliveryResult = { ok: true } | { ok: false; reason: string };
@@ -99,6 +113,11 @@ export function mountComposer(opts: ComposerOptions): {
   let text: Record<string, string> = {};
   let templateName = "";
   let targetId: string | null = null;
+  // Selected agent profile id, or null. GUIDANCE ONLY: a profile pre-fills a
+  // new draft's template + default acceptance rows; it never restricts what
+  // can be sent or grants command/automation execution (that stays owned by
+  // workspace trust + the task's own allowed-automations list elsewhere).
+  let profileId: string | null = null;
   let thinking = false;
   let submit = false;
   let visible = false;
@@ -133,11 +152,18 @@ export function mountComposer(opts: ComposerOptions): {
   const toolbar = mk("div", "cmp-toolbar");
   const targetSel = mk("select", "cmp-target");
   const stateDot = mk("span", "cmp-state-dot");
+  // Profile picker: guidance only, never enforcement — see the profileId
+  // comment above and onProfileChange below for what "guidance" means here.
+  const profileSel = mk("select", "cmp-profile");
+  profileSel.title = "Agent profile — sets defaults for a new task draft only; never restricts sending or runs a command.";
+  const profileHint = mk("span", "cmp-profile-hint");
+  profileHint.textContent = "guidance";
+  profileHint.title = "Profiles are guidance, not enforcement: they pre-fill a fresh draft's template + acceptance rows. They do not grant command or automation authority.";
   const histToggleBtn = mkBtn("cmp-icon-btn sbtn", icon("list", 13));
   histToggleBtn.title = "History";
   const gearBtn = mkBtn("cmp-gear sbtn", icon("settings", 13));
   gearBtn.title = "Tag manager";
-  toolbar.append(targetSel, stateDot, histToggleBtn, gearBtn);
+  toolbar.append(targetSel, stateDot, profileSel, profileHint, histToggleBtn, gearBtn);
 
   // Trust banner
   const trustBanner = mk("div", "cmp-trust-banner hidden");
@@ -260,6 +286,7 @@ export function mountComposer(opts: ComposerOptions): {
     renderSections();
     renderChips();
     renderTargetPicker();
+    renderProfilePicker();
     renderPreview();
     renderHistory();
   }
@@ -469,6 +496,83 @@ export function mountComposer(opts: ComposerOptions): {
     stateDot.title = st;
   }
 
+  // P2 picker: renders profiles loaded by P1's reloadProfiles(). "No profile"
+  // is always the first, default-selected option — profiles are opt-in.
+  function renderProfilePicker(): void {
+    profileSel.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "No profile";
+    profileSel.appendChild(none);
+    for (const p of profiles) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name;
+      profileSel.appendChild(o);
+    }
+    profileSel.value = profileId && profiles.some((p) => p.id === profileId) ? profileId : "";
+    updateProfileHint();
+  }
+
+  // "Context choices" (AgentProfile.contextSelectors) have no safe way to
+  // become real prompt content here: resolving git-changes / task-evidence /
+  // unresolved-annotations needs IPC surfaces this composer doesn't own
+  // (getFiles/getSelection only), and stamping the raw selector names into
+  // the <context> tag would pollute the actual prompt sent to the agent with
+  // meta-instructions instead of content. So they're surfaced as a guidance
+  // tooltip on the profile picker instead of applied to the draft's text —
+  // deliberately UI-only, matching "GUIDANCE, not enforcement".
+  function updateProfileHint(): void {
+    const profile = profiles.find((p) => p.id === profileId) ?? null;
+    profileHint.textContent = "guidance";
+    profileHint.title = profile
+      ? `"${profile.name}" is guidance, not enforcement — it does not restrict actions or auto-run commands. Suggested context: ${profile.contextSelectors.join(", ") || "none"}.`
+      : "Profiles are guidance, not enforcement: they pre-fill a fresh draft's template + acceptance rows. They do not grant command or automation authority.";
+  }
+
+  // Selecting a profile only ever touches local draft state (templateName,
+  // text, profileId) — it never calls deliverTaskPrompt/deliverToPty or any
+  // automation runner. This is what guarantees the "Explore" profile (and
+  // every other profile) can never invoke a command from the composer: there
+  // is simply no code path from this function to command execution.
+  async function onProfileChange(id: string | null): Promise<void> {
+    const profile = id ? profiles.find((p) => p.id === id) ?? null : null;
+    if (!profile) {
+      profileId = null;
+      autosave();
+      renderProfilePicker();
+      return;
+    }
+    const defaults = profileDefaults(profile);
+    const fresh = isEmptyDraftContent(text, chips.length);
+    if (fresh) {
+      applyProfileDefaults(defaults);
+    } else {
+      // Non-fresh draft = work already in progress (an "existing task" per
+      // the acceptance criteria) — never silently overwrite it. Open-question
+      // default: ask for confirmation rather than guessing. Declining keeps
+      // the profile selected (for future new drafts / history) without
+      // touching the current text.
+      const confirmed = await confirmNative(
+        `Apply "${profile.name}" defaults (template + acceptance criteria) to this draft? This may replace text you've already written.`,
+      );
+      if (confirmed) applyProfileDefaults(defaults);
+    }
+    profileId = profile.id;
+    renderAll();
+    autosave();
+  }
+
+  function applyProfileDefaults(defaults: ReturnType<typeof profileDefaults>): void {
+    templateName = defaults.templateName;
+    // Without this, a profile's stamped acceptance rows can sit in `text`
+    // but never render in the UI or reach the built prompt, because the
+    // profile's mapped template doesn't always carry a "success_criteria"
+    // tag (see withTemplateTag's doc comment in composer-store.ts).
+    if (defaults.text.success_criteria) config = withTemplateTag(config, templateName, "success_criteria");
+    text = { ...text, ...defaults.text };
+  }
+
   // ── drawers (preview / history) ────────────────────────────────────────────────
   async function applyDrawerHeight(): Promise<void> {
     const ui = await readUiState();
@@ -492,10 +596,20 @@ export function mountComposer(opts: ComposerOptions): {
     if (open) renderHistory();
   }
 
+  // P3: what would actually go out under <context> if sent right now — only
+  // explicit user-attached file/selection chips, bounded by agent-profiles.ts's
+  // deterministic caps, with omissions listed. Reuses this existing Preview
+  // drawer (no parallel inclusions/omissions panel).
+  function contextPackPreview(): string {
+    return summarizeContextPackFromChips(chips);
+  }
+
   function renderPreview(): void {
     if (!prevOpen) return;
     const p = safeBuildPrompt();
-    previewPre.textContent = p?.trim() ? p : "Nothing to preview — write the ask first.";
+    const body = p?.trim() ? p : "Nothing to preview — write the ask first.";
+    const pack = contextPackPreview();
+    previewPre.textContent = pack ? `${pack}\n\n${body}` : body;
   }
 
   function renderHistory(): void {
@@ -658,6 +772,11 @@ export function mountComposer(opts: ComposerOptions): {
     chips = [];
     thinking = false;
     submit = false;
+    // Profile selection does not survive a send — the next draft starts
+    // unprofiled, same as a fresh composer open (init()'s no-saved-draft
+    // branch). History still remembers which profile produced a past prompt
+    // via the saved draft's profileId.
+    profileId = null;
     stageInp.checked = true;
     submitInp.checked = false;
     thinkInp.checked = false;
@@ -666,7 +785,7 @@ export function mountComposer(opts: ComposerOptions): {
 
   // ── draft ─────────────────────────────────────────────────────────────────────
   function captureDraft(): Draft {
-    return { templateName, text: { ...text }, chips: [...chips], targetId, thinking };
+    return { templateName, text: { ...text }, chips: [...chips], targetId, thinking, profileId };
   }
 
   function taskTitle(prompt: string): string {
@@ -677,7 +796,7 @@ export function mountComposer(opts: ComposerOptions): {
   function getTaskDraft(): ComposerTaskDraft | null {
     const prompt = safeBuildPrompt();
     if (!prompt?.trim()) return null;
-    return { prompt, title: taskTitle(prompt) };
+    return { prompt, title: taskTitle(prompt), contextPackSummary: contextPackPreview() };
   }
 
   async function deliverTaskPrompt(args: { targetId: string; prompt: string; submit: boolean }): Promise<ComposerDeliveryResult> {
@@ -692,6 +811,8 @@ export function mountComposer(opts: ComposerOptions): {
     chips = [...d.chips];
     targetId = d.targetId;
     thinking = d.thinking;
+    // Tolerant of drafts/history saved before profileId existed.
+    profileId = d.profileId ?? null;
     submit = false;
     stageInp.checked = true;
     thinkInp.checked = thinking;
@@ -734,6 +855,8 @@ export function mountComposer(opts: ComposerOptions): {
     updateStateDot();
     autosave();
   };
+
+  profileSel.onchange = () => void onProfileChange(profileSel.value || null);
 
   // Insert the current editor selection as a context chip — invoked from the
   // "+ selection" affordance rendered inside the context hero (see renderSection).

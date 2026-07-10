@@ -9,6 +9,11 @@ export const TASKS_GITIGNORE_ENTRY = ".sutra/tasks.json";
 /** Matches runner.rs's capped stdout/stderr contract before evidence is persisted. */
 export const AUTOMATION_OUTPUT_TAIL_LIMIT = 2_000_000;
 export const TASK_CHECK_TIMEOUT_MS = 600_000;
+/** P3: safety cap for the context-pack receipt. The receipt itself is
+ * already bounded by construction (~20 short label lines, see
+ * agent-profiles.ts CONTEXT_PACK_ITEM_CAP), so this is a defensive backstop
+ * against a malformed/hand-edited task file, not an expected size. */
+export const CONTEXT_PACK_SUMMARY_LIMIT = 4_096;
 
 /** Opaque identity for one active runner-backed required check. The Rust
  * command constructs the same value and owns process execution. */
@@ -100,6 +105,13 @@ export interface Task {
   prompt: string;
   acceptance: string[];
   profileId: string | null;
+  /** P3: rendered context-pack receipt — selector + label + byte-count
+   * metadata only, never raw attached content, terminal output, secrets, or
+   * page form values (see agent-profiles.ts renderContextPackSummary).
+   * Optional for backwards-compatible task files written before P3, and
+   * because composer.ts's ComposerTaskDraft is the only current producer;
+   * the create-from-composer call site wires it in separately. */
+  contextPackSummary?: string;
   root: string;
   worktree?: { path: string; branch: string };
   /** Durable status for the opt-in setup command run in the linked worktree. */
@@ -245,6 +257,10 @@ function taskError(value: unknown): string | null {
   if (typeof value.prompt !== "string") return `Task ${value.id} prompt is required`;
   if (!isStringArray(value.acceptance)) return `Task ${value.id} acceptance must be strings`;
   if (value.profileId !== null && typeof value.profileId !== "string") return `Task ${value.id} profileId is invalid`;
+  if (value.contextPackSummary !== undefined
+    && (typeof value.contextPackSummary !== "string" || value.contextPackSummary.length > CONTEXT_PACK_SUMMARY_LIMIT)) {
+    return `Task ${value.id} context pack summary is invalid`;
+  }
   if (typeof value.root !== "string" || !value.root.trim()) return `Task ${value.id} root is required`;
   if (value.worktree !== undefined && (!isRecord(value.worktree) || typeof value.worktree.path !== "string" || typeof value.worktree.branch !== "string")) return `Task ${value.id} worktree is invalid`;
   if (value.worktreeSetup !== undefined && !isWorktreeSetup(value.worktreeSetup)) return `Task ${value.id} worktree setup is invalid`;

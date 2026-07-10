@@ -2832,6 +2832,30 @@ button:hover {
 .cmp-state-idle { background: #4ade80; }
 .cmp-state-busy { background: #fb923c; }
 .cmp-state-awaiting-input { background: #facc15; }
+/* Profile picker (P2): sets a new draft's defaults only — never enforcement.
+ * The "guidance" hint badge next to it makes that explicit in the UI. */
+.cmp-profile {
+  flex: 0 0 auto;
+  max-width: 90px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  padding: 2px 3px;
+  height: 22px;
+}
+.cmp-profile-hint {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--fg-faint);
+  padding: 0 2px;
+  cursor: help;
+  white-space: nowrap;
+}
 .cmp-trust-banner {
   display: flex;
   align-items: center;

@@ -48,7 +48,7 @@ test("resolveConfig ignores repo JSON when workspace untrusted", () => {
 
 test("templateTags returns tags in template order, skipping unknown ids", () => {
   const tags = templateTags(DEFAULT_CONFIG, "Review");
-  assert.deepEqual(tags.map((t) => t.id), ["role", "context", "task", "output"]);
+  assert.deepEqual(tags.map((t) => t.id), ["role", "context", "task", "success_criteria", "output"]);
 });
 
 test("DEFAULT_CONFIG ships no prefilled values", () => {

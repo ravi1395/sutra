@@ -10,6 +10,7 @@ import {
   attachTurnToTask,
   claimRunningTask,
   completionState,
+  CONTEXT_PACK_SUMMARY_LIMIT,
   detachTurnFromTask,
   detachAnnotationFromTask,
   hasRequiredAutomationCheck,
@@ -53,6 +54,17 @@ test("valid tasks round-trip through the versioned file format", () => {
   const original = task({ worktree: { path: "/worktree", branch: "task/persistence" } });
   const loaded = parseTasksFile(serializeTasks([original]));
   assert.deepEqual(loaded, { tasks: [original], warnings: [] });
+});
+
+test("context pack summary is optional, bounded, and round-trips", () => {
+  const withSummary = task({
+    contextPackSummary: "Context pack: 1 included, 0 omitted (4/16384 bytes, cap 20 items)\n+ [chosen-files] @a.ts",
+  });
+  const loaded = parseTasksFile(serializeTasks([withSummary]));
+  assert.deepEqual(loaded, { tasks: [withSummary], warnings: [] });
+
+  const oversized = task({ id: "task-2", contextPackSummary: "x".repeat(CONTEXT_PACK_SUMMARY_LIMIT + 1) });
+  assert.throws(() => serializeTasks([oversized]));
 });
 
 test("worktree setup success is durable while failure blocks and retains output", () => {

@@ -1,12 +1,12 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
-  acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, linkedTaskTurnRows, TaskStartGate,
+  acceptTaskWithAuthoritativeUpdate, attachableHistoricalTurns, handoffReceiptEvidence, linkedTaskTurnRows, TaskStartGate,
   mayPersistTaskForRoot, mayRunRequiredAutomation, mountTasksPanel, type TaskAutomationChoice, type TasksPanelOptions,
 } from "../src/tasks-panel";
 import { getTurns, replaceTurns } from "../src/agent-tracking";
 import type { Turn } from "../src/ipc";
-import { attachTurnToTask, serializeTasks, type Task } from "../src/tasks";
+import { attachTurnToTask, completionState, parseTasksFile, serializeTasks, type Task } from "../src/tasks";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "task-1", title: "Task", status: "needs_review", createdAt: 1, updatedAt: 1,
@@ -408,6 +408,36 @@ test("acceptance rebases on serialized task metadata so a deferred closed turn c
   assert.equal(current.status, "needs_review");
   assert.deepEqual(current.turnIds, [42]);
   assert.equal(current.acceptedAt, undefined, "the stale rendered task did not overwrite the linked turn");
+});
+
+// --- G3: handoff receipt maps onto the existing "manual" Evidence kind
+// (tasks.ts has no dedicated handoff kind yet — owned by a parallel phase).
+// These guard the three things that stand-in relies on: it round-trips
+// through the real file-format validator, it never satisfies a required
+// manual check by accident (no checkId), and it never perturbs the
+// completion gate for a task that doesn't require it. ---
+
+test("handoffReceiptEvidence has a distinct label per outcome and no checkId", () => {
+  const own = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: false, recordedAt: 10 });
+  const external = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: true, recordedAt: 10 });
+  assert.equal(own.kind, "manual");
+  assert.equal("checkId" in own ? own.checkId : undefined, undefined);
+  assert.notEqual(own.label, external.label);
+  assert.match((own as { note?: string }).note ?? "", /abc123/);
+});
+
+test("handoffReceiptEvidence round-trips through the real tasks-file validator with no warnings", () => {
+  const receipt = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: false, recordedAt: 10 });
+  const original = task({ evidence: [receipt] });
+  const loaded = parseTasksFile(serializeTasks([original]));
+  assert.deepEqual(loaded, { tasks: [original], warnings: [] });
+});
+
+test("appending a handoff receipt does not change completionState for a task with no required checks matching its label", () => {
+  const before = task({ status: "needs_review", requiredChecks: [{ kind: "automation", automationId: "unit" }] });
+  const receipt = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: false, recordedAt: 10 });
+  const after = { ...before, evidence: [...before.evidence, receipt] };
+  assert.deepEqual(completionState(before, { now: 20 }), completionState(after, { now: 20 }));
 });
 
 test("acceptance reports rejected when trust/root guard fails after the rebased reducer but before save", async () => {
