@@ -317,6 +317,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       id: taskId(), title: draft.title, status: "draft", createdAt: now, updatedAt: now,
       prompt: draft.prompt, acceptance: [], profileId: null, root,
       turnIds: [], annotationIds: [], evidence: [],
+      contextPackSummary: draft.contextPackSummary || undefined,
     };
     if (getRoot() !== root) return showStatus("Workspace changed; task was not created.");
     const wrote = await updateTaskMetadata(root, (entries) => [...entries, task]);
