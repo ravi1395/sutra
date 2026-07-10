@@ -47,6 +47,7 @@ export interface TasksPanelOptions {
   cancelWorktreeSetup: (task: Task) => Promise<boolean>;
   isWorktreeSetupActive: (task: Task) => boolean;
   confirmDiscard: (message: string) => Promise<boolean>;
+  onTasksChanged?: (tasks: readonly Task[]) => void;
 }
 
 export interface TaskAutomationChoice { id: string; label: string; }
@@ -57,6 +58,7 @@ export interface TasksPanelHandle {
   hide(): void;
   reload(skipReconcile?: boolean): Promise<void>;
   dispose(): void;
+  getSelectedTargetId(): string | null;
 }
 
 export interface LinkedTaskTurnRow {
@@ -179,7 +181,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   const {
     container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices,
     updateTaskMetadata, runRequiredCheck, cancelRequiredCheck, isRequiredCheckRunning, dispatchWorktree, openWorktree,
-    removeWorktree, cancelWorktreeSetup, isWorktreeSetupActive, confirmDiscard,
+    removeWorktree, cancelWorktreeSetup, isWorktreeSetupActive, confirmDiscard, onTasksChanged,
   } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
@@ -780,6 +782,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   }
 
   function render(): void {
+    onTasksChanged?.(tasks);
     container.textContent = "";
     const root = getRoot();
     const header = el("div", "tasks-panel-header");
@@ -862,5 +865,5 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   }
 
   render();
-  return { show, hide, reload, dispose: () => { container.textContent = ""; } };
+  return { show, hide, reload, getSelectedTargetId: () => targetId, dispose: () => { container.textContent = ""; } };
 }

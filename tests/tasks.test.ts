@@ -6,10 +6,12 @@ import {
   appendAutomationEvidence,
   beginWorktreeSetup,
   attachClosedTurnToRunningTask,
+  attachAnnotationToTask,
   attachTurnToTask,
   claimRunningTask,
   completionState,
   detachTurnFromTask,
+  detachAnnotationFromTask,
   hasRequiredAutomationCheck,
   recordManualCheck,
   parseTasksFile,
@@ -352,6 +354,15 @@ test("first-save gitignore entry is added once without duplicating existing rule
   assert.equal(addTasksGitignoreEntry("node_modules\n"), "node_modules\n.sutra/tasks.json\n");
   assert.equal(addTasksGitignoreEntry(".sutra/tasks.json\n"), ".sutra/tasks.json\n");
   assert.equal(addTasksGitignoreEntry(".sutra/tasks.json\n.sutra/tasks.json\n"), ".sutra/tasks.json\n.sutra/tasks.json\n");
+});
+
+test("stale visual exclusion persists a non-empty reason and reattach clears it", () => {
+  const linked = attachAnnotationToTask(task(), { route: "http://127.0.0.1:1/settings", n: 1 }, 200);
+  const excluded = detachAnnotationFromTask(linked, { route: "http://127.0.0.1:1/settings", n: 1 }, 201, "Stale selector excluded after review");
+  assert.deepEqual(excluded.annotationExclusions, { "http://127.0.0.1:1/settings#1": "Stale selector excluded after review" });
+  const reattached = attachAnnotationToTask(excluded, { route: "http://127.0.0.1:1/settings", n: 1 }, 202);
+  assert.equal(reattached.annotationExclusions, undefined);
+  assert.deepEqual(parseTasksFile(serializeTasks([excluded])).tasks[0].annotationExclusions, excluded.annotationExclusions);
 });
 
 const persistenceSpy = (files: Record<string, string> = {}): { persistence: TaskPersistence; writes: string[]; dirs: string[] } => {

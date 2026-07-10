@@ -66,6 +66,7 @@ import {
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
+  deliverToPty,
   runnerRun,
   runnerCancel,
   taskCheckRun,
@@ -158,6 +159,7 @@ import {
   TASK_CHECK_TIMEOUT_MS,
   type Task,
 } from "./tasks";
+import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
@@ -259,6 +261,35 @@ const annotations = new AnnotationsPanel(
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
 );
+annotations.setTaskContext([], annotationsAttach, annotationsDeliver, annotationsDetach);
+
+async function annotationsAttach(task: Task, annotation: import("./annotation-core").Annotation): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) return;
+  await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) =>
+    candidate.id === task.id ? attachAnnotationToTask(candidate, annotation) : candidate,
+  ), async () => currentRoot === task.root && await isWorkspaceTrusted(task.root));
+  const loaded = await loadTasks(task.root);
+  annotations.setTaskContext(loaded.tasks.filter((candidate) => candidate.root === task.root), annotationsAttach, annotationsDeliver, annotationsDetach);
+}
+
+async function annotationsDetach(task: Task, annotation: import("./annotation-core").Annotation, reason?: string): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) return;
+  await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) =>
+    candidate.id === task.id ? detachAnnotationFromTask(candidate, annotation, Date.now(), reason) : candidate,
+  ), async () => currentRoot === task.root && await isWorkspaceTrusted(task.root));
+  const loaded = await loadTasks(task.root);
+  annotations.setTaskContext(loaded.tasks.filter((candidate) => candidate.root === task.root), annotationsAttach, annotationsDeliver, annotationsDetach);
+}
+
+async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) {
+    return alertNative("Visual feedback delivery is disabled until this workspace is trusted.");
+  }
+  const targetId = tasksPanel.getSelectedTargetId();
+  if (!targetId) return alertNative("Choose an agent terminal in the Tasks panel before staging visual feedback.");
+  const result = await deliverToPty({ targetId, text: prompt, submit: false });
+  if (!result.ok) await alertNative(`Could not stage visual feedback: ${result.reason}`);
+}
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
 editor.onHtmlPreview = (url) => {
   setBrowser(true);
@@ -380,7 +411,7 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => annotations.currentRouteAnnotations(),
+    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations() : [],
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
@@ -456,6 +487,7 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
@@ -777,13 +809,13 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   hideTrustToast(); // drop any leftover toast from the previous root
   persistWorkspaceSession();
   suppressSessionSave = true;
+  currentWorkspaceTrusted = false;
   try {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
     const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
-    void mcpSetRoot(dir);
     void mcpWriteAgentConfig(dir).then((warnings) => {
       for (const w of warnings) console.warn("MCP config:", w);
     });
@@ -797,6 +829,13 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     // consume-once turn_poll delta) before the panel renders files/test state.
     await turnsHydrated;
     if (currentRoot !== dir) return;
+    await annotations.setRoot(dir);
+    currentWorkspaceTrusted = await isWorkspaceTrusted(dir).catch(() => false);
+    // Publish the MCP root only after annotation state is hydrated; queries
+    // cannot observe the previous project's annotations during a switch.
+    void mcpSetRoot(dir);
+    const annotationTasks = (await loadTasks(dir)).tasks.filter((task) => task.root === dir);
+    annotations.setTaskContext(annotationTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
     await tasksPanel.reload();
   } finally {
     suppressSessionSave = false;
@@ -1290,6 +1329,10 @@ const tasksPanel = mountTasksPanel({
     const trusted = await isWorkspaceTrusted(root).catch(() => false);
     return mayPersistTaskForRoot(root, currentRoot, trusted);
   }),
+  onTasksChanged: (entries) => {
+    const root = currentRoot;
+    if (root) annotations.setTaskContext(entries.filter((task) => task.root === root), annotationsAttach, annotationsDeliver, annotationsDetach);
+  },
 });
 let tasksAgentRefreshTimer: number | undefined;
 terminals.onAgentAttached = () => {

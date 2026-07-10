@@ -2,6 +2,7 @@
 // malformed external edits stay readable as warnings and are never repaired
 // until the user explicitly saves a valid task list.
 import { createDir, readFile, writeFile } from "./ipc";
+import { annotationId } from "./annotation-context";
 
 export const TASKS_FILE = ".sutra/tasks.json";
 export const TASKS_GITIGNORE_ENTRY = ".sutra/tasks.json";
@@ -51,7 +52,7 @@ export type Evidence =
   | { readonly kind: "turn"; readonly turnId: number; readonly testState?: "running" | "pass" | "fail" | "skipped" | "none" }
   | { readonly kind: "turn_detached"; readonly turnId: number; readonly detachedAt: number; readonly reason: string }
   | { readonly kind: "manual"; readonly checkId?: string; readonly label: string; readonly checkedAt: number | null; readonly note?: string }
-  | { readonly kind: "visual"; readonly annotationIds: string[]; readonly capture?: string };
+  | { readonly kind: "visual"; readonly annotationIds: string[] };
 
 /** Required rows are configuration, while Evidence remains an append-only
  * ledger. This lets an unchecked manual row be represented without inventing
@@ -115,12 +116,29 @@ export interface Task {
   acceptedAt?: number;
   acceptedEvidenceDigest?: string;
   annotationIds: string[];
+  annotationExclusions?: Record<string, string>;
   evidence: readonly Evidence[];
 }
 
 export interface TaskLoadResult {
   tasks: Task[];
   warnings: string[];
+}
+
+export function attachAnnotationToTask(task: Task, annotation: { route: string; n: number }, updatedAt = Date.now()): Task {
+  const id = annotationId(annotation);
+  if (task.annotationIds.includes(id)) return task;
+  const next = nextUpdatedAt(task, updatedAt);
+  const exclusions = task.annotationExclusions && { ...task.annotationExclusions };
+  if (exclusions) delete exclusions[id];
+  return { ...task, annotationIds: [...task.annotationIds, id], annotationExclusions: exclusions && Object.keys(exclusions).length ? exclusions : undefined, updatedAt: next };
+}
+
+export function detachAnnotationFromTask(task: Task, annotation: { route: string; n: number }, updatedAt = Date.now(), reason = "Explicitly detached from task"): Task {
+  const id = annotationId(annotation);
+  if (!task.annotationIds.includes(id)) return task;
+  const next = nextUpdatedAt(task, updatedAt);
+  return { ...task, annotationIds: task.annotationIds.filter((candidate) => candidate !== id), annotationExclusions: { ...task.annotationExclusions, [id]: reason }, updatedAt: next };
 }
 
 /** File-system seam for task persistence; injected only by focused tests. */
@@ -161,6 +179,10 @@ function isTurnReviews(value: unknown): value is Record<string, TurnReviewDispos
   return isRecord(value) && Object.values(value).every(
     (disposition) => disposition === "accepted" || disposition === "rolled_back" || disposition === "excluded",
   );
+}
+
+function isAnnotationExclusions(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.entries(value).every(([id, reason]) => !!id && typeof reason === "string" && !!reason.trim());
 }
 
 function isRequiredTaskCheck(value: unknown): value is RequiredTaskCheck {
@@ -207,7 +229,7 @@ function isEvidence(value: unknown): value is Evidence {
         && (value.checkedAt === null || isFiniteTimestamp(value.checkedAt))
         && (value.note === undefined || typeof value.note === "string");
     case "visual":
-      return isStringArray(value.annotationIds) && (value.capture === undefined || typeof value.capture === "string");
+      return isStringArray(value.annotationIds);
     default:
       return false;
   }
@@ -234,6 +256,7 @@ function taskError(value: unknown): string | null {
   if (value.acceptedAt !== undefined && !isFiniteTimestamp(value.acceptedAt)) return `Task ${value.id} acceptance timestamp is invalid`;
   if (value.acceptedEvidenceDigest !== undefined && (typeof value.acceptedEvidenceDigest !== "string" || !value.acceptedEvidenceDigest)) return `Task ${value.id} acceptance evidence digest is invalid`;
   if (!isStringArray(value.annotationIds)) return `Task ${value.id} annotationIds are invalid`;
+  if (value.annotationExclusions !== undefined && !isAnnotationExclusions(value.annotationExclusions)) return `Task ${value.id} annotation exclusions are invalid`;
   if (!Array.isArray(value.evidence) || !value.evidence.every(isEvidence)) return `Task ${value.id} evidence is invalid`;
   return null;
 }
