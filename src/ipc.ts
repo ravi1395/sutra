@@ -84,6 +84,13 @@ export interface WorktreeInfo {
 export const gitWorktrees = (root: string) =>
   invoke<WorktreeInfo[]>("git_worktrees", { root });
 
+export interface CreatedWorktree {
+  path: string;
+  branch: string;
+}
+export const gitCreateWorktree = (root: string, branch: string, target: string, baseRef: string) =>
+  invoke<CreatedWorktree>("git_create_worktree", { root, branch, target, baseRef });
+
 export interface BranchInfo {
   name: string;
   is_current: boolean;

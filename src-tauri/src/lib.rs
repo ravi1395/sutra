@@ -282,6 +282,7 @@ pub fn run() {
             git::git_worktrees,
             git::git_branches,
             git::git_checkout,
+            git::git_create_worktree,
             preview_server::preview_server_url,
             proxy::proxy_url,
             mcp::mcp_server_url,

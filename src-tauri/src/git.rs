@@ -1,10 +1,10 @@
 // Git baseline lookup and working-tree status for the frontend.
-use git2::{build::CheckoutBuilder, BranchType, Repository, StatusOptions};
+use git2::{build::CheckoutBuilder, BranchType, Reference, Repository, StatusOptions, WorktreeAddOptions};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct StatusEntry {
     pub path: String,
     pub status: String, // "M" | "A" | "D"
@@ -293,6 +293,18 @@ fn canon(p: &Path) -> PathBuf {
     fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Resolve symlinks in the deepest existing target ancestor, then restore the
+/// not-yet-created suffix. This makes the primary-checkout containment test
+/// meaningful even when a target parent points back into the repository.
+fn resolved_target_parent(parent: &Path) -> Result<PathBuf, String> {
+    let mut existing = parent;
+    while !existing.exists() {
+        existing = existing.parent().ok_or("Choose a target directory with a parent folder.")?;
+    }
+    let suffix = parent.strip_prefix(existing).map_err(|e| e.to_string())?;
+    Ok(fs::canonicalize(existing).map_err(|e| e.to_string())?.join(suffix))
+}
+
 /// Resolve the main working tree path for the repo behind `root`.
 /// `repo.workdir()` when this repo is the main tree, else the parent of
 /// `commondir` (commondir points at `<main>/.git`).
@@ -455,6 +467,105 @@ pub fn git_checkout(root: String, branch: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize, Debug)]
+pub struct CreatedWorktree {
+    pub path: String,
+    pub branch: String,
+}
+
+/// Create a new branch and linked worktree without changing the caller's
+/// checkout. Every user-controlled precondition is checked before the branch
+/// ref or worktree directory is created.
+#[tauri::command]
+pub fn git_create_worktree(
+    root: String,
+    branch: String,
+    target: String,
+    base_ref: String,
+) -> Result<CreatedWorktree, String> {
+    let repo = Repository::discover(&root).map_err(|_| "This folder is not a Git repository.".to_string())?;
+    let workdir = repo.workdir().ok_or("Bare repositories cannot create a worktree.")?;
+    if canon(Path::new(&root)) != canon(workdir) {
+        return Err("Open the repository root before creating a worktree.".to_string());
+    }
+    if repo.is_worktree() {
+        return Err("Create worktrees from the primary checkout, not a linked worktree.".to_string());
+    }
+    let head = repo.head().map_err(|_| "The repository has an unborn HEAD; create an initial commit first.".to_string())?;
+    if !head.is_branch() {
+        return Err("The repository is detached; check out a branch before creating a worktree.".to_string());
+    }
+
+    let branch = branch.trim();
+    let branch_ref = format!("refs/heads/{branch}");
+    if branch.is_empty() || !Reference::is_valid_name(&branch_ref) {
+        return Err("Enter a valid local branch name.".to_string());
+    }
+    if repo.find_reference(&branch_ref).is_ok() {
+        return Err(format!("Branch {branch} already exists or is checked out in a worktree."));
+    }
+
+    let target = PathBuf::from(target);
+    if !target.is_absolute() {
+        return Err("Choose an absolute worktree target directory.".to_string());
+    }
+    if target.exists() {
+        return Err("The worktree target path already exists.".to_string());
+    }
+    let worktree_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or("Choose a target directory with a name.")?;
+    if repo.find_worktree(worktree_name).is_ok() {
+        return Err("A worktree already uses that target directory name.".to_string());
+    }
+    let target_parent = target.parent().ok_or("Choose a target directory with a parent folder.")?;
+    if resolved_target_parent(target_parent)?.starts_with(canon(workdir)) {
+        return Err("Choose a worktree target outside the primary checkout.".to_string());
+    }
+
+    let base_ref = base_ref.trim();
+    if base_ref.is_empty() {
+        return Err("Choose a base ref.".to_string());
+    }
+    let base = repo
+        .revparse_single(base_ref)
+        .map_err(|_| format!("Base ref {base_ref} could not be resolved."))?
+        .peel_to_commit()
+        .map_err(|_| format!("Base ref {base_ref} does not name a commit."))?;
+
+    // libgit2 otherwise creates a branch derived from the worktree name.
+    // Supplying the just-created reference keeps the selected branch and base
+    // explicit while leaving the primary HEAD and index untouched.
+    fs::create_dir_all(target_parent).map_err(|e| e.to_string())?;
+    let new_branch = repo.branch(branch, &base, false).map_err(|e| e.to_string())?;
+    let mut options = WorktreeAddOptions::new();
+    options.reference(Some(new_branch.get()));
+    let worktree = match repo.worktree(worktree_name, &target, Some(&options)) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            // All user input was preflighted, but a late filesystem/libgit2
+            // failure must not leave the newly-created branch behind.
+            let _ = repo.find_reference(&branch_ref).and_then(|mut reference| reference.delete());
+            return Err(error.to_string());
+        }
+    };
+    worktree.validate().map_err(|e| e.to_string())?;
+    let created = Repository::open(worktree.path()).map_err(|e| e.to_string())?;
+    let created_branch = created
+        .head()
+        .ok()
+        .and_then(|head| head.shorthand().map(str::to_owned).ok());
+    if created_branch.as_deref() != Some(branch) {
+        return Err("Git created the worktree with an unexpected branch.".to_string());
+    }
+    Ok(CreatedWorktree {
+        path: worktree.path().to_string_lossy().into_owned(),
+        branch: branch.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +648,67 @@ mod tests {
         let main_b = branches.iter().find(|b| b.name == "main").unwrap();
         assert!(!main_b.in_other_worktree, "main is the current root's branch");
         assert!(main_b.is_current);
+    }
+
+    #[test]
+    fn git_create_worktree_preserves_primary_head_and_status() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let before_head = git_branch(root.clone()).unwrap();
+        let before_status = git_status(root.clone()).unwrap();
+        let target = dir.path().parent().unwrap().join(format!(".sutra-worktrees/{}-task-one", dir.path().file_name().unwrap().to_string_lossy()));
+
+        let created = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+
+        assert_eq!(created.branch, "task/one");
+        assert_eq!(canon(Path::new(&created.path)), canon(&target));
+        assert_eq!(git_branch(root.clone()).unwrap(), before_head);
+        assert_eq!(git_status(root).unwrap(), before_status);
+        assert_eq!(Repository::discover(&created.path).unwrap().head().unwrap().shorthand().unwrap(), "task/one");
+    }
+
+    #[test]
+    fn git_create_worktree_rejects_invalid_input_before_writing() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().parent().unwrap().join(".sutra-worktrees/invalid");
+
+        let error = git_create_worktree(root.clone(), "bad..branch".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+
+        assert!(error.contains("valid local branch"));
+        assert!(!target.exists());
+        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/bad..branch").is_err());
+    }
+
+    #[test]
+    fn git_create_worktree_rejects_targets_inside_primary_checkout() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().join(".sutra-worktrees/task-one");
+
+        let error = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+
+        assert!(error.contains("outside the primary checkout"));
+        assert!(!target.exists());
+        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/task/one").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_create_worktree_rejects_symlinked_target_inside_primary_checkout() {
+        use std::os::unix::fs::symlink;
+
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let outside = tempfile::tempdir().unwrap();
+        let link = outside.path().join("into-primary");
+        symlink(dir.path(), &link).unwrap();
+        let target = link.join("new-worktree");
+
+        let error = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+
+        assert!(error.contains("outside the primary checkout"));
+        assert!(!target.exists());
+        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/task/one").is_err());
     }
 }

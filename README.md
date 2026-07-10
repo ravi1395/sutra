@@ -118,6 +118,17 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   badges after filesystem changes. A 10s git-index mtime poll remains as a
   fallback.
 
+### Isolated task worktrees
+
+- A ready task in a trusted Git workspace can use **Run in isolated worktree**.
+  The explicit dialog selects a new branch, base ref, and target directory;
+  defaults create the worktree beside the primary checkout under
+  `.sutra-worktrees/`.
+- Sutra validates the Git inputs before creation, keeps the primary checkout
+  unchanged, links the worktree to its task, then focuses its existing Sutra
+  window or launches one for that root. No setup command, push, PR, or cleanup
+  runs automatically.
+
 #### Open with Sutra (Finder / Explorer / command line)
 - Sutra registers as a file opener, so you can right-click a source or text file
   and **Open With ▸ Sutra**, run `open -a Sutra <path>` (macOS), or pass a path
@@ -590,7 +601,7 @@ to the current route.
 | Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 15 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
-| Rust: git | `src-tauri/src/git.rs` | `git_head_content` — diff baseline |
+| Rust: git | `src-tauri/src/git.rs` | diff baseline, status/branch/worktree reads, validated linked-worktree creation |
 | Rust: pty | `src-tauri/src/pty.rs` | spawn/write/resize/kill PTYs, stream output events |
 | Rust: preview | `src-tauri/src/preview_server.rs` | local static server for saved HTML preview |
 | TS: ipc | `src/ipc.ts` | typed `invoke`/`listen` wrappers |
