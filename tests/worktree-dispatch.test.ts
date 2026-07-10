@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { defaultWorktreeDispatch, serializeWorktreeTaskLink, TaskWorktreeDispatchGate, validateWorktreeDispatch, worktreeSlug } from "../src/worktree-dispatch";
+import { defaultWorktreeDispatch, serializeWorktreeTaskLink, TaskWorktreeDispatchGate, validateWorktreeDispatch, worktreeCleanupGuard, worktreeSlug } from "../src/worktree-dispatch";
 
 const task = { id: "task-42", title: "Fix launch race" };
 
@@ -31,4 +31,10 @@ test("only one worktree creation can be in flight for a task", () => {
   assert.equal(gate.claim("task-42"), false);
   gate.release("task-42");
   assert.equal(gate.claim("task-42"), true);
+});
+
+test("cleanup requires explicit discard for a running task", () => {
+  assert.match(worktreeCleanupGuard("running", false) ?? "", /confirm discard/i);
+  assert.equal(worktreeCleanupGuard("running", true), null);
+  assert.equal(worktreeCleanupGuard("ready", false), null);
 });

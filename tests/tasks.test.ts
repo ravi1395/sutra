@@ -4,6 +4,7 @@ import {
   acceptTask,
   addTasksGitignoreEntry,
   appendAutomationEvidence,
+  beginWorktreeSetup,
   attachClosedTurnToRunningTask,
   attachTurnToTask,
   completionState,
@@ -11,6 +12,10 @@ import {
   hasRequiredAutomationCheck,
   recordManualCheck,
   parseTasksFile,
+  completeWorktreeSetup,
+  markMissingWorktree,
+  reconcileInterruptedWorktreeSetup,
+  removeTaskWorktree,
   saveTasks,
   serializeTasks,
   setRequiredChecks,
@@ -45,6 +50,39 @@ test("valid tasks round-trip through the versioned file format", () => {
   const original = task({ worktree: { path: "/worktree", branch: "task/persistence" } });
   const loaded = parseTasksFile(serializeTasks([original]));
   assert.deepEqual(loaded, { tasks: [original], warnings: [] });
+});
+
+test("worktree setup success is durable while failure blocks and retains output", () => {
+  const linked = task({ status: "ready", worktree: { path: "/wt", branch: "task/one" } });
+  const running = beginWorktreeSetup(linked, "install", 200);
+  assert.equal(running.worktreeSetup?.state, "running");
+  const passed = completeWorktreeSetup(running, { automationId: "install", state: "pass", completedAt: 210, outputTail: "ok" });
+  assert.equal(passed.status, "ready");
+  assert.equal(passed.worktreeSetup?.state, "pass");
+
+  const failed = completeWorktreeSetup(running, { automationId: "install", state: "fail", completedAt: 220, outputTail: "setup failed" });
+  assert.equal(failed.status, "blocked");
+  assert.equal(failed.worktree?.path, "/wt");
+  assert.equal(failed.worktreeSetup?.outputTail, "setup failed");
+  assert.strictEqual(completeWorktreeSetup(failed, { automationId: "install", state: "pass", completedAt: 230, outputTail: "late" }), failed);
+  const interrupted = reconcileInterruptedWorktreeSetup(running, 240);
+  assert.equal(interrupted.status, "blocked");
+  assert.equal(interrupted.worktreeSetup?.state, "cancelled");
+});
+
+test("missing worktrees block without recreating, and successful cleanup only clears the task link", () => {
+  const linked = task({ status: "ready", worktree: { path: "/missing", branch: "task/one" } });
+  assert.equal(markMissingWorktree(linked, 200).status, "blocked");
+  const accepted = markMissingWorktree({ ...linked, status: "accepted", acceptedAt: 205, acceptedEvidenceDigest: "digest" }, 206);
+  assert.equal(accepted.status, "blocked");
+  assert.equal(accepted.acceptedAt, undefined);
+  assert.equal(accepted.acceptedEvidenceDigest, undefined);
+  const removed = removeTaskWorktree(linked, 201);
+  assert.equal(removed.worktree, undefined);
+  assert.equal(removed.status, "ready");
+  const running = removeTaskWorktree({ ...linked, status: "running" }, 202);
+  assert.equal(running.status, "blocked");
+  assert.equal(running.worktree, undefined);
 });
 
 test("malformed task data is recoverable and never produces a task", () => {

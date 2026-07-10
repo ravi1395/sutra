@@ -126,8 +126,13 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   `.sutra-worktrees/`.
 - Sutra validates the Git inputs before creation, keeps the primary checkout
   unchanged, links the worktree to its task, then focuses its existing Sutra
-  window or launches one for that root. No setup command, push, PR, or cleanup
-  runs automatically.
+  window or launches one for that root. An existing automation may be selected
+  as an explicit setup command; its runner result is stored on the task, and a
+  failed/cancelled setup blocks the task while retaining the worktree and output.
+- **Remove worktree** is explicit and never deletes the local branch. Clean
+  worktrees remove directly; dirty or running tasks require discard confirmation.
+  Missing paths are reported as blocked and are never recreated. Push, PR, and
+  merge remain outside this flow.
 
 #### Open with Sutra (Finder / Explorer / command line)
 - Sutra registers as a file opener, so you can right-click a source or text file
@@ -601,7 +606,7 @@ to the current route.
 | Rust: mcp | `src-tauri/src/mcp.rs` | in-process `rmcp` HTTP server, edit-ingest route, 15 MCP tools, agent-config commands, UI-read reply registry |
 | Rust: mcp config | `src-tauri/src/mcp_config.rs` | merge-preserving writers for `.mcp.json` / `.codex/config.toml` / `.claude/settings.json` / `.gitignore` |
 | Rust: fs | `src-tauri/src/fs_cmds.rs` | `list_dir` (compact folders), tracked Sutra mutations, read/write |
-| Rust: git | `src-tauri/src/git.rs` | diff baseline, status/branch/worktree reads, validated linked-worktree creation |
+| Rust: git | `src-tauri/src/git.rs` | diff baseline, status/branch/worktree reads, validated creation, dirty-guarded removal without branch deletion |
 | Rust: pty | `src-tauri/src/pty.rs` | spawn/write/resize/kill PTYs, stream output events |
 | Rust: preview | `src-tauri/src/preview_server.rs` | local static server for saved HTML preview |
 | TS: ipc | `src/ipc.ts` | typed `invoke`/`listen` wrappers |

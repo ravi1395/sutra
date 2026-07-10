@@ -43,6 +43,8 @@ import {
   gitChangedFiles,
   gitCheckout,
   gitCreateWorktree,
+  gitRemoveWorktree,
+  gitWorktrees,
   spawnWindow,
   onPreviewOpen,
   onDrive,
@@ -142,12 +144,17 @@ import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispat
 import {
   appendAutomationEvidence,
   attachClosedTurnToRunningTask,
+  beginWorktreeSetup,
+  completeWorktreeSetup,
   hasRequiredAutomationCheck,
   loadTasks,
+  markMissingWorktree,
+  removeTaskWorktree,
   saveTasks,
   setOwnedTurnReview,
   TaskCheckRunRegistry,
   taskCheckEvidence,
+  AUTOMATION_OUTPUT_TAIL_LIMIT,
   TASK_CHECK_TIMEOUT_MS,
   type Task,
 } from "./tasks";
@@ -1149,6 +1156,7 @@ btnTasks.title = "Toggle tasks";
 btnTasks.setAttribute("aria-label", "Toggle tasks");
 btnTasks.innerHTML = icon("check", 17);
 $("view-tools").insertBefore(btnTasks, $("btn-menu"));
+const activeWorktreeSetups = new Map<string, { root: string; taskId: string; automationId: string }>();
 const tasksPanel = mountTasksPanel({
   container: tasksPane,
   getRoot: () => currentRoot,
@@ -1174,6 +1182,15 @@ const tasksPanel = mountTasksPanel({
       await spawnWindow(current.worktree.path);
       return;
     }
+    // The dialog can outlive an automation edit. Refuse before Git writes when
+    // its selected optional setup command is no longer part of this workspace.
+    const setup = input.setupAutomationId
+      ? automations.find((candidate) => candidate.id === input.setupAutomationId)
+      : undefined;
+    if (input.setupAutomationId && !setup) {
+      throw new Error(`Setup automation “${input.setupAutomationId}” no longer exists; no worktree was created.`);
+    }
+    const runnerId = setup ? `worktree-setup:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}` : null;
     const created = await gitCreateWorktree(root, input.branch, input.target, input.baseRef);
     if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Workspace trust changed after the worktree was created; it was left unlinked.");
     await createDir(`${created.path}/.sutra`);
@@ -1183,12 +1200,90 @@ const tasksPanel = mountTasksPanel({
       return { ...candidate, worktree: { path: created.path, branch: created.branch }, updatedAt: Math.max(Date.now(), candidate.updatedAt) };
     }), async () => currentRoot === root && await isWorkspaceTrusted(root));
     if (!linked) throw new Error("Worktree was created but the task link was not saved; it was left intact for recovery.");
+    if (setup) {
+      activeWorktreeSetups.set(runnerId!, { root, taskId: task.id, automationId: setup.id });
+      let started = false;
+      try {
+        started = await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => {
+          if (candidate.id !== task.id) return candidate;
+          return beginWorktreeSetup(candidate, setup.id);
+        }), async () => currentRoot === root && await isWorkspaceTrusted(root));
+      } catch (error) {
+        activeWorktreeSetups.delete(runnerId!);
+        throw error;
+      }
+      if (!started) {
+        activeWorktreeSetups.delete(runnerId!);
+        throw new Error("Worktree was created but setup status was not saved; it was left intact for recovery.");
+      }
+      try {
+        await runnerRun(runnerId!, setup.command, created.path, TASK_CHECK_TIMEOUT_MS);
+      } catch (error) {
+        activeWorktreeSetups.delete(runnerId!);
+        await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => candidate.id === task.id
+          ? completeWorktreeSetup(candidate, { automationId: setup.id, state: "fail", completedAt: Date.now(), outputTail: String(error) })
+          : candidate));
+        throw new Error(`Could not start setup automation: ${String(error)}`);
+      }
+    }
     await spawnWindow(created.path);
   },
   openWorktree: async (task) => {
     if (!task.worktree) throw new Error("This task has no linked worktree.");
+    const registered = await gitWorktrees(task.root);
+    if (!registered.some((worktree) => worktree.path === task.worktree?.path)) {
+      await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) => candidate.id === task.id
+        ? markMissingWorktree(candidate)
+        : candidate));
+      throw new Error("Linked worktree is missing; task was blocked and no path was recreated.");
+    }
     await spawnWindow(task.worktree.path);
   },
+  removeWorktree: async (task, discard) => {
+    if (!task.worktree) throw new Error("This task has no linked worktree.");
+    const expected = task.worktree;
+    return queueTaskMetadataOperation(task.root, async () => {
+      const loaded = await loadTasks(task.root);
+      if (loaded.warnings.length) throw new Error("Task metadata has recoverable errors; repair it before removing the worktree.");
+      const current = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === task.root);
+      if (!current || !current.worktree || current.worktree.path !== expected.path || current.worktree.branch !== expected.branch) {
+        throw new Error("Task worktree changed or no longer exists; reload before removing it.");
+      }
+      if (current.status === "running" && !discard) {
+        throw new Error("Task started while confirmation was open; confirm discard again before removing its worktree.");
+      }
+      // This is intentionally the final await before Git removal. The
+      // per-root operation queue prevents in-app task transitions between the
+      // fresh metadata check and the destructive Git command.
+      const trustedNow = await isWorkspaceTrusted(task.root).catch(() => false);
+      if (!mayPersistTaskForRoot(task.root, currentRoot, trustedNow)) {
+        throw new Error(currentRoot === task.root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; worktree was not removed.");
+      }
+      const result = await gitRemoveWorktree(task.root, expected.path, discard);
+      if (result.status === "dirty") return result;
+
+      // Read again after Git completes: turn/evidence updates from another
+      // writer are preserved rather than replaced by the rendered card.
+      const after = await loadTasks(task.root);
+      if (after.warnings.length) throw new Error("Worktree changed but task metadata has recoverable errors; repair it to reconcile the link.");
+      const next = after.tasks.map((candidate) => {
+        if (candidate.id !== task.id || candidate.root !== task.root || !candidate.worktree || candidate.worktree.path !== expected.path) return candidate;
+        return result.status === "missing" ? markMissingWorktree(candidate) : removeTaskWorktree(candidate);
+      });
+      if (next.some((candidate, index) => candidate !== after.tasks[index])) {
+        await saveTasks(task.root, next);
+        if (currentRoot === task.root) await tasksPanel.reload();
+      }
+      return result;
+    });
+  },
+  cancelWorktreeSetup: async (task) => {
+    if (currentRoot !== task.root || !(await isWorkspaceTrusted(task.root).catch(() => false))) return false;
+    const active = [...activeWorktreeSetups.entries()].find(([, setup]) => setup.root === task.root && setup.taskId === task.id);
+    return active ? runnerCancel(active[0]).catch(() => false) : false;
+  },
+  isWorktreeSetupActive: (task) => [...activeWorktreeSetups.values()].some((setup) => setup.root === task.root && setup.taskId === task.id),
+  confirmDiscard: confirmNative,
   updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
     const trusted = await isWorkspaceTrusted(root).catch(() => false);
     return mayPersistTaskForRoot(root, currentRoot, trusted);
@@ -1624,7 +1719,7 @@ ensureDiagnosticsExtension();
 // turns in one tick, and a stale concurrent read/write would otherwise lose a
 // link. Corrupt task files remain read-only: automatic tracking must never
 // "repair" externally malformed metadata by overwriting it.
-const taskMetadataWrites = new Map<string, Promise<boolean>>();
+const taskMetadataWrites = new Map<string, Promise<unknown>>();
 function queueTaskMetadataUpdate(
   root: string,
   reduce: (tasks: readonly Task[]) => readonly Task[],
@@ -1647,6 +1742,18 @@ function queueTaskMetadataUpdate(
     if (currentRoot === root) await tasksPanel.reload();
     return true;
   });
+  taskMetadataWrites.set(root, next);
+  void next.finally(() => {
+    if (taskMetadataWrites.get(root) === next) taskMetadataWrites.delete(root);
+  }).catch(() => {});
+  return next;
+}
+
+/** Serialize destructive Git/task operations with turn/evidence metadata
+ * writes while allowing the operation to return a typed backend result. */
+function queueTaskMetadataOperation<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  const previous = taskMetadataWrites.get(root) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
   taskMetadataWrites.set(root, next);
   void next.finally(() => {
     if (taskMetadataWrites.get(root) === next) taskMetadataWrites.delete(root);
@@ -1756,6 +1863,17 @@ async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<voi
 
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
 void onRunnerDone((p) => {
+  const setup = activeWorktreeSetups.get(p.id);
+  if (setup) {
+    activeWorktreeSetups.delete(p.id);
+    const state = p.cancelled ? "cancelled" : p.exitCode === 0 && !p.timedOut ? "pass" : "fail";
+    const outputTail = (p.stdout + p.stderr).slice(-AUTOMATION_OUTPUT_TAIL_LIMIT);
+    void queueTaskMetadataUpdate(setup.root, (tasks) => tasks.map((candidate) => candidate.id === setup.taskId
+      ? completeWorktreeSetup(candidate, { automationId: setup.automationId, state, completedAt: Date.now(), outputTail })
+      : candidate)).catch((error) => console.warn("Worktree setup result failed", error));
+    if (currentRoot === setup.root) void tasksPanel.reload();
+    return;
+  }
   const taskCheck = activeTaskChecks.complete(p);
   if (taskCheck) {
     const evidence = taskCheckEvidence(p);

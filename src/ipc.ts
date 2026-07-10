@@ -90,6 +90,13 @@ export interface CreatedWorktree {
 }
 export const gitCreateWorktree = (root: string, branch: string, target: string, baseRef: string) =>
   invoke<CreatedWorktree>("git_create_worktree", { root, branch, target, baseRef });
+export interface RemovedWorktree {
+  path: string;
+  status: "removed" | "dirty" | "missing";
+  dirty: boolean;
+}
+export const gitRemoveWorktree = (root: string, target: string, discard: boolean) =>
+  invoke<RemovedWorktree>("git_remove_worktree", { root, target, discard });
 
 export interface BranchInfo {
   name: string;

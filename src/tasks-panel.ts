@@ -1,6 +1,6 @@
 // Workspace task panel. Task creation/start stays explicit; it also exposes
 // durable turn links so historical attribution never depends on a terminal.
-import { gitBranch, ptyListAgents, type AgentTerminal, type Turn } from "./ipc";
+import { gitBranch, ptyListAgents, type AgentTerminal, type RemovedWorktree, type Turn } from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
 import { openWorktreeDispatchDialog, TaskWorktreeDispatchGate, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
@@ -14,6 +14,7 @@ import {
   recordManualCheck,
   saveTasks,
   setRequiredChecks,
+  reconcileInterruptedWorktreeSetup,
   transitionTask,
   type RequiredTaskCheck,
   type Task,
@@ -39,6 +40,12 @@ export interface TasksPanelOptions {
   isRequiredCheckRunning: (task: Task, automationId: string) => boolean;
   dispatchWorktree: (task: Task, input: WorktreeDispatchInput) => Promise<void>;
   openWorktree: (task: Task) => Promise<void>;
+  /** Revalidates fresh metadata under the primary-root queue, removes Git state,
+   * then persists the fresh task reducer before releasing that queue. */
+  removeWorktree: (task: Task, discard: boolean) => Promise<RemovedWorktree>;
+  cancelWorktreeSetup: (task: Task) => Promise<boolean>;
+  isWorktreeSetupActive: (task: Task) => boolean;
+  confirmDiscard: (message: string) => Promise<boolean>;
 }
 
 export interface TaskAutomationChoice { id: string; label: string; }
@@ -175,6 +182,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   const {
     container, getRoot, getTurns, getComposerDraft, deliverPrompt, getAutomationChoices,
     updateTaskMetadata, runRequiredCheck, cancelRequiredCheck, isRequiredCheckRunning, dispatchWorktree, openWorktree,
+    removeWorktree, cancelWorktreeSetup, isWorktreeSetupActive, confirmDiscard,
   } = opts;
   let tasks: Task[] = [];
   let agents: AgentTerminal[] = [];
@@ -186,6 +194,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   let status = "";
   let submit = false;
   let targetId: string | null = null;
+  const reconciledSetupRoots = new Set<string>();
 
   function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string): HTMLElementTagNameMap[K] {
     const node = document.createElement(tag);
@@ -217,7 +226,16 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       gitBranch(root).catch(() => null),
     ]);
     if (getRoot() !== root) return;
-    tasks = loaded.tasks.filter((task) => task.root === root);
+    let loadedTasks = loaded.tasks.filter((task) => task.root === root);
+    if (!reconciledSetupRoots.has(root) && nextTrusted) {
+      reconciledSetupRoots.add(root);
+      const interrupted = loadedTasks.map((task) => isWorktreeSetupActive(task) ? task : reconcileInterruptedWorktreeSetup(task));
+      if (interrupted.some((task, index) => task !== loadedTasks[index])) {
+        await saveTasks(root, interrupted).catch(() => {});
+        loadedTasks = interrupted;
+      }
+    }
+    tasks = loadedTasks;
     trusted = nextTrusted;
     isGitRoot = branch !== null;
     agents = nextAgents;
@@ -335,10 +353,13 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       }
       const result = await deliverPrompt({ targetId: selectedTargetId, prompt: runningTask.prompt, submit: selectedSubmit });
       if (!result.ok) {
-        const blockedTask = transitionTask(runningTask, "blocked");
         const trustedForFailure = await isWorkspaceTrusted(root).catch(() => false);
         if (mayPersistTaskForRoot(root, getRoot(), trustedForFailure)) {
-          await persist(root, snapshot.map((entry) => entry.id === task.id ? blockedTask : entry));
+          await updateTaskMetadata(root, (entries) => entries.map((entry) => (
+            entry.id === task.id && entry.root === root && entry.status === "running"
+              ? transitionTask(entry, "blocked")
+              : entry
+          )));
         }
         showStatus(`Task was not started: ${result.reason}`);
         return;
@@ -403,6 +424,32 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     if (!result.ok) return showStatus(result.reason);
     showStatus(`Running required automation “${automationId}”. Previous evidence remains active until runner completion.`);
     render();
+  }
+
+  async function cleanupWorktree(task: Task): Promise<void> {
+    const root = getRoot();
+    if (!root || root !== task.root || !trusted) return showStatus("Tasks are read-only until this workspace is trusted.");
+    const discard = task.status === "running"
+      ? await confirmDiscard(`Task “${task.title}” is still running. Remove its worktree and discard its checkout?`)
+      : false;
+    if (task.status === "running" && !discard) return;
+    let result = await removeWorktree(task, discard);
+    if (result.status === "dirty") {
+      if (!(await confirmDiscard(`Worktree has uncommitted changes. Remove it and discard those changes?`))) return;
+      result = await removeWorktree(task, true);
+    }
+    if (result.status === "missing") {
+      showStatus("Linked worktree is missing; task was blocked and no path was recreated.");
+      return;
+    }
+    if (result.status !== "removed") return showStatus("Worktree was not removed.");
+    showStatus("Worktree removed. The local branch was retained.");
+  }
+
+  async function cancelSetupRun(task: Task): Promise<void> {
+    if (task.worktreeSetup?.state !== "running") return;
+    if (!(await cancelWorktreeSetup(task))) return showStatus("Setup already completed; its persisted result is unchanged.");
+    showStatus("Cancelling setup. Its retained output and cancelled result will be recorded when the runner exits.");
   }
 
   async function cancelCheck(task: Task, automationId: string): Promise<void> {
@@ -606,7 +653,14 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     acceptance.disabled = !trusted || loading;
     acceptance.setAttribute("aria-label", "Task acceptance criteria");
     const meta = el("div");
-    meta.textContent = task.status.replace("_", " ");
+    meta.textContent = task.worktreeSetup
+      ? `${task.status.replace("_", " ")} · setup ${task.worktreeSetup.state}`
+      : task.status.replace("_", " ");
+    if (task.worktreeSetup?.outputTail) {
+      const output = el("pre", "task-worktree-setup-output");
+      output.textContent = task.worktreeSetup.outputTail;
+      card.appendChild(output);
+    }
     const actions = el("div");
     const save = el("button");
     save.textContent = "Save";
@@ -633,6 +687,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
         openWorktreeDispatchDialog({
           root: task.root,
           task,
+          setupAutomations: getAutomationChoices(),
           onConfirm: async (input) => {
             if (!worktreeDispatchGate.claim(task.id)) throw new Error("This task is already creating a worktree.");
             try {
@@ -645,6 +700,20 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
         });
       };
       actions.appendChild(dispatch);
+    }
+    if (trusted && isGitRoot && task.worktree) {
+      const cleanup = el("button");
+      cleanup.textContent = "Remove worktree";
+      cleanup.disabled = loading;
+      cleanup.onclick = () => void cleanupWorktree(task);
+      actions.appendChild(cleanup);
+    }
+    if (trusted && task.worktreeSetup?.state === "running") {
+      const cancelSetup = el("button");
+      cancelSetup.textContent = "Cancel setup";
+      cancelSetup.disabled = loading;
+      cancelSetup.onclick = () => void cancelSetupRun(task);
+      actions.appendChild(cancelSetup);
     }
     const turns = getTurns(task.root);
     const linked = linkedTaskTurnRows(task, turns);

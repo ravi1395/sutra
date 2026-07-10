@@ -6,6 +6,12 @@ export interface WorktreeDispatchInput {
   branch: string;
   baseRef: string;
   target: string;
+  setupAutomationId?: string;
+}
+
+export interface SetupAutomationChoice {
+  id: string;
+  label: string;
 }
 
 export interface WorktreeTaskLink {
@@ -42,6 +48,13 @@ export function validateWorktreeDispatch(input: WorktreeDispatchInput): string |
   if (!input.branch.trim()) return "Enter a branch name.";
   if (!input.baseRef.trim()) return "Enter a base ref.";
   if (!input.target.trim()) return "Enter a target directory.";
+  if (input.setupAutomationId !== undefined && !input.setupAutomationId.trim()) return "Choose a setup automation or none.";
+  return null;
+}
+
+/** Only a confirmed discard may remove a worktree while its task is running. */
+export function worktreeCleanupGuard(status: string, discardConfirmed: boolean): string | null {
+  if (status === "running" && !discardConfirmed) return "Stop the running task before removing its worktree, or confirm discard.";
   return null;
 }
 
@@ -67,6 +80,7 @@ export function serializeWorktreeTaskLink(primaryRoot: string, taskId: string): 
 export function openWorktreeDispatchDialog(args: {
   root: string;
   task: Pick<Task, "id" | "title">;
+  setupAutomations?: readonly SetupAutomationChoice[];
   onConfirm: (input: WorktreeDispatchInput) => Promise<void>;
 }): void {
   const input = defaultWorktreeDispatch(args.root, args.task);
@@ -77,8 +91,8 @@ export function openWorktreeDispatchDialog(args: {
   const heading = document.createElement("h2");
   heading.textContent = "Run in isolated worktree";
   const status = document.createElement("p");
-  const fields: Array<[keyof WorktreeDispatchInput, string]> = [["branch", "Branch"], ["baseRef", "Base ref"], ["target", "Target directory"]];
-  const values = {} as Record<keyof WorktreeDispatchInput, HTMLInputElement>;
+  const fields: Array<["branch" | "baseRef" | "target", string]> = [["branch", "Branch"], ["baseRef", "Base ref"], ["target", "Target directory"]];
+  const values = {} as Record<"branch" | "baseRef" | "target", HTMLInputElement>;
   for (const [key, label] of fields) {
     const field = document.createElement("label");
     field.textContent = label;
@@ -89,6 +103,22 @@ export function openWorktreeDispatchDialog(args: {
     field.appendChild(control);
     form.appendChild(field);
   }
+  const setup = document.createElement("select");
+  setup.setAttribute("aria-label", "Optional setup automation");
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "No setup automation";
+  setup.appendChild(none);
+  for (const automation of args.setupAutomations ?? []) {
+    const option = document.createElement("option");
+    option.value = automation.id;
+    option.textContent = automation.label;
+    setup.appendChild(option);
+  }
+  const setupLabel = document.createElement("label");
+  setupLabel.textContent = "Optional setup automation";
+  setupLabel.appendChild(setup);
+  form.appendChild(setupLabel);
   const cancel = document.createElement("button");
   cancel.textContent = "Cancel";
   cancel.value = "cancel";
@@ -100,7 +130,12 @@ export function openWorktreeDispatchDialog(args: {
   form.onsubmit = (event) => {
     event.preventDefault();
     if ((event.submitter as HTMLButtonElement | null)?.value === "cancel") return dialog.close();
-    const next = { branch: values.branch.value, baseRef: values.baseRef.value, target: values.target.value };
+    const next = {
+      branch: values.branch.value,
+      baseRef: values.baseRef.value,
+      target: values.target.value,
+      ...(setup.value ? { setupAutomationId: setup.value } : {}),
+    } satisfies WorktreeDispatchInput;
     const error = validateWorktreeDispatch(next);
     if (error) { status.textContent = error; return; }
     confirm.disabled = true;

@@ -27,6 +27,16 @@ export interface TaskCheckCompletion {
   readonly cancelled: boolean;
 }
 
+export type WorktreeSetupState = "running" | "pass" | "fail" | "cancelled";
+
+export interface WorktreeSetup {
+  automationId: string;
+  state: WorktreeSetupState;
+  startedAt: number;
+  completedAt?: number;
+  outputTail: string;
+}
+
 export type TaskStatus =
   | "draft"
   | "ready"
@@ -91,6 +101,8 @@ export interface Task {
   profileId: string | null;
   root: string;
   worktree?: { path: string; branch: string };
+  /** Durable status for the opt-in setup command run in the linked worktree. */
+  worktreeSetup?: WorktreeSetup;
   /** Optional for backwards-compatible task files written before E1. */
   requiredChecks?: readonly RequiredTaskCheck[];
   /** New task work/selection invalidates older evidence without touching history. */
@@ -129,7 +141,7 @@ const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   running: ["needs_review", "blocked", "abandoned"],
   needs_review: ["running", "blocked", "accepted", "abandoned"],
   blocked: ["ready", "running", "abandoned"],
-  accepted: ["needs_review", "abandoned"],
+  accepted: ["needs_review", "blocked", "abandoned"],
   abandoned: [],
 };
 
@@ -163,6 +175,16 @@ function isRequiredTaskChecks(value: unknown): value is readonly RequiredTaskChe
   if (!Array.isArray(value) || !value.every(isRequiredTaskCheck)) return false;
   const keys = value.map((check) => check.kind === "automation" ? `automation:${check.automationId.trim()}` : `manual:${check.id.trim()}`);
   return new Set(keys).size === keys.length;
+}
+
+function isWorktreeSetup(value: unknown): value is WorktreeSetup {
+  return isRecord(value)
+    && typeof value.automationId === "string"
+    && (value.state === "running" || value.state === "pass" || value.state === "fail" || value.state === "cancelled")
+    && isFiniteTimestamp(value.startedAt)
+    && (value.completedAt === undefined || isFiniteTimestamp(value.completedAt))
+    && typeof value.outputTail === "string"
+    && value.outputTail.length <= AUTOMATION_OUTPUT_TAIL_LIMIT;
 }
 
 function isEvidence(value: unknown): value is Evidence {
@@ -203,6 +225,7 @@ function taskError(value: unknown): string | null {
   if (value.profileId !== null && typeof value.profileId !== "string") return `Task ${value.id} profileId is invalid`;
   if (typeof value.root !== "string" || !value.root.trim()) return `Task ${value.id} root is required`;
   if (value.worktree !== undefined && (!isRecord(value.worktree) || typeof value.worktree.path !== "string" || typeof value.worktree.branch !== "string")) return `Task ${value.id} worktree is invalid`;
+  if (value.worktreeSetup !== undefined && !isWorktreeSetup(value.worktreeSetup)) return `Task ${value.id} worktree setup is invalid`;
   if (value.requiredChecks !== undefined && !isRequiredTaskChecks(value.requiredChecks)) return `Task ${value.id} required checks are invalid`;
   if (value.evidenceFreshSince !== undefined && !isFiniteTimestamp(value.evidenceFreshSince)) return `Task ${value.id} evidence freshness is invalid`;
   if (!Array.isArray(value.turnIds) || !value.turnIds.every((id) => typeof id === "number")) return `Task ${value.id} turnIds are invalid`;
@@ -275,6 +298,77 @@ export function transitionTask(task: Task, status: TaskStatus, updatedAt = Date.
   if (!canTransitionTask(task.status, status)) throw new Error(`Cannot transition task from ${task.status} to ${status}`);
   if (!isFiniteTimestamp(updatedAt) || updatedAt < task.updatedAt) throw new Error("Task updatedAt cannot move backwards");
   return { ...task, status, updatedAt };
+}
+
+/** Mark the explicitly selected setup command as running without changing the
+ * task's ready state. The worktree is retained on every outcome. */
+export function beginWorktreeSetup(task: Task, automationId: string, startedAt = Date.now()): Task {
+  if (!task.worktree) throw new Error("Task has no linked worktree.");
+  if (!automationId.trim()) throw new Error("Setup automation is required.");
+  if (task.worktreeSetup?.state === "running") throw new Error("Worktree setup is already running.");
+  const next = nextUpdatedAt(task, startedAt);
+  return {
+    ...task,
+    worktreeSetup: { automationId: automationId.trim(), state: "running", startedAt: next, outputTail: "" },
+    updatedAt: next,
+  };
+}
+
+/** Persist setup output only when the completion belongs to the current run.
+ * Failure/cancellation blocks the task; successful setup leaves it ready. */
+export function completeWorktreeSetup(
+  task: Task,
+  result: { automationId: string; state: Exclude<WorktreeSetupState, "running">; completedAt: number; outputTail: string },
+): Task {
+  const setup = task.worktreeSetup;
+  if (!setup || setup.state !== "running" || setup.automationId !== result.automationId) return task;
+  if (!isFiniteTimestamp(result.completedAt)) throw new Error("Setup completion timestamp is invalid");
+  const completedAt = Math.max(setup.startedAt, result.completedAt);
+  const next: Task = {
+    ...task,
+    worktreeSetup: { ...setup, state: result.state, completedAt, outputTail: boundedTail(result.outputTail) },
+    updatedAt: Math.max(task.updatedAt, completedAt),
+  };
+  if (result.state === "pass" || next.status === "blocked") return next;
+  return canTransitionTask(next.status, "blocked") ? transitionTask(next, "blocked", completedAt) : next;
+}
+
+/** A runner cannot survive a Sutra restart. Reconcile its durable running
+ * marker as cancelled, retaining any output that was already persisted. */
+export function reconcileInterruptedWorktreeSetup(task: Task, completedAt = Date.now()): Task {
+  const setup = task.worktreeSetup;
+  if (!setup || setup.state !== "running") return task;
+  return completeWorktreeSetup(task, {
+    automationId: setup.automationId,
+    state: "cancelled",
+    completedAt,
+    outputTail: setup.outputTail,
+  });
+}
+
+/** A missing linked path is a durable blocked outcome. Never recreate it. */
+export function markMissingWorktree(task: Task, updatedAt = Date.now()): Task {
+  if (!task.worktree || task.status === "blocked") return task;
+  const invalidated = task.status === "accepted"
+    ? (({ acceptedAt: _acceptedAt, acceptedEvidenceDigest: _acceptedEvidenceDigest, ...next }) => next)(task)
+    : task;
+  return canTransitionTask(invalidated.status, "blocked")
+    ? transitionTask(invalidated, "blocked", updatedAt)
+    : invalidated;
+}
+
+/** Remove only the task link after Git has removed the worktree. Branches are
+ * intentionally not represented here and therefore cannot be deleted. */
+export function removeTaskWorktree(task: Task, updatedAt = Date.now()): Task {
+  const { worktree: _worktree, ...withoutWorktree } = task;
+  const next = task.status === "running" && canTransitionTask(task.status, "blocked")
+    ? transitionTask(task, "blocked", updatedAt)
+    : { ...withoutWorktree, updatedAt: nextUpdatedAt(task, updatedAt) };
+  if ("worktree" in next) {
+    const { worktree: _removed, ...without } = next;
+    return without;
+  }
+  return next;
 }
 
 function nextUpdatedAt(task: Task, updatedAt: number): number {

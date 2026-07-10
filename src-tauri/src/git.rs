@@ -1,5 +1,5 @@
 // Git baseline lookup and working-tree status for the frontend.
-use git2::{build::CheckoutBuilder, BranchType, Reference, Repository, StatusOptions, WorktreeAddOptions};
+use git2::{build::CheckoutBuilder, BranchType, Reference, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -473,6 +473,13 @@ pub struct CreatedWorktree {
     pub branch: String,
 }
 
+fn cleanup_created_worktree(repo: &Repository, worktree: &git2::Worktree, branch_ref: &str) {
+    let mut options = WorktreePruneOptions::new();
+    options.valid(true).working_tree(true).locked(true);
+    let _ = worktree.prune(Some(&mut options));
+    let _ = repo.find_reference(branch_ref).and_then(|mut reference| reference.delete());
+}
+
 /// Create a new branch and linked worktree without changing the caller's
 /// checkout. Every user-controlled precondition is checked before the branch
 /// ref or worktree directory is created.
@@ -551,19 +558,94 @@ pub fn git_create_worktree(
             return Err(error.to_string());
         }
     };
-    worktree.validate().map_err(|e| e.to_string())?;
-    let created = Repository::open(worktree.path()).map_err(|e| e.to_string())?;
+    if let Err(error) = worktree.validate() {
+        cleanup_created_worktree(&repo, &worktree, &branch_ref);
+        return Err(error.to_string());
+    }
+    let created = match Repository::open(worktree.path()) {
+        Ok(created) => created,
+        Err(error) => {
+            cleanup_created_worktree(&repo, &worktree, &branch_ref);
+            return Err(error.to_string());
+        }
+    };
     let created_branch = created
         .head()
         .ok()
         .and_then(|head| head.shorthand().map(str::to_owned).ok());
     if created_branch.as_deref() != Some(branch) {
+        cleanup_created_worktree(&repo, &worktree, &branch_ref);
         return Err("Git created the worktree with an unexpected branch.".to_string());
     }
     Ok(CreatedWorktree {
         path: worktree.path().to_string_lossy().into_owned(),
         branch: branch.to_string(),
     })
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedWorktree {
+    pub path: String,
+    pub status: String, // "removed" | "dirty" | "missing"
+    pub dirty: bool,
+}
+
+fn worktree_has_user_changes(path: &Path) -> Result<bool, String> {
+    let entries = git_status(path.to_string_lossy().into_owned())?;
+    Ok(entries.iter().any(|entry| {
+        let relative = Path::new(&entry.path).strip_prefix(path).unwrap_or(Path::new(&entry.path));
+        relative != Path::new(".sutra/task-link.json")
+    }))
+}
+
+/// Remove a linked worktree's checkout and Git metadata, never its branch.
+/// `discard` is the explicit destructive confirmation for dirty or locked
+/// worktrees. Missing paths are reported and never recreated.
+#[tauri::command]
+pub fn git_remove_worktree(root: String, target: String, discard: bool) -> Result<RemovedWorktree, String> {
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let main = main_workdir(&repo).ok_or("Repository has no primary working tree.")?;
+    let root_canon = canon(Path::new(&root));
+    if root_canon != canon(&main) {
+        return Err("Worktree cleanup must be initiated from the primary checkout.".to_string());
+    }
+    let target_path = Path::new(&target);
+    if canon(target_path) == canon(&main) {
+        return Err("The primary checkout cannot be removed.".to_string());
+    }
+
+    let target_canon = canon(target_path);
+    let mut found: Option<(String, PathBuf)> = None;
+    if let Ok(names) = repo.worktrees() {
+        for name_result in names.iter() {
+            let Some(name) = name_result.ok().flatten() else { continue };
+            let worktree = repo.find_worktree(name).map_err(|e| e.to_string())?;
+            if canon(worktree.path()) == target_canon || worktree.path() == target_path {
+                found = Some((name.to_string(), worktree.path().to_path_buf()));
+                break;
+            }
+        }
+    }
+    let Some((name, worktree_path)) = found else {
+        if !target_path.exists() {
+            return Ok(RemovedWorktree { path: target, status: "missing".to_string(), dirty: false });
+        }
+        return Err("Target is not a linked worktree of the primary checkout.".to_string());
+    };
+
+    if !worktree_path.exists() {
+        return Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "missing".to_string(), dirty: false });
+    }
+    let dirty = worktree_has_user_changes(&worktree_path)?;
+    if dirty && !discard {
+        return Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "dirty".to_string(), dirty: true });
+    }
+    let worktree = repo.find_worktree(&name).map_err(|e| e.to_string())?;
+    let mut options = WorktreePruneOptions::new();
+    options.valid(true).working_tree(true).locked(discard);
+    worktree.prune(Some(&mut options)).map_err(|e| e.to_string())?;
+    Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "removed".to_string(), dirty })
 }
 
 #[cfg(test)]
@@ -710,5 +792,66 @@ mod tests {
         assert!(error.contains("outside the primary checkout"));
         assert!(!target.exists());
         assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/task/one").is_err());
+    }
+
+    #[test]
+    fn git_remove_worktree_reports_dirty_then_discards_without_deleting_branch() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().parent().unwrap().join("wt-remove-dirty");
+        git_create_worktree(root.clone(), "task/remove-dirty".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        fs::write(target.join("changed.txt"), "dirty\n").unwrap();
+
+        let probe = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false).unwrap();
+        assert_eq!(probe.status, "dirty");
+        assert!(probe.dirty);
+        assert!(target.exists());
+
+        let removed = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), true).unwrap();
+        assert_eq!(removed.status, "removed");
+        assert!(!target.exists());
+        assert!(Repository::open(&dir).unwrap().find_branch("task/remove-dirty", BranchType::Local).is_ok());
+    }
+
+    #[test]
+    fn git_remove_worktree_ignores_its_task_link_when_checking_dirty_state() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().parent().unwrap().join("wt-remove-link");
+        git_create_worktree(root.clone(), "task/remove-link".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        fs::create_dir_all(target.join(".sutra")).unwrap();
+        fs::write(target.join(".sutra/task-link.json"), "{}\n").unwrap();
+
+        let removed = git_remove_worktree(root, target.to_string_lossy().into_owned(), false).unwrap();
+        assert_eq!(removed.status, "removed");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn failed_post_create_validation_cleanup_removes_worktree_and_new_branch() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().parent().unwrap().join("wt-create-cleanup");
+        git_create_worktree(root.clone(), "task/create-cleanup".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        let repo = Repository::open(&dir).unwrap();
+        let worktree = repo.find_worktree("wt-create-cleanup").unwrap();
+        cleanup_created_worktree(&repo, &worktree, "refs/heads/task/create-cleanup");
+        assert!(!target.exists());
+        assert!(repo.find_reference("refs/heads/task/create-cleanup").is_err());
+    }
+
+    #[test]
+    fn git_remove_worktree_reports_missing_without_recreating_or_touching_primary() {
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = dir.path().parent().unwrap().join("wt-remove-missing");
+        git_create_worktree(root.clone(), "task/remove-missing".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+
+        let result = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false).unwrap();
+        assert_eq!(result.status, "missing");
+        assert!(!target.exists());
+        assert_eq!(git_branch(root.clone()).unwrap().as_deref(), Some("main"));
+        assert!(Repository::open(&dir).unwrap().find_branch("task/remove-missing", BranchType::Local).is_ok());
     }
 }
