@@ -36,8 +36,14 @@ Retirement = remove the split spawn, promote preview on/off to **per-`Tab`** sta
    the process primary window) — NOT a frontend focus guard, which would drop the push when no
    Sutra window is focused. Cross-**process** wrong-window routing (agent MCP client pointed at a
    different root's `.sutra/endpoint` port) is **out of scope**.
-6. **`prompt_user` preserved:** its interactive iframe + postMessage reply path keeps working; it
-   rides the same inline-render path into the focused pane. Not broken, not deferred.
+6. **`prompt_user` preserved:** its interactive iframe (URL src, not srcdoc) + postMessage reply
+   path keeps working, rides the inline-render path into the focused pane, and **dismisses** after
+   the user submits (the reply bridge calls `dismissAgentPreview`). Not broken, not deferred.
+7. **`open_preview` opens the real file:** the MCP `open_preview` tool (an existing workspace file)
+   routes to the actual file (`openFileWithPreview`) with preview on — savable, `path` set — not an
+   ephemeral copy. `PreviewOpen` gains a `path` field to carry it; `.mmd` added to its accepted exts.
+8. **html refreshes live from buffer:** since inline html is srcdoc-from-text (no server),
+   `previewRefreshModeForName(html)` becomes `"live"`; a stale server-URL refresh path is thus avoided.
 
 ## Infeasible / rejected (killed against real code)
 
@@ -95,11 +101,12 @@ Retirement = remove the split spawn, promote preview on/off to **per-`Tab`** sta
   `"a.html"==="html"`, `"a.txt"===null`, `"a.ts"===null`.
   Verify: `npm test` → new `tests/preview.test.ts` case passes; suite green.
   Expected: `# tests` count increases, `# pass` == `# tests`, `# fail 0`.
-- **AC-2** Split purpose retired. `SplitPurpose` no longer has a `"preview"` member and
-  `togglePreview` no longer calls `openSplit("preview")`.
-  Verify: `rg -n '"preview"' src/editor.ts` returns no `SplitPurpose`/`openSplit` hit;
-  `rg -n 'openSplit\("preview"\)' src/editor.ts` → 0 matches.
-  Expected: 0 matches.
+- **AC-2** Preview/MCP paths no longer spawn a pane. The `"preview"` `SplitPurpose` is renamed to
+  `"blank"`; `togglePreview` and `showAgentPreview` render in the focused pane (no `openSplit`, no
+  `ensureRightPane`). `ensureRightPane` is preserved for `openFileInSide`/`moveTabToSide` side-splits.
+  Verify: `rg -n 'openSplit\("preview"\)' src/editor.ts` → 0; `rg -n 'ensureRightPane' src/editor.ts`
+  shows uses only in `openFileInSide`/`moveTabToSide`.
+  Expected: 0 `openSplit("preview")`; `ensureRightPane` absent from `togglePreview`/`showAgentPreview`.
 - **AC-3** Type + build clean. Verify: `npm run build` → exit 0.
   Expected: `vite build` completes, no `tsc` errors.
 - **AC-4** Rust unchanged-green + targeted emit compiles. Verify: `cd src-tauri && cargo test` → exit 0.
@@ -121,11 +128,14 @@ Retirement = remove the split spawn, promote preview on/off to **per-`Tab`** sta
 - **L-7** MCP `render_markdown` → new ephemeral tab in the focused pane, preview ON, **no split**,
   **no file on disk** (`git status` unchanged; no new file in the workspace).
 - **L-8** MCP `render_diagram` → ephemeral mermaid renders inline (no split).
-- **L-9** MCP `prompt_user` → interactive form renders and the reply returns to the agent (unbroken).
+- **L-9** MCP `prompt_user` → interactive form renders, the reply returns to the agent, and the form
+  **dismisses** (editor restored) after submit.
 - **L-10** Two windows (same process) → an MCP push renders in only the focused/primary window, not
   both. *(If one-window-per-process makes this unreproducible, record that observation in the ledger
   rather than passing it silently.)*
 - **L-11** `render_html` + url → still opens the browser pane (localhost preview unaffected).
+- **L-12** `open_preview` on a real `.md`/`.mmd`/`.html` workspace file → opens the **actual** file
+  (tab has a `path`, is savable/editable) with preview on — not an ephemeral copy.
 
 ## Out of scope (noted, not fixed)
 
