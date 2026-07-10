@@ -45,6 +45,9 @@ import {
   gitCreateWorktree,
   gitRemoveWorktree,
   gitWorktrees,
+  gitCommit,
+  gitStageFiles,
+  gitUnstageFiles,
   spawnWindow,
   onPreviewOpen,
   onDrive,
@@ -1325,6 +1328,28 @@ const tasksPanel = mountTasksPanel({
   },
   isWorktreeSetupActive: (task) => [...activeWorktreeSetups.values()].some((setup) => setup.root === task.root && setup.taskId === task.id),
   confirmDiscard: confirmNative,
+  // G3: explicit, single-shot stage+commit for a task handoff. Trust/root
+  // are rechecked immediately before the write (dispatchWorktree's seam),
+  // and this is invoked ONLY by the dialog's Commit button — never on
+  // Cancel, never automatically, and there is no push/remote call anywhere
+  // in this path.
+  commitHandoff: async (task, input) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    if (!input.paths.length) throw new Error("Select at least one file to commit.");
+    await gitStageFiles(root, input.paths);
+    const sha = await gitCommit(root, input.message);
+    return { sha };
+  },
+  // Explicit, separately-clicked unstage of files staged outside the
+  // handoff selection (git_commit commits the whole index, not just the
+  // paths just staged) — never called from Commit or Cancel.
+  unstageHandoffExtras: async (task, paths) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    if (!paths.length) return;
+    await gitUnstageFiles(root, paths);
+  },
   updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
     const trusted = await isWorkspaceTrusted(root).catch(() => false);
     return mayPersistTaskForRoot(root, currentRoot, trusted);

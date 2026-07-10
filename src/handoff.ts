@@ -120,3 +120,76 @@ export function unlinkedFiles(candidates: HandoffCandidates): HandoffCandidateFi
 export function staleWarnings(candidates: HandoffCandidates): HandoffCandidateFile[] {
   return candidates.files.filter((file) => file.stale);
 }
+
+// --- G3: dialog-facing pure helpers (path normalization, reviewed-hash
+// resolution, and commit message/trailer construction). Still no I/O — the
+// dialog (tasks-panel.ts) resolves live git/turn state and calls these. ---
+
+/** `gitStatus`/`gitIndexStatus` return workdir-joined absolute paths; every
+ * other path in this module (turn files, git write commands) is root-
+ * relative. Normalize before comparing or passing to computeHandoffCandidates.
+ * Already-relative paths pass through unchanged. */
+export function toRootRelativePath(root: string, path: string): string {
+  if (!path.startsWith("/")) return path;
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+/** Newest recorded after-hash per path across a task's linked turns (later
+ * turn id wins). This is the "reviewed baseline" HandoffInput.reviewedHashes
+ * expects — same xxh3 scheme rollback-dialog.ts already compares against
+ * live disk hashes for human-touched detection, so equality here means
+ * "matches what was reviewed" using the same proven comparison. */
+export function reviewedHashesFromTurns(linkedTurns: readonly Pick<Turn, "id" | "files">[]): HashMap {
+  const out: Record<string, string> = {};
+  for (const turn of [...linkedTurns].sort((a, b) => a.id - b.id)) {
+    for (const file of turn.files) {
+      if (file.afterHash != null) out[file.path] = file.afterHash;
+    }
+  }
+  return out;
+}
+
+/** Paths a handoff dialog should pre-check: linked, non-stale, non-deleted
+ * (mirrors HandoffCandidateFile.selectedByDefault). */
+export function initialHandoffSelection(candidates: HandoffCandidates): string[] {
+  return candidates.files.filter((file) => file.selectedByDefault).map((file) => file.path);
+}
+
+export function defaultHandoffSubject(title: string): string {
+  return title.trim() || "Handoff";
+}
+
+export interface HandoffTrailerInput {
+  taskId: string;
+  turnIds: readonly number[];
+  acceptance: readonly string[];
+  files: readonly string[];
+}
+
+/** Open-question default (decision 4): the commit body pre-fills with this
+ * editable evidence trailer — task id, linked turns, acceptance criteria,
+ * and the files being handed off. Purely descriptive text; the dialog's
+ * actual file selection is tracked separately and never re-derived from
+ * this string, so editing or trimming it has no effect on what gets staged. */
+export function defaultHandoffTrailer(input: HandoffTrailerInput): string {
+  const lines = ["Evidence:", `- Task: ${input.taskId}`];
+  lines.push(input.turnIds.length ? `- Linked turns: ${input.turnIds.join(", ")}` : "- Linked turns: none");
+  lines.push("- Acceptance:");
+  lines.push(...(input.acceptance.length ? input.acceptance.map((row) => `  - ${row}`) : ["  - (none recorded)"]));
+  lines.push("- Files:");
+  lines.push(...(input.files.length ? input.files.map((path) => `  - ${path}`) : ["  - (none selected)"]));
+  return lines.join("\n");
+}
+
+export function defaultHandoffBody(trailer: string): string {
+  return `\n${trailer}`;
+}
+
+/** Subject + body joined as a standard commit message; also the copyable
+ * handoff summary text — same content, either destination. */
+export function handoffCommitMessage(subject: string, body: string): string {
+  const s = subject.trim() || "Handoff";
+  const b = body.trim();
+  return b ? `${s}\n\n${b}` : s;
+}

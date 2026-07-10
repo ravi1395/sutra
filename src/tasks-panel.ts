@@ -1,8 +1,35 @@
 // Workspace task panel. Task creation/start stays explicit; it also exposes
 // durable turn links so historical attribution never depends on a terminal.
-import { gitBranch, ptyListAgents, type AgentTerminal, type RemovedWorktree, type Turn } from "./ipc";
+import {
+  clipboardWrite,
+  gitBranch,
+  gitIndexStatus,
+  gitStatus,
+  ptyListAgents,
+  turnDiskHashes,
+  type AgentTerminal,
+  type GitStatusEntry,
+  type IndexStatus,
+  type RemovedWorktree,
+  type Turn,
+} from "./ipc";
 import { isWorkspaceTrusted } from "./workspace";
 import { openWorktreeDispatchDialog, TaskWorktreeDispatchGate, type WorktreeDispatchInput } from "./worktree-dispatch";
+import {
+  computeHandoffCandidates,
+  defaultHandoffBody,
+  defaultHandoffSubject,
+  defaultHandoffTrailer,
+  handoffCommitMessage,
+  initialHandoffSelection,
+  reviewedFiles,
+  reviewedHashesFromTurns,
+  staleWarnings,
+  toRootRelativePath,
+  unlinkedFiles,
+  type HandoffCandidateFile,
+  type HandoffCandidates,
+} from "./handoff";
 import {
   acceptTask,
   addRequiredManualCheck,
@@ -17,6 +44,7 @@ import {
   setRequiredChecks,
   reconcileInterruptedWorktreeSetup,
   transitionTask,
+  type Evidence,
   type RequiredTaskCheck,
   type Task,
   type TurnReviewDisposition,
@@ -47,6 +75,17 @@ export interface TasksPanelOptions {
   cancelWorktreeSetup: (task: Task) => Promise<boolean>;
   isWorktreeSetupActive: (task: Task) => boolean;
   confirmDiscard: (message: string) => Promise<boolean>;
+  /** Explicit whole-file stage + commit for a handoff (G3). Trust/root are
+   * rechecked immediately before the Git write — same seam as
+   * dispatchWorktree — and this is called ONLY from the dialog's Commit
+   * button, never implicitly. No push/remote call exists on this path. */
+  commitHandoff: (task: Task, input: { paths: string[]; message: string }) => Promise<{ sha: string }>;
+  /** Explicit unstage of files staged outside the handoff selection.
+   * `git_commit` commits the WHOLE index, not just the paths just staged, so
+   * pre-existing stray staged content would otherwise be swept into the
+   * commit; this is offered only behind a visible warning + button, never
+   * automatic and never part of the Commit/Cancel path. */
+  unstageHandoffExtras: (task: Task, paths: string[]) => Promise<void>;
   onTasksChanged?: (tasks: readonly Task[]) => void;
 }
 
@@ -151,6 +190,22 @@ export async function acceptTaskWithAuthoritativeUpdate(args: {
 
 function updateTask(task: Task, patch: Pick<Task, "title" | "acceptance">): Task {
   return { ...task, ...patch, updatedAt: Math.max(Date.now(), task.updatedAt) };
+}
+
+/** Maps a handoff outcome onto the existing "manual" Evidence kind. tasks.ts
+ * (owned by a parallel phase) has no dedicated handoff-receipt kind yet;
+ * this is a deliberate, minimal stand-in until one lands. `checkId` is
+ * omitted so this can never be mistaken for satisfying a required manual
+ * check (latestManualEvidence only matches on checkId, or on checkId
+ * undefined AND an exact label match — this label is distinct from any
+ * user-authored required-check label in normal use). */
+export function handoffReceiptEvidence(args: { sha: string; subject: string; exportedOnly: boolean; recordedAt: number }): Evidence {
+  return {
+    kind: "manual",
+    label: args.exportedOnly ? "Handoff (external commit)" : "Handoff commit",
+    checkedAt: args.recordedAt,
+    note: `${args.sha} — ${args.subject}`,
+  };
 }
 
 /** Data rendered for a task's durable links. A turn can be absent from the
@@ -319,6 +374,249 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       const copy = entries.slice(); copy[idx] = nextTask; return copy;
     });
     if (wrote) showStatus(`Detached Turn ${turnId}.`);
+  }
+
+  /** Append a handoff receipt to task evidence. Never touches Git — used
+   * both after a Sutra-run commit and for an export-only external commit. */
+  async function recordHandoffReceipt(task: Task, sha: string, subject: string, exportedOnly: boolean): Promise<boolean> {
+    const root = getRoot();
+    if (!root) return false;
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) {
+      showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; handoff receipt was not saved.");
+      return false;
+    }
+    const row = handoffReceiptEvidence({ sha, subject, exportedOnly, recordedAt: Date.now() });
+    return updateTaskMetadata(root, (entries) => {
+      const idx = entries.findIndex((e) => e.id === task.id);
+      if (idx < 0) return entries;
+      const nextTask: Task = { ...entries[idx], evidence: [...entries[idx].evidence, row], updatedAt: Math.max(Date.now(), entries[idx].updatedAt) };
+      const copy = entries.slice(); copy[idx] = nextTask; return copy;
+    });
+  }
+
+  /** Builds and opens the handoff dialog: resolves live git status + linked
+   * turn snapshot hashes, computes candidates (G1), then renders. Read-only —
+   * no Git write happens until the dialog's explicit Commit button. */
+  async function openHandoffDialog(task: Task): Promise<void> {
+    const root = getRoot();
+    if (!root || root !== task.root) return showStatus("No workspace open — handoff is unavailable.");
+    const allowed = await isWorkspaceTrusted(root).catch(() => false);
+    if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus("Tasks are read-only until this workspace is trusted.");
+
+    const linkedTurns = getTurns(root).filter((t) => task.turnIds.includes(t.id));
+    const [rawStatus, resolvedIndexStatus] = await Promise.all([
+      isGitRoot ? gitStatus(root) : Promise.resolve<GitStatusEntry[] | null>(null),
+      gitIndexStatus(root).catch((): IndexStatus => ({ staged: [], unstaged: [] })),
+    ]);
+    const normalizedStatus = rawStatus ? rawStatus.map((entry) => ({ path: toRootRelativePath(root, entry.path), status: entry.status })) : null;
+    const reviewedHashes = reviewedHashesFromTurns(linkedTurns);
+    const candidatePaths = normalizedStatus ? normalizedStatus.filter((entry) => entry.status !== "D").map((entry) => entry.path) : [];
+    const currentHashes = candidatePaths.length
+      ? (Object.fromEntries((await turnDiskHashes(root, candidatePaths)).filter(([, hash]) => hash != null)) as Record<string, string>)
+      : {};
+    const candidates = computeHandoffCandidates({ gitStatus: normalizedStatus, linkedTurns, reviewedHashes, currentHashes });
+
+    if (getRoot() !== root) return showStatus("Workspace changed; handoff was not opened.");
+    renderHandoffDialog(task, candidates, resolvedIndexStatus);
+  }
+
+  /** Native <dialog>, self-contained — mirrors openWorktreeDispatchDialog's
+   * idiom. Checkbox toggles are pure local state (no live staging); Cancel
+   * calls dialog.close() only, never a Git function. Commit stages exactly
+   * the checked paths then commits; a stray-staged warning offers an
+   * explicit (never automatic) unstage of anything staged outside the
+   * selection, since git_commit commits the whole index. */
+  function renderHandoffDialog(task: Task, candidates: HandoffCandidates, indexStatus: IndexStatus): void {
+    const root = task.root;
+    const dialog = document.createElement("dialog");
+    dialog.className = "handoff-dialog";
+    const form = document.createElement("form");
+    form.method = "dialog";
+    const heading = document.createElement("h2");
+    heading.textContent = `Prepare handoff — ${task.title}`;
+    const statusEl = document.createElement("p");
+    statusEl.className = "handoff-dialog-status";
+    form.append(heading, statusEl);
+
+    const selected = new Set(initialHandoffSelection(candidates));
+    const strayEl = document.createElement("p");
+    strayEl.className = "handoff-stray-staged";
+    const unstageBtn = document.createElement("button");
+    unstageBtn.type = "button";
+    unstageBtn.textContent = "Unstage those files";
+
+    const commitBtn = document.createElement("button");
+    commitBtn.type = "button";
+    commitBtn.textContent = "Commit";
+
+    function refreshCommitEnabled(): void {
+      commitBtn.disabled = !candidates.enabled || selected.size === 0;
+    }
+
+    function strayStagedPaths(): string[] {
+      return indexStatus.staged.map((entry) => toRootRelativePath(root, entry.path)).filter((path) => !selected.has(path));
+    }
+    function refreshStray(): void {
+      const stray = strayStagedPaths();
+      strayEl.textContent = "";
+      if (stray.length) {
+        strayEl.append(`${stray.length} file(s) already staged outside this selection would also be included in the commit (git commits the whole index). `, unstageBtn);
+      }
+      unstageBtn.disabled = stray.length === 0;
+      refreshCommitEnabled();
+    }
+
+    function renderFileGroup(title: string, files: readonly HandoffCandidateFile[], note?: (file: HandoffCandidateFile) => string): HTMLElement | null {
+      if (!files.length) return null;
+      const group = document.createElement("div");
+      group.className = "handoff-file-group";
+      const label = document.createElement("strong");
+      label.textContent = title;
+      group.appendChild(label);
+      for (const file of files) {
+        const row = document.createElement("label");
+        row.className = "handoff-file-row";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selected.has(file.path);
+        checkbox.onchange = () => {
+          if (checkbox.checked) selected.add(file.path); else selected.delete(file.path);
+          refreshStray();
+        };
+        const text = document.createElement("span");
+        text.textContent = `${file.path}${file.deleted ? " (deleted)" : ""}${note ? ` — ${note(file)}` : ""}`;
+        row.append(checkbox, text);
+        group.appendChild(row);
+      }
+      return group;
+    }
+
+    if (candidates.enabled) {
+      const reviewed = reviewedFiles(candidates).filter((file) => !file.stale);
+      const stale = staleWarnings(candidates);
+      const unlinked = unlinkedFiles(candidates);
+      const groups = [
+        renderFileGroup("Reviewed (linked turns)", reviewed),
+        renderFileGroup("Stale — changed after review; resolve or leave excluded", stale, () => "current content no longer matches the reviewed baseline"),
+        renderFileGroup("Unlinked — no reviewing turn", unlinked),
+      ].filter((group): group is HTMLElement => group !== null);
+      for (const group of groups) form.appendChild(group);
+      form.appendChild(strayEl);
+    } else {
+      const disabledMsg = document.createElement("p");
+      disabledMsg.textContent = candidates.disabledReason ?? "Nothing to hand off.";
+      form.appendChild(disabledMsg);
+    }
+
+    const trailer = defaultHandoffTrailer({ taskId: task.id, turnIds: task.turnIds, acceptance: task.acceptance, files: [...selected] });
+    const subjectLabel = document.createElement("label");
+    subjectLabel.textContent = "Subject";
+    const subjectInput = document.createElement("input");
+    subjectInput.value = defaultHandoffSubject(task.title);
+    subjectLabel.appendChild(subjectInput);
+    const bodyLabel = document.createElement("label");
+    bodyLabel.textContent = "Body";
+    const bodyInput = document.createElement("textarea");
+    bodyInput.rows = 8;
+    bodyInput.value = defaultHandoffBody(trailer);
+    bodyLabel.appendChild(bodyInput);
+    form.append(subjectLabel, bodyLabel);
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy summary";
+    copyBtn.onclick = () => void clipboardWrite(handoffCommitMessage(subjectInput.value, bodyInput.value)).then(
+      () => { statusEl.textContent = "Summary copied."; },
+      (error: unknown) => { statusEl.textContent = `Could not copy: ${String(error)}`; },
+    );
+    form.appendChild(copyBtn);
+
+    unstageBtn.onclick = () => {
+      const stray = strayStagedPaths();
+      if (!stray.length) return;
+      unstageBtn.disabled = true;
+      void opts.unstageHandoffExtras(task, stray).then(() => {
+        indexStatus = { staged: indexStatus.staged.filter((entry) => !stray.includes(toRootRelativePath(root, entry.path))), unstaged: indexStatus.unstaged };
+        refreshStray();
+      }).catch((error: unknown) => {
+        statusEl.textContent = `Could not unstage: ${String(error)}`;
+        unstageBtn.disabled = false;
+      });
+    };
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.value = "cancel";
+
+    const shaLabel = document.createElement("label");
+    shaLabel.textContent = "Commit SHA";
+    const shaInput = document.createElement("input");
+    shaLabel.appendChild(shaInput);
+
+    commitBtn.onclick = () => {
+      const paths = [...selected];
+      if (!paths.length) return;
+      const message = handoffCommitMessage(subjectInput.value, bodyInput.value);
+      commitBtn.disabled = true;
+      statusEl.textContent = "Committing…";
+      void opts.commitHandoff(task, { paths, message })
+        .then(async ({ sha }) => {
+          statusEl.textContent = `Committed ${sha}. Recording receipt…`;
+          const recorded = await recordHandoffReceipt(task, sha, subjectInput.value.trim() || "Handoff", false);
+          if (!recorded) {
+            // The commit already happened and cannot be undone from here;
+            // surface the SHA so it is never silently lost — the export-only
+            // path below can record it once trust/root is restored.
+            statusEl.textContent = `Committed ${sha}, but the receipt was not saved (workspace trust changed). Use "Record a commit made outside Sutra" below with this SHA.`;
+            shaInput.value = sha;
+            commitBtn.disabled = true;
+            return;
+          }
+          dialog.close();
+        })
+        .catch((error: unknown) => {
+          statusEl.textContent = String(error);
+          commitBtn.disabled = false;
+        });
+    };
+
+    const actions = document.createElement("div");
+    actions.className = "handoff-actions";
+    actions.append(cancelBtn, commitBtn);
+    form.appendChild(actions);
+
+    const externalHeading = document.createElement("strong");
+    externalHeading.textContent = "Or record a commit made outside Sutra";
+    const recordBtn = document.createElement("button");
+    recordBtn.type = "button";
+    recordBtn.textContent = "Record receipt";
+    recordBtn.onclick = () => {
+      const sha = shaInput.value.trim();
+      if (!sha) { statusEl.textContent = "Enter the commit SHA to record."; return; }
+      recordBtn.disabled = true;
+      void recordHandoffReceipt(task, sha, subjectInput.value.trim() || "Handoff", true).then((recorded) => {
+        recordBtn.disabled = false;
+        if (recorded) { statusEl.textContent = `Recorded external handoff ${sha}.`; dialog.close(); }
+        else statusEl.textContent = "Could not record receipt; check workspace trust and try again.";
+      });
+    };
+    form.append(externalHeading, shaLabel, recordBtn);
+
+    // Cancel is the only submitter that ever reaches dialog.close() from this
+    // handler — every path above that mutates Git or task metadata is a
+    // type="button" click, never a form submission, so it can never fire
+    // as a side effect of Cancel/Esc/backdrop-adjacent submit behavior.
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if ((event.submitter as HTMLButtonElement | null)?.value === "cancel") dialog.close();
+    };
+
+    dialog.appendChild(form);
+    dialog.onclose = () => dialog.remove();
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    refreshStray();
   }
 
   async function start(task: Task): Promise<void> {
@@ -689,6 +987,15 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     save.disabled = !trusted || loading;
     save.onclick = () => void saveEdits(task, title.value, acceptance.value);
     actions.appendChild(save);
+    // Decision 7: handoff is gated on workspace trust only, same as every
+    // other write-capable action here — not on task status or isGitRoot, so
+    // an export-only receipt (criterion 3) stays reachable even when there's
+    // no usable git status to diff against.
+    const handoff = el("button");
+    handoff.textContent = "Handoff";
+    handoff.disabled = !trusted || loading;
+    handoff.onclick = () => void openHandoffDialog(task);
+    actions.appendChild(handoff);
     if (task.status === "draft" || task.status === "ready") {
       const startBtn = el("button");
       startBtn.textContent = "Start";

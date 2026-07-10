@@ -2,8 +2,15 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   computeHandoffCandidates,
+  defaultHandoffBody,
+  defaultHandoffSubject,
+  defaultHandoffTrailer,
+  handoffCommitMessage,
+  initialHandoffSelection,
   reviewedFiles,
+  reviewedHashesFromTurns,
   staleWarnings,
+  toRootRelativePath,
   unlinkedFiles,
   type HandoffInput,
 } from "../src/handoff";
@@ -156,4 +163,92 @@ test("multiple linked turns union their touched files", () => {
     currentHashes: { "a.ts": "h1", "b.ts": "h2" },
   });
   assert.equal(result.files.every((f) => f.origin === "linked" && f.selectedByDefault), true);
+});
+
+// --- G3: dialog-facing pure helpers ---
+
+test("toRootRelativePath strips the workdir prefix git_status/git_index_status return", () => {
+  assert.equal(toRootRelativePath("/repo", "/repo/src/a.ts"), "src/a.ts");
+  assert.equal(toRootRelativePath("/repo/", "/repo/src/a.ts"), "src/a.ts");
+});
+
+test("toRootRelativePath passes through already-relative paths unchanged", () => {
+  assert.equal(toRootRelativePath("/repo", "src/a.ts"), "src/a.ts");
+});
+
+test("toRootRelativePath leaves a path outside root untouched rather than guessing", () => {
+  assert.equal(toRootRelativePath("/repo", "/other/src/a.ts"), "/other/src/a.ts");
+});
+
+test("reviewedHashesFromTurns takes the newest after-hash per path across linked turns", () => {
+  const turns: Pick<Turn, "id" | "files">[] = [
+    { id: 1, files: [{ path: "a.ts", afterHash: "h1", snapshotted: true }] },
+    { id: 2, files: [{ path: "a.ts", afterHash: "h2", snapshotted: true }] },
+  ];
+  assert.deepEqual(reviewedHashesFromTurns(turns), { "a.ts": "h2" });
+});
+
+test("reviewedHashesFromTurns is order-independent — sorts by turn id, not array order", () => {
+  const turns: Pick<Turn, "id" | "files">[] = [
+    { id: 2, files: [{ path: "a.ts", afterHash: "h2", snapshotted: true }] },
+    { id: 1, files: [{ path: "a.ts", afterHash: "h1", snapshotted: true }] },
+  ];
+  assert.deepEqual(reviewedHashesFromTurns(turns), { "a.ts": "h2" });
+});
+
+test("reviewedHashesFromTurns skips files with no recorded after-hash", () => {
+  const turns: Pick<Turn, "id" | "files">[] = [{ id: 1, files: [{ path: "a.ts", snapshotted: false }] }];
+  assert.deepEqual(reviewedHashesFromTurns(turns), {});
+});
+
+test("initialHandoffSelection pre-checks only linked, non-stale, non-deleted files", () => {
+  const result = computeHandoffCandidates({
+    gitStatus: [status("a.ts", "M"), status("b.ts", "M"), status("c.ts", "D")],
+    linkedTurns: [turn(1, ["a.ts", "b.ts", "c.ts"])],
+    reviewedHashes: { "a.ts": "h1", "b.ts": "stale-baseline" },
+    currentHashes: { "a.ts": "h1", "b.ts": "drifted" },
+  });
+  assert.deepEqual(initialHandoffSelection(result), ["a.ts"]);
+});
+
+test("defaultHandoffSubject falls back to a stable label for a blank title", () => {
+  assert.equal(defaultHandoffSubject("  Fix the thing  "), "Fix the thing");
+  assert.equal(defaultHandoffSubject("   "), "Handoff");
+});
+
+test("defaultHandoffTrailer renders task id, linked turns, acceptance, and files", () => {
+  const trailer = defaultHandoffTrailer({
+    taskId: "task-1",
+    turnIds: [3, 1],
+    acceptance: ["Criterion A"],
+    files: ["src/a.ts"],
+  });
+  assert.match(trailer, /^Evidence:/);
+  assert.match(trailer, /- Task: task-1/);
+  assert.match(trailer, /- Linked turns: 3, 1/);
+  assert.match(trailer, /- Acceptance:\n {2}- Criterion A/);
+  assert.match(trailer, /- Files:\n {2}- src\/a\.ts/);
+});
+
+test("defaultHandoffTrailer renders explicit placeholders for empty turns/acceptance/files", () => {
+  const trailer = defaultHandoffTrailer({ taskId: "task-1", turnIds: [], acceptance: [], files: [] });
+  assert.match(trailer, /- Linked turns: none/);
+  assert.match(trailer, /- \(none recorded\)/);
+  assert.match(trailer, /- \(none selected\)/);
+});
+
+test("defaultHandoffBody leads with the trailer, editable and never re-derived", () => {
+  assert.equal(defaultHandoffBody("Evidence:\n- Task: t1"), "\nEvidence:\n- Task: t1");
+});
+
+test("handoffCommitMessage joins subject and a non-empty body with a blank line", () => {
+  assert.equal(handoffCommitMessage("Ship it", "\nEvidence:\n- Task: t1"), "Ship it\n\nEvidence:\n- Task: t1");
+});
+
+test("handoffCommitMessage omits the blank-line join when the body is empty after trimming", () => {
+  assert.equal(handoffCommitMessage("Ship it", "   "), "Ship it");
+});
+
+test("handoffCommitMessage falls back to 'Handoff' for a blank subject", () => {
+  assert.equal(handoffCommitMessage("  ", "notes"), "Handoff\n\nnotes");
 });
