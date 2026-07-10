@@ -349,6 +349,18 @@ fn release_task_check(id: &str) {
     CANCELLED_RUNS.lock().unwrap().remove(id);
 }
 
+/// Releases a task-check reservation when dropped, including during a panic
+/// unwind inside the `spawn_blocking` worker — a bare post-call
+/// `release_task_check` would be skipped on panic, leaking the
+/// (root,task,automation) slot until app restart.
+struct TaskCheckReservationGuard(String);
+
+impl Drop for TaskCheckReservationGuard {
+    fn drop(&mut self) {
+        release_task_check(&self.0);
+    }
+}
+
 fn take_cancelled(id: &str) -> bool {
     CANCELLED_RUNS.lock().unwrap().remove(id)
 }
@@ -382,10 +394,10 @@ pub async fn task_check_run(
         return Err("Required task check is already running".into());
     }
     let id_for_run = id.clone();
-    let id_for_release = id.clone();
+    let id_for_guard = id.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _release_guard = TaskCheckReservationGuard(id_for_guard);
         run_to_completion(id_for_run, cmd, root, timeout_ms, app);
-        release_task_check(&id_for_release);
     });
     Ok(id)
 }
@@ -1013,6 +1025,34 @@ mod tests {
 
         assert!(reserve_task_check(&id), "a later same-id check can start cleanly");
         assert!(!take_cancelled(&id), "no stale cancellation reaches the rerun");
+        release_task_check(&id);
+    }
+    #[test]
+    fn task_check_guard_releases_reservation_on_drop() {
+        let id = format!("task-check:/runner-test-guard-{}:task-1:unit", std::process::id());
+        release_task_check(&id);
+        assert!(reserve_task_check(&id));
+        {
+            let _guard = TaskCheckReservationGuard(id.clone());
+        }
+        assert!(reserve_task_check(&id), "guard drop released the reservation");
+        release_task_check(&id);
+    }
+    #[test]
+    fn task_check_guard_releases_reservation_on_panic_unwind() {
+        // Regression for W2: a panic inside the spawn_blocking worker must not
+        // leak the reservation until app restart. catch_unwind stands in for
+        // spawn_blocking's own panic capture, exercising the same unwind path
+        // that runs the guard's Drop.
+        let id = format!("task-check:/runner-test-guard-panic-{}:task-1:unit", std::process::id());
+        release_task_check(&id);
+        assert!(reserve_task_check(&id));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = TaskCheckReservationGuard(id.clone());
+            panic!("simulated worker panic");
+        }));
+        assert!(result.is_err(), "the panic still propagates past the guard");
+        assert!(reserve_task_check(&id), "a panic-time drop still released the reservation");
         release_task_check(&id);
     }
     #[test]

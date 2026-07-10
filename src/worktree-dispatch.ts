@@ -58,18 +58,18 @@ export function worktreeCleanupGuard(status: string, discardConfirmed: boolean):
   return null;
 }
 
-/** Only one explicit worktree creation may be in flight for a task. */
+/** Only one explicit worktree creation may be in flight per task; unrelated tasks may dispatch concurrently. */
 export class TaskWorktreeDispatchGate {
-  private taskId: string | null = null;
+  private inFlight = new Set<string>();
 
   claim(taskId: string): boolean {
-    if (this.taskId !== null) return false;
-    this.taskId = taskId;
+    if (this.inFlight.has(taskId)) return false;
+    this.inFlight.add(taskId);
     return true;
   }
 
   release(taskId: string): void {
-    if (this.taskId === taskId) this.taskId = null;
+    this.inFlight.delete(taskId);
   }
 }
 

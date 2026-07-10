@@ -33,6 +33,21 @@ test("only one worktree creation can be in flight for a task", () => {
   assert.equal(gate.claim("task-42"), true);
 });
 
+test("dispatch gate tracks in-flight tasks independently", () => {
+  const gate = new TaskWorktreeDispatchGate();
+  assert.equal(gate.claim("task-a"), true, "task A claims its own slot");
+  assert.equal(gate.claim("task-b"), true, "unrelated task B is not blocked by task A");
+  assert.equal(gate.claim("task-a"), false, "task A cannot claim twice while in flight");
+  assert.equal(gate.claim("task-b"), false, "task B cannot claim twice while in flight");
+
+  gate.release("task-a");
+  assert.equal(gate.claim("task-b"), false, "releasing task A does not free task B");
+  assert.equal(gate.claim("task-a"), true, "task A can claim again after release");
+
+  gate.release("task-b");
+  assert.equal(gate.claim("task-b"), true, "task B can claim again after its own release");
+});
+
 test("cleanup requires explicit discard for a running task", () => {
   assert.match(worktreeCleanupGuard("running", false) ?? "", /confirm discard/i);
   assert.equal(worktreeCleanupGuard("running", true), null);

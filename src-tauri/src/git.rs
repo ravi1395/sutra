@@ -553,7 +553,26 @@ pub fn git_create_worktree(
         Ok(worktree) => worktree,
         Err(error) => {
             // All user input was preflighted, but a late filesystem/libgit2
-            // failure must not leave the newly-created branch behind.
+            // failure (disk full, checkout conflict) can strike after the
+            // `.git/worktrees/<name>` admin entry and/or a partial target dir
+            // already exist. Left behind, they permanently fail the
+            // `find_worktree` preflight above on every retry ("A worktree
+            // already uses that target directory name.") until a manual
+            // `git worktree prune`. Best-effort clean both before removing the
+            // branch ref; every step here is best-effort so a secondary
+            // failure never masks the original error below.
+            if let Ok(leaked) = repo.find_worktree(worktree_name) {
+                let mut prune_options = WorktreePruneOptions::new();
+                prune_options.valid(true).working_tree(true).locked(true);
+                let _ = leaked.prune(Some(&mut prune_options));
+            }
+            // `find_worktree` requires a well-formed admin entry to open it at
+            // all, so a failure early enough to leave `.git/worktrees/<name>`
+            // half-written can make the call above silently no-op. Remove that
+            // directory by path too, or the `find_worktree` preflight above
+            // still finds it stuck there on retry.
+            let _ = fs::remove_dir_all(repo.path().join("worktrees").join(worktree_name));
+            let _ = fs::remove_dir_all(&target);
             let _ = repo.find_reference(&branch_ref).and_then(|mut reference| reference.delete());
             return Err(error.to_string());
         }
@@ -838,6 +857,50 @@ mod tests {
         cleanup_created_worktree(&repo, &worktree, "refs/heads/task/create-cleanup");
         assert!(!target.exists());
         assert!(repo.find_reference("refs/heads/task/create-cleanup").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_create_worktree_cleans_up_leaked_admin_entry_after_late_add_failure() {
+        use std::os::unix::fs::symlink;
+
+        let dir = repo_with_branch();
+        let root = dir.path().to_string_lossy().into_owned();
+        // Unique per-test-run name (like the sibling tests above): `dir`'s
+        // parent is the shared OS temp root, so a fixed leaf name would
+        // collide with other tests running concurrently in this process.
+        let worktree_name = format!("leak-target-{}", dir.path().file_name().unwrap().to_string_lossy());
+        let target = dir.path().parent().unwrap().join(".sutra-worktrees").join(&worktree_name);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // A dangling symlink at the leaf passes `target.exists()` (which
+        // follows symlinks and reports false when the destination is
+        // missing) but still occupies the directory entry, so libgit2's
+        // working-tree checkout at that exact path fails deterministically
+        // *after* it has already written the `.git/worktrees/<name>` admin
+        // entry -- reproducing the disk-full / checkout-conflict failure
+        // mode from W1 without needing to fake a real disk-full condition.
+        symlink(dir.path().join("does-not-exist"), &target).unwrap();
+        assert!(!target.exists(), "dangling symlink must not trip the early exists() preflight");
+
+        let error = git_create_worktree(root.clone(), "task/leak".into(), target.to_string_lossy().into_owned(), "HEAD".into());
+        assert!(error.is_err(), "checkout onto the occupied leaf name still fails");
+
+        let repo = Repository::open(&dir).unwrap();
+        // `find_worktree(...).is_err()` alone would pass even for a leaked
+        // *partial* admin entry (it can't parse a half-written one either),
+        // so assert directly on the filesystem artifact the fix removes.
+        assert!(
+            !repo.path().join("worktrees").join(&worktree_name).exists(),
+            "the admin dir must not be leaked"
+        );
+        assert!(repo.find_reference("refs/heads/task/leak").is_err(), "the branch must not be leaked");
+
+        // The fix's own best-effort cleanup already clears the blocking leaf
+        // (`fs::remove_dir_all` on the dangling symlink); a leftover from an
+        // unpatched build would still need this before retrying.
+        let _ = fs::remove_file(&target);
+        let retried = git_create_worktree(root, "task/leak".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        assert_eq!(retried.branch, "task/leak");
     }
 
     #[test]
