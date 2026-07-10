@@ -7,3 +7,7 @@ test("previewKind still classifies md and html", () => {
   assert.equal(previewKind("a.html"), "html");
   assert.equal(previewKind("a.txt"), null);
 });
+
+test("previewKind classifies mmd as diagram", () => {
+  assert.equal(previewKind("a.mmd"), "diagram");
+});

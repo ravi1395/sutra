@@ -194,6 +194,7 @@ export interface PreviewOpenPayload {
   kind: PreviewOpenKind;
   url?: string; // present for file-backed (html)
   source?: string; // present for inline (md, diagram)
+  path?: string; // present when open_preview resolved a real workspace file
 }
 export const onPreviewOpen = (
   cb: (p: PreviewOpenPayload) => void,

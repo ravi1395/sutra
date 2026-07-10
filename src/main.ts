@@ -300,11 +300,6 @@ async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
   if (!result.ok) await alertNative(`Could not stage visual feedback: ${result.reason}`);
 }
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
-editor.onHtmlPreview = (url) => {
-  setBrowser(true);
-  browser.show();
-  browser.loadDirect(url);
-};
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
@@ -314,17 +309,24 @@ terminals.onLinkActivate = (url: string) => {
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
-// HTML → browser pane (focused); md/diagram → editor preview split.
+// open_preview (real file) → opens the actual file with preview on; html+url
+// (render_html) → browser pane (focused); md/diagram source → ephemeral tab.
 void onPreviewOpen((p) => {
+  if (p.path) {
+    void editor.openFileWithPreview(p.path).catch((e) =>
+      console.error("open_preview failed", e),
+    );
+    return;
+  }
   if (p.kind === "html" && p.url) {
     setBrowser(true);
     browser.show();
     browser.loadDirect(p.url);
     return;
   }
-  void editor.showAgentPreview(p).catch((e) =>
-    console.error("agent preview failed", e),
-  );
+  void editor
+    .openEphemeralPreview(p.kind === "diagram" ? "diagram" : "md", p.source ?? "")
+    .catch((e) => console.error("agent preview failed", e));
 });
 
 // Subscribe to MCP drive events emitted by the Rust MCP server tools.
@@ -403,6 +405,8 @@ window.addEventListener("message", (e) => {
   const d = e.data as { __sutraPrompt?: boolean; id?: number; data?: unknown };
   if (d && d.__sutraPrompt === true && typeof d.id === "number") {
     void mcpUiReply(d.id, d.data ?? {});
+    editor.dismissAgentPreview();
+    promptOrigin = null;
   }
 });
 
