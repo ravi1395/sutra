@@ -276,7 +276,6 @@ fn percent_decode_query(s: &str) -> String {
 struct Head {
     start_line: String,
     headers: Vec<(String, String)>,
-    raw: Vec<u8>,
 }
 impl Head {
     fn get(&self, name: &str) -> Option<&str> {
@@ -322,7 +321,7 @@ fn read_head(s: &mut TcpStream) -> io::Result<Option<Head>> {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
-    Ok(Some(Head { start_line, headers, raw: buf }))
+    Ok(Some(Head { start_line, headers }))
 }
 
 fn write_status(s: &mut TcpStream, status: &str, msg: &str) {
