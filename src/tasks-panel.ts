@@ -7,12 +7,13 @@ import {
   acceptTask,
   addRequiredManualCheck,
   attachTurnToTask,
+  claimRunningTask,
   completionState,
   detachTurnFromTask,
   loadTasks,
   manualCheckIsChecked,
   recordManualCheck,
-  saveTasks,
+  rootTask,
   setRequiredChecks,
   reconcileInterruptedWorktreeSetup,
   transitionTask,
@@ -54,7 +55,7 @@ export type TaskCheckActionResult = { ok: true } | { ok: false; reason: string }
 export interface TasksPanelHandle {
   show(): void;
   hide(): void;
-  reload(): Promise<void>;
+  reload(skipReconcile?: boolean): Promise<void>;
   dispose(): void;
 }
 
@@ -146,10 +147,6 @@ export async function acceptTaskWithAuthoritativeUpdate(args: {
   return committed && result === "accepted" ? "accepted" : "rejected";
 }
 
-function rootTask(tasks: readonly Task[], root: string): Task | undefined {
-  return tasks.find((task) => task.root === root && task.status === "running");
-}
-
 function updateTask(task: Task, patch: Pick<Task, "title" | "acceptance">): Task {
   return { ...task, ...patch, updatedAt: Math.max(Date.now(), task.updatedAt) };
 }
@@ -207,7 +204,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     render();
   }
 
-  async function reload(): Promise<void> {
+  async function reload(skipReconcile = false): Promise<void> {
     const root = getRoot();
     loading = true;
     render();
@@ -227,13 +224,19 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     ]);
     if (getRoot() !== root) return;
     let loadedTasks = loaded.tasks.filter((task) => task.root === root);
-    if (!reconciledSetupRoots.has(root) && nextTrusted) {
+    // skipReconcile guards re-entrancy: the queue-completion reload (main.ts)
+    // runs from INSIDE the metadata queue, so it must never enqueue the
+    // reconcile write — doing so would deadlock the per-root chain. Reconcile
+    // is driven only by top-level reloads (workspace open, trust grant).
+    if (!skipReconcile && !reconciledSetupRoots.has(root) && nextTrusted) {
       reconciledSetupRoots.add(root);
-      const interrupted = loadedTasks.map((task) => isWorktreeSetupActive(task) ? task : reconcileInterruptedWorktreeSetup(task));
-      if (interrupted.some((task, index) => task !== loadedTasks[index])) {
-        await saveTasks(root, interrupted).catch(() => {});
-        loadedTasks = interrupted;
-      }
+      // Sole non-user-initiated write: routed through the same serialized
+      // queue as every other writer so it cannot race a concurrent turn close.
+      const wrote = await updateTaskMetadata(root, (entries) => {
+        const next = entries.map((task) => isWorktreeSetupActive(task) ? task : reconcileInterruptedWorktreeSetup(task));
+        return next.some((task, index) => task !== entries[index]) ? next : entries;
+      }).catch(() => false);
+      if (wrote && getRoot() === root) loadedTasks = (await loadTasks(root)).tasks.filter((task) => task.root === root);
     }
     tasks = loadedTasks;
     trusted = nextTrusted;
@@ -245,23 +248,9 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
     render();
   }
 
-  async function persist(root: string, next: readonly Task[]): Promise<boolean> {
-    if (getRoot() !== root) return false;
-    try {
-      await saveTasks(root, next);
-      if (getRoot() !== root) return false;
-      tasks = [...next];
-      return true;
-    } catch (error) {
-      showStatus(`Could not save tasks: ${String(error)}`);
-      return false;
-    }
-  }
-
   async function createFromComposer(): Promise<void> {
     const root = getRoot();
     if (!root) return showStatus("No workspace open — tasks need a workspace root.");
-    const snapshot = tasks;
     const trustedNow = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), trustedNow)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; task was not created.");
     const draft = getComposerDraft();
@@ -273,53 +262,66 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       turnIds: [], annotationIds: [], evidence: [],
     };
     if (getRoot() !== root) return showStatus("Workspace changed; task was not created.");
-    if (await persist(root, [...snapshot, task])) showStatus("Task draft created. Edit it, choose an existing agent terminal, then Start.");
+    const wrote = await updateTaskMetadata(root, (entries) => [...entries, task]);
+    if (wrote) showStatus("Task draft created. Edit it, choose an existing agent terminal, then Start.");
   }
 
   async function saveEdits(task: Task, title: string, acceptance: string): Promise<void> {
     const root = getRoot();
     if (!root) return;
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) {
       showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; task edit was not saved.");
       return;
     }
-    const nextTask = updateTask(task, {
-      title: title.trim() || "Untitled task",
-      acceptance: acceptance.split(/\r?\n/).map((row) => row.trim()).filter(Boolean),
-    });
     if (getRoot() !== root) return;
-    await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry));
+    await updateTaskMetadata(root, (entries) => {
+      const idx = entries.findIndex((e) => e.id === task.id);
+      if (idx < 0) return entries;
+      const nextTask = updateTask(entries[idx], {
+        title: title.trim() || "Untitled task",
+        acceptance: acceptance.split(/\r?\n/).map((row) => row.trim()).filter(Boolean),
+      });
+      if (nextTask === entries[idx]) return entries;
+      const copy = entries.slice(); copy[idx] = nextTask; return copy;
+    });
   }
 
   async function attachHistoricalTurn(task: Task, turnId: number): Promise<void> {
     const root = getRoot();
     if (!root) return;
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus("Tasks are read-only until this workspace is trusted.");
-    const turn = attachableHistoricalTurns(snapshot, root, getTurns(root)).find((candidate) => candidate.id === turnId);
+    const turn = attachableHistoricalTurns(tasks, root, getTurns(root)).find((candidate) => candidate.id === turnId);
     if (!turn) return showStatus("That historical turn is no longer available to attach.");
-    const nextTask = attachTurnToTask(task, turn);
-    if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Attached Turn ${turn.id}.`);
+    const wrote = await updateTaskMetadata(root, (entries) => {
+      const idx = entries.findIndex((e) => e.id === task.id);
+      if (idx < 0) return entries;
+      const nextTask = attachTurnToTask(entries[idx], turn);
+      if (nextTask === entries[idx]) return entries;
+      const copy = entries.slice(); copy[idx] = nextTask; return copy;
+    });
+    if (wrote) showStatus(`Attached Turn ${turn.id}.`);
   }
 
   async function detachHistoricalTurn(task: Task, turnId: number): Promise<void> {
     const root = getRoot();
     if (!root) return;
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus("Tasks are read-only until this workspace is trusted.");
-    const nextTask = detachTurnFromTask(task, turnId);
-    if (nextTask === task) return;
-    if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Detached Turn ${turnId}.`);
+    const wrote = await updateTaskMetadata(root, (entries) => {
+      const idx = entries.findIndex((e) => e.id === task.id);
+      if (idx < 0) return entries;
+      const nextTask = detachTurnFromTask(entries[idx], turnId);
+      if (nextTask === entries[idx]) return entries;
+      const copy = entries.slice(); copy[idx] = nextTask; return copy;
+    });
+    if (wrote) showStatus(`Detached Turn ${turnId}.`);
   }
 
   async function start(task: Task): Promise<void> {
     const root = getRoot();
     if (!root) return showStatus("No workspace open — tasks cannot start.");
-    const snapshot = tasks;
     const selectedTargetId = targetId;
     const selectedSubmit = submit;
     // Claim synchronously, before the trust await, so rapid clicks cannot
@@ -334,24 +336,26 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
         return;
       }
       if (!selectedTargetId || !agents.some((agent) => agent.id === selectedTargetId)) return showStatus("Choose an existing integrated agent terminal before Start.");
-      const running = rootTask(snapshot, root);
-      if (running && running.id !== task.id) return showStatus(`Task “${running.title}” is already running in this workspace.`);
       if (!task.prompt.trim()) return showStatus("This task has no composer prompt to deliver.");
 
-      const ready = task.status === "draft" ? transitionTask(task, "ready") : task;
-      if (ready.status !== "ready") return showStatus(`Task cannot start from ${task.status.replace("_", " ")}.`);
+      // Claim the single running slot against the authoritative list read by
+      // the serialized metadata queue, not this panel's stale rendered
+      // snapshot — a concurrently closed turn must never be overwritten.
+      let refused: Task | null = null;
+      const claimed = await updateTaskMetadata(root, (entries) => {
+        const result = claimRunningTask(entries, task.id, root);
+        if (result.refused) refused = result.refused;
+        return result.tasks;
+      });
+      if (refused) return showStatus(`Task “${(refused as Task).title}” is already running in this workspace.`);
+      if (!claimed) return showStatus(`Task cannot start from ${task.status.replace("_", " ")}.`);
 
-      const runningTask = transitionTask(ready, "running");
-      // Persist the single-root claim before delivery. A failed delivery is
-      // explicitly blocked; a successful delivery is never retried.
-      const runningSnapshot = snapshot.map((entry) => entry.id === task.id ? runningTask : entry);
-      if (!(await persist(root, runningSnapshot))) return;
       const trustedBeforeDelivery = await isWorkspaceTrusted(root).catch(() => false);
       if (!mayPersistTaskForRoot(root, getRoot(), trustedBeforeDelivery)) {
         showStatus(getRoot() === root ? "Tasks are read-only; task delivery was cancelled." : "Workspace changed; task delivery was cancelled.");
         return;
       }
-      const result = await deliverPrompt({ targetId: selectedTargetId, prompt: runningTask.prompt, submit: selectedSubmit });
+      const result = await deliverPrompt({ targetId: selectedTargetId, prompt: task.prompt, submit: selectedSubmit });
       if (!result.ok) {
         const trustedForFailure = await isWorkspaceTrusted(root).catch(() => false);
         if (mayPersistTaskForRoot(root, getRoot(), trustedForFailure)) {
@@ -374,12 +378,18 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   async function updateRequiredChecks(task: Task, checks: readonly RequiredTaskCheck[]): Promise<void> {
     const root = getRoot();
     if (!root) return;
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; required checks were not saved.");
     try {
-      const nextTask = setRequiredChecks(task, checks, Date.now(), getAutomationChoices().map((choice) => choice.id));
-      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus("Required checks updated.");
+      const knownAutomationIds = getAutomationChoices().map((choice) => choice.id);
+      const wrote = await updateTaskMetadata(root, (entries) => {
+        const idx = entries.findIndex((e) => e.id === task.id);
+        if (idx < 0) return entries;
+        const nextTask = setRequiredChecks(entries[idx], checks, Date.now(), knownAutomationIds);
+        if (nextTask === entries[idx]) return entries;
+        const copy = entries.slice(); copy[idx] = nextTask; return copy;
+      });
+      if (wrote) showStatus("Required checks updated.");
     } catch (error) {
       showStatus(`Could not update required checks: ${String(error)}`);
     }
@@ -388,13 +398,18 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   async function addManualCheck(task: Task, label: string): Promise<void> {
     const root = getRoot();
     if (!root || !label.trim()) return showStatus("Give the manual check a label.");
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; manual check was not added.");
     try {
       const id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const nextTask = addRequiredManualCheck(task, { id, label: label.trim() });
-      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus("Manual check added.");
+      const wrote = await updateTaskMetadata(root, (entries) => {
+        const idx = entries.findIndex((e) => e.id === task.id);
+        if (idx < 0) return entries;
+        const nextTask = addRequiredManualCheck(entries[idx], { id, label: label.trim() });
+        if (nextTask === entries[idx]) return entries;
+        const copy = entries.slice(); copy[idx] = nextTask; return copy;
+      });
+      if (wrote) showStatus("Manual check added.");
     } catch (error) {
       showStatus(`Could not add manual check: ${String(error)}`);
     }
@@ -403,12 +418,17 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   async function setManualCheckResult(task: Task, checkId: string, checked: boolean): Promise<void> {
     const root = getRoot();
     if (!root) return;
-    const snapshot = tasks;
     const allowed = await isWorkspaceTrusted(root).catch(() => false);
     if (!mayPersistTaskForRoot(root, getRoot(), allowed)) return showStatus(getRoot() === root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; manual result was not saved.");
     try {
-      const nextTask = recordManualCheck(task, checkId, checked);
-      if (await persist(root, snapshot.map((entry) => entry.id === task.id ? nextTask : entry))) showStatus(`Manual check ${checked ? "recorded" : "cleared"}.`);
+      const wrote = await updateTaskMetadata(root, (entries) => {
+        const idx = entries.findIndex((e) => e.id === task.id);
+        if (idx < 0) return entries;
+        const nextTask = recordManualCheck(entries[idx], checkId, checked);
+        if (nextTask === entries[idx]) return entries;
+        const copy = entries.slice(); copy[idx] = nextTask; return copy;
+      });
+      if (wrote) showStatus(`Manual check ${checked ? "recorded" : "cleared"}.`);
     } catch (error) {
       showStatus(`Could not record manual check: ${String(error)}`);
     }

@@ -1272,7 +1272,9 @@ const tasksPanel = mountTasksPanel({
       });
       if (next.some((candidate, index) => candidate !== after.tasks[index])) {
         await saveTasks(task.root, next);
-        if (currentRoot === task.root) await tasksPanel.reload();
+        // In-queue reload (this runs inside queueTaskMetadataOperation) must
+        // skip reconcile so it can never enqueue onto the in-flight op.
+        if (currentRoot === task.root) await tasksPanel.reload(true);
       }
       return result;
     });
@@ -1669,6 +1671,11 @@ function showTrustToast(root: string): void {
       await trustWorkspace(root); // must land before the trust re-check below
       hideTrustToast();
       void runDiagnostics(root); // run the now-permitted jobs immediately
+      // Top-level reload so the now-trusted root runs its one-time worktree
+      // reconcile OUTSIDE the metadata queue (mirrors the File▸Open path).
+      // Without this, the first reconcile could only fire from a queue-
+      // completion reload, which now skips it — leaving setup unreconciled.
+      if (currentRoot === root) void tasksPanel.reload();
     })();
   };
   const closeBtn = document.createElement("button");
@@ -1739,7 +1746,9 @@ function queueTaskMetadataUpdate(
     // persistence, after its serialized re-read and reducer execution.
     if (canWrite && !(await canWrite())) return false;
     await saveTasks(root, tasks);
-    if (currentRoot === root) await tasksPanel.reload();
+    // skipReconcile=true: this reload runs from inside the queue; letting it
+    // enqueue the reconcile write would re-enter and deadlock the chain.
+    if (currentRoot === root) await tasksPanel.reload(true);
     return true;
   });
   taskMetadataWrites.set(root, next);

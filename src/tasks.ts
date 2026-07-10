@@ -683,6 +683,42 @@ export function setTaskTurnReview(
   };
 }
 
+/** The single running task for a root, if any. Shared by automatic turn
+ * attribution and the Start claim so both agree on what "running" means. */
+export function rootTask(tasks: readonly Task[], root: string): Task | undefined {
+  return tasks.find((task) => task.root === root && task.status === "running");
+}
+
+export interface RunningClaim {
+  readonly tasks: readonly Task[];
+  readonly refused: Task | null;
+  readonly started: boolean;
+}
+
+/** Atomically claim the single running slot for `root` on behalf of task
+ * `id`, against the authoritative list read by the serialized metadata
+ * queue. Refuses (same `tasks` reference, `started` false) when a different
+ * task in `root` is already running. Returns the same reference whenever no
+ * transition happens at all, so a queueing caller can treat it as a no-op. */
+export function claimRunningTask(tasks: readonly Task[], id: string, root: string): RunningClaim {
+  const running = rootTask(tasks, root);
+  if (running && running.id !== id) return { tasks, refused: running, started: false };
+  const index = tasks.findIndex((task) => task.id === id);
+  if (index < 0) return { tasks, refused: null, started: false };
+  const target = tasks[index];
+  let next: Task;
+  if (target.status === "draft") {
+    next = transitionTask(transitionTask(target, "ready"), "running");
+  } else if (target.status === "ready") {
+    next = transitionTask(target, "running");
+  } else {
+    return { tasks, refused: null, started: false };
+  }
+  const copy = tasks.slice();
+  copy[index] = next;
+  return { tasks: copy, refused: null, started: true };
+}
+
 /** Root-level automatic attribution. The caller supplies the closed turn from
  * onTurnClosed(root, turn); no terminal id participates in this decision. */
 export function attachClosedTurnToRunningTask(

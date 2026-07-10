@@ -2,9 +2,11 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   AGENT_PROFILES_PATH,
+  AUTOMATION_ID_LIMIT,
   BUILTIN_AGENT_PROFILES,
   CONTEXT_SELECTOR_LIMIT,
   DEFAULT_ACCEPTANCE_LIMIT,
+  PROFILE_LIMIT,
   loadAgentProfiles,
   resolveAgentProfiles,
 } from "../src/agent-profiles";
@@ -125,4 +127,30 @@ test("profile defaults are bounded", () => {
   });
 
   assert.deepEqual(resolveAgentProfiles({ rawJson: raw, trusted: true, automationIds: [] }), BUILTIN_AGENT_PROFILES);
+});
+
+test("profile count over PROFILE_LIMIT falls back to built-ins", () => {
+  const tooManyProfiles = Array.from({ length: PROFILE_LIMIT + 1 }, (_, i) => ({
+    id: `custom-${i}`, name: `Custom ${i}`, template: "Feature", defaultMode: "implement",
+    defaultAcceptance: [], allowedAutomationIds: [], contextSelectors: ["active-file"],
+  }));
+  const raw = JSON.stringify({ version: 1, profiles: tooManyProfiles });
+
+  assert.deepEqual(resolveAgentProfiles({ rawJson: raw, trusted: true, automationIds: [] }), BUILTIN_AGENT_PROFILES);
+});
+
+test("allowedAutomationIds over AUTOMATION_ID_LIMIT falls back to built-ins", () => {
+  const tooManyAutomationIds = Array.from({ length: AUTOMATION_ID_LIMIT + 1 }, (_, i) => `automation-${i}`);
+  const raw = JSON.stringify({
+    version: 1,
+    profiles: [{
+      id: "implement", name: "Too many automations", template: "Feature", defaultMode: "implement",
+      defaultAcceptance: [], allowedAutomationIds: tooManyAutomationIds, contextSelectors: ["active-file"],
+    }],
+  });
+
+  assert.deepEqual(
+    resolveAgentProfiles({ rawJson: raw, trusted: true, automationIds: tooManyAutomationIds }),
+    BUILTIN_AGENT_PROFILES,
+  );
 });

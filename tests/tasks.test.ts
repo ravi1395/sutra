@@ -7,6 +7,7 @@ import {
   beginWorktreeSetup,
   attachClosedTurnToRunningTask,
   attachTurnToTask,
+  claimRunningTask,
   completionState,
   detachTurnFromTask,
   hasRequiredAutomationCheck,
@@ -392,4 +393,48 @@ test("a linked worktree gitdir file cannot write task or gitignore metadata", as
   await assert.rejects(saveTasks("/worktree", [task({ root: "/worktree" })], { persistence: spy.persistence }), /primary checkout/i);
   assert.deepEqual(spy.writes, []);
   assert.deepEqual(spy.dirs, []);
+});
+
+test("claimRunningTask starts a draft task when nothing else is running in the root", () => {
+  const draft = task({ id: "task-1", status: "draft" });
+  const result = claimRunningTask([draft], "task-1", "/workspace");
+  assert.equal(result.started, true);
+  assert.equal(result.refused, null);
+  assert.equal(result.tasks[0].status, "running");
+  assert.notEqual(result.tasks, [draft]); // new array on a real transition
+});
+
+test("claimRunningTask refuses a different already-running task in the same root and leaves the list untouched", () => {
+  const running = task({ id: "running", status: "running" });
+  const draft = task({ id: "task-1", status: "draft" });
+  const tasks = [running, draft];
+  const result = claimRunningTask(tasks, "task-1", "/workspace");
+  assert.equal(result.started, false);
+  assert.equal(result.refused, running);
+  assert.strictEqual(result.tasks, tasks);
+});
+
+test("claimRunningTask is a same-reference no-op for the task already running or a non-startable status", () => {
+  const running = task({ id: "task-1", status: "running" });
+  const alreadyRunning = [running];
+  const sameTask = claimRunningTask(alreadyRunning, "task-1", "/workspace");
+  assert.equal(sameTask.started, false);
+  assert.equal(sameTask.refused, null);
+  assert.strictEqual(sameTask.tasks, alreadyRunning);
+
+  const blocked = task({ id: "task-2", status: "blocked" });
+  const blockedTasks = [blocked];
+  const nonStartable = claimRunningTask(blockedTasks, "task-2", "/workspace");
+  assert.equal(nonStartable.started, false);
+  assert.equal(nonStartable.refused, null);
+  assert.strictEqual(nonStartable.tasks, blockedTasks);
+});
+
+test("claimRunningTask scopes the running slot per root", () => {
+  const runningInA = task({ id: "running-a", status: "running", root: "/a" });
+  const draftInB = task({ id: "task-b", status: "draft", root: "/b" });
+  const result = claimRunningTask([runningInA, draftInB], "task-b", "/b");
+  assert.equal(result.started, true);
+  assert.equal(result.refused, null);
+  assert.equal(result.tasks.find((entry) => entry.id === "task-b")?.status, "running");
 });
