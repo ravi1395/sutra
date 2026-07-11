@@ -41,9 +41,14 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
-    version: "2.3.0",
+    version: "2.3.1",
     date: "2026-07-11",
-    notes: ["Internal cleanup and stability fixes."],
+    notes: [
+      "Inline preview: ⇧⌘V renders Markdown/Mermaid/HTML right in the focused tab — the split preview pane is gone.",
+      "New agent task panel: track, dispatch, and review agent turns, with isolated worktree dispatch and per-turn handoff.",
+      "Agent annotations and prompt-composer profiles: save reusable agent profiles, review context-pack summaries before sending.",
+      "Window-registry reliability fixes for multi-window/multi-process sessions.",
+    ],
   },
   {
     version: "2.2.0",
