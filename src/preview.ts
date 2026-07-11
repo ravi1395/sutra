@@ -8,6 +8,7 @@ export function previewKind(name: string): PreviewKind | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "md" || ext === "markdown") return "md";
   if (ext === "html" || ext === "htm") return "html";
+  if (ext === "mmd") return "diagram";
   return null;
 }
 
@@ -54,6 +55,7 @@ export class PreviewController {
   constructor(
     private el: HTMLElement,
     private kind: PreviewKind,
+    private opts?: { htmlMode?: "url" | "srcdoc" },
   ) {}
 
   async render(text: string): Promise<void> {
@@ -71,15 +73,21 @@ export class PreviewController {
       this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
       return;
     }
-    // html: text is a preview-server URL. Reached only by interactive prompt_user
-    // forms; agent/file HTML renders are routed to the browser pane (see main.ts).
+    // html: "url" mode (default) — text is a preview-server URL, reached only by
+    // interactive prompt_user forms. "srcdoc" mode — text is raw HTML, rendered
+    // sandboxed with no server (inline per-tab preview).
     if (!this.frame) {
       this.el.innerHTML = "";
       this.frame = document.createElement("iframe");
       this.frame.style.cssText = "width:100%;height:100%;border:none;";
       this.el.appendChild(this.frame);
     }
-    this.frame.src = text;
+    if (this.opts?.htmlMode === "srcdoc") {
+      this.frame.setAttribute("sandbox", "");
+      this.frame.srcdoc = DOMPurify.sanitize(text, { WHOLE_DOCUMENT: true });
+    } else {
+      this.frame.src = text;
+    }
   }
 
   /** Route external Markdown links through the system opener. */

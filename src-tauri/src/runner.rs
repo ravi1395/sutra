@@ -9,12 +9,12 @@ use tauri::Emitter;
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Diagnostic {
-    pub path: String,      // always absolute (parser output joined onto the job's cwd)
-    pub line: u32,         // 1-based
-    pub col: u32,          // 1-based
-    pub severity: String,  // "error" | "warning"
+    pub path: String,     // always absolute (parser output joined onto the job's cwd)
+    pub line: u32,        // 1-based
+    pub col: u32,         // 1-based
+    pub severity: String, // "error" | "warning"
     pub message: String,
-    pub source: String,    // e.g. "tsc" | "cargo" | "go" | "ruff" | automation id
+    pub source: String, // e.g. "tsc" | "cargo" | "go" | "ruff" | automation id
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -32,9 +32,12 @@ pub struct RunnerDone {
     pub id: String,
     pub exit_code: Option<i32>, // None = killed (timeout/cancel)
     pub duration_ms: u64,
-    pub stdout: String,         // tail-capped at 2 MB
-    pub stderr: String,         // tail-capped at 2 MB
+    pub stdout: String, // tail-capped at 2 MB
+    pub stderr: String, // tail-capped at 2 MB
     pub timed_out: bool,
+    /// True only when `runner_cancel` killed this job. A timeout remains a
+    /// failure rather than a user cancellation.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -73,7 +76,9 @@ pub fn cap_tail(s: &str, max: usize) -> String {
         return s.to_string();
     }
     let start = s.len() - max;
-    let start = (start..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(start);
+    let start = (start..s.len())
+        .find(|i| s.is_char_boundary(*i))
+        .unwrap_or(start);
     s[start..].to_string()
 }
 
@@ -107,16 +112,22 @@ fn parse_tsc(out: &str) -> Vec<Diagnostic> {
 fn parse_cargo(out: &str) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     for line in out.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
         if v.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
             continue;
         }
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("");
         if level != "error" && level != "warning" {
             continue;
         }
-        let Some(text) = msg.get("message").and_then(|m| m.as_str()) else { continue };
+        let Some(text) = msg.get("message").and_then(|m| m.as_str()) else {
+            continue;
+        };
         let Some(span) = msg
             .get("spans")
             .and_then(|s| s.as_array())
@@ -164,8 +175,7 @@ fn parse_go(out: &str) -> Vec<Diagnostic> {
 
 /// Ruff `--output-format json`: array of { filename, location{row,column}, message }.
 fn parse_ruff(out: &str) -> Vec<Diagnostic> {
-    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(out)
-    else {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(out) else {
         return vec![];
     };
     items
@@ -187,13 +197,18 @@ fn parse_ruff(out: &str) -> Vec<Diagnostic> {
 /// defaults 1; severity defaults "error"; message required. Invalid regex →
 /// empty vec (surfaced via the ToolFailure path only if the job also fails).
 fn parse_regex(out: &str, pattern: &str, source: &str) -> Vec<Diagnostic> {
-    let Ok(re) = regex::Regex::new(pattern) else { return vec![] };
+    let Ok(re) = regex::Regex::new(pattern) else {
+        return vec![];
+    };
     re.captures_iter(out)
         .filter_map(|c| {
             Some(Diagnostic {
                 path: c.name("path")?.as_str().to_string(),
                 line: c.name("line")?.as_str().parse().ok()?,
-                col: c.name("col").and_then(|m| m.as_str().parse().ok()).unwrap_or(1),
+                col: c
+                    .name("col")
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(1),
                 severity: c
                     .name("severity")
                     .map(|m| normalize_severity(m.as_str()))
@@ -240,10 +255,14 @@ fn parse_diagnostics(job: &DiagJob, stdout: &str, stderr: &str) -> Vec<Diagnosti
         "cargo" => parse_cargo(stdout),
         "go" => parse_go(stderr),
         "ruff" => parse_ruff(stdout),
-        "regex" => job.regex.as_deref().map(|p| {
-            let combined = format!("{stdout}\n{stderr}");
-            parse_regex(&combined, p, &job.source)
-        }).unwrap_or_default(),
+        "regex" => job
+            .regex
+            .as_deref()
+            .map(|p| {
+                let combined = format!("{stdout}\n{stderr}");
+                parse_regex(&combined, p, &job.source)
+            })
+            .unwrap_or_default(),
         _ => vec![],
     };
     for d in &mut diags {
@@ -261,6 +280,17 @@ struct RunHandle {
 }
 
 static RUNS: LazyLock<Mutex<HashMap<String, RunHandle>>> = LazyLock::new(Default::default);
+/// `runner_cancel` removes the live handle before killing its process group so
+/// a second cancel cannot target a reused pid. Retain the cancellation marker
+/// until the runner emits its terminal event.
+static CANCELLED_RUNS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+/// Typed task checks reserve their scoped id before their blocking worker has
+/// reached `spawn_and_wait`, closing the start-up race where RUNS is not yet
+/// populated. The reservation is released only after runner-done is emitted.
+static TASK_CHECK_RUNS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+/// Task checks accepted by the command but not yet registered with RUNS. A
+/// cancellation in this short window is carried into `on_spawned`.
+static TASK_CHECK_PENDING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 static DIAGS: LazyLock<Mutex<HashMap<String, Vec<Diagnostic>>>> = LazyLock::new(Default::default); // root → merged latest
 static DIAG_QUEUE: LazyLock<Mutex<HashMap<String, Option<Vec<DiagJob>>>>> =
     LazyLock::new(Default::default); // root → queued-latest
@@ -284,8 +314,112 @@ pub async fn runner_run(
     timeout_ms: u64,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || run_to_completion(id, cmd, cwd, timeout_ms, app));
+    start_runner(id, cmd, cwd, timeout_ms, app);
     Ok(())
+}
+
+/// Construct the opaque id for a task-required check. Task and automation ids
+/// deliberately cannot contain the separator, so different task scopes do
+/// not collide even when a workspace path itself contains `:` (Windows).
+pub fn task_check_job_id(root: &str, task_id: &str, automation_id: &str) -> Result<String, String> {
+    if root.trim().is_empty() {
+        return Err("Task check root is required".into());
+    }
+    for (label, value) in [("task", task_id), ("automation", automation_id)] {
+        if value.trim().is_empty() || value.contains(':') || value.contains(['\n', '\r']) {
+            return Err(format!("Task check {label} id is invalid"));
+        }
+    }
+    Ok(format!("task-check:{root}:{task_id}:{automation_id}"))
+}
+
+fn reserve_task_check(id: &str) -> bool {
+    if !TASK_CHECK_RUNS.lock().unwrap().insert(id.to_string()) {
+        return false;
+    }
+    TASK_CHECK_PENDING.lock().unwrap().insert(id.to_string());
+    true
+}
+
+fn release_task_check(id: &str) {
+    TASK_CHECK_PENDING.lock().unwrap().remove(id);
+    TASK_CHECK_RUNS.lock().unwrap().remove(id);
+    // `run_to_completion` normally consumes this marker before emitting, but
+    // cleanup must also make a failed/abandoned worker safe to rerun.
+    CANCELLED_RUNS.lock().unwrap().remove(id);
+}
+
+/// Releases a task-check reservation when dropped, including during a panic
+/// unwind inside the `spawn_blocking` worker — a bare post-call
+/// `release_task_check` would be skipped on panic, leaking the
+/// (root,task,automation) slot until app restart.
+struct TaskCheckReservationGuard(String);
+
+impl Drop for TaskCheckReservationGuard {
+    fn drop(&mut self) {
+        release_task_check(&self.0);
+    }
+}
+
+fn take_cancelled(id: &str) -> bool {
+    CANCELLED_RUNS.lock().unwrap().remove(id)
+}
+
+/// Mark a task check cancelled before its child pid is available. Holding the
+/// pending lock closes the race with `on_spawned`: it sees either this marker
+/// and kills immediately, or a caller retry can cancel the registered handle.
+fn cancel_pending_task_check(id: &str) -> bool {
+    let pending = TASK_CHECK_PENDING.lock().unwrap();
+    if !pending.contains(id) {
+        return false;
+    }
+    CANCELLED_RUNS.lock().unwrap().insert(id.to_string());
+    true
+}
+
+/// Typed runner entrypoint for required task checks. The frontend never
+/// constructs/parses runner ids; completion is correlated through its local
+/// task-check registry.
+#[tauri::command]
+pub async fn task_check_run(
+    root: String,
+    task_id: String,
+    automation_id: String,
+    cmd: String,
+    timeout_ms: u64,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let id = task_check_job_id(&root, &task_id, &automation_id)?;
+    if !reserve_task_check(&id) {
+        return Err("Required task check is already running".into());
+    }
+    let id_for_run = id.clone();
+    let id_for_guard = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _release_guard = TaskCheckReservationGuard(id_for_guard);
+        run_to_completion(id_for_run, cmd, root, timeout_ms, app);
+    });
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn task_check_cancel(
+    root: String,
+    task_id: String,
+    automation_id: String,
+) -> Result<bool, String> {
+    let id = task_check_job_id(&root, &task_id, &automation_id)?;
+    if runner_cancel(id.clone())? {
+        return Ok(true);
+    }
+    if cancel_pending_task_check(&id) {
+        return Ok(true);
+    }
+    runner_cancel(id)
+}
+
+fn start_runner(id: String, cmd: String, cwd: String, timeout_ms: u64, app: tauri::AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || run_to_completion(id, cmd, cwd, timeout_ms, app));
 }
 
 /// Bound on joining a reader thread once the child has been reaped/killed — a
@@ -306,7 +440,8 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(mut r: R) -> mpsc::Receiver<V
 
 /// Receive from a reader channel with a timeout; empty on timeout or absence.
 fn read_bounded(rx: Option<mpsc::Receiver<Vec<u8>>>, timeout: Duration) -> Vec<u8> {
-    rx.and_then(|rx| rx.recv_timeout(timeout).ok()).unwrap_or_default()
+    rx.and_then(|rx| rx.recv_timeout(timeout).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -388,7 +523,11 @@ fn spawn_and_wait(
     let stderr_buf = read_bounded(stderr_rx, READER_JOIN_TIMEOUT);
 
     Ok((
-        if timed_out { None } else { status.and_then(|s| s.code()) },
+        if timed_out {
+            None
+        } else {
+            status.and_then(|s| s.code())
+        },
         timed_out,
         stdout_buf,
         stderr_buf,
@@ -405,7 +544,13 @@ fn run_to_completion(id: String, cmd: String, cwd: String, timeout_ms: u64, app:
         &cwd,
         Duration::from_millis(timeout_ms),
         move |pid| {
-            RUNS.lock().unwrap().insert(id_for_spawn, RunHandle { child_id: pid });
+            RUNS.lock()
+                .unwrap()
+                .insert(id_for_spawn.clone(), RunHandle { child_id: pid });
+            TASK_CHECK_PENDING.lock().unwrap().remove(&id_for_spawn);
+            if CANCELLED_RUNS.lock().unwrap().contains(&id_for_spawn) {
+                kill_process_group(pid);
+            }
         },
         move || {
             RUNS.lock().unwrap().remove(&id_for_reap);
@@ -415,6 +560,11 @@ fn run_to_completion(id: String, cmd: String, cwd: String, timeout_ms: u64, app:
     let (exit_code, timed_out, stdout_buf, stderr_buf) = match result {
         Ok((exit, timed_out, out, err)) => (exit, timed_out, out, err),
         Err(e) => {
+            // A task check can be cancelled before Command::spawn obtains a
+            // pid (for example an invalid cwd). Consume its marker here so
+            // the completed event is truthful and the next same-id run is
+            // never killed by stale cancellation state.
+            let cancelled = take_cancelled(&id);
             let _ = app.emit(
                 "runner-done",
                 RunnerDone {
@@ -424,12 +574,14 @@ fn run_to_completion(id: String, cmd: String, cwd: String, timeout_ms: u64, app:
                     stdout: String::new(),
                     stderr: e.to_string(),
                     timed_out: false,
+                    cancelled,
                 },
             );
             return;
         }
     };
 
+    let cancelled = take_cancelled(&id);
     let _ = app.emit(
         "runner-done",
         RunnerDone {
@@ -439,6 +591,7 @@ fn run_to_completion(id: String, cmd: String, cwd: String, timeout_ms: u64, app:
             stdout: cap_tail(&String::from_utf8_lossy(&stdout_buf), OUTPUT_CAP),
             stderr: cap_tail(&String::from_utf8_lossy(&stderr_buf), OUTPUT_CAP),
             timed_out,
+            cancelled,
         },
     );
 }
@@ -448,6 +601,7 @@ fn run_to_completion(id: String, cmd: String, cwd: String, timeout_ms: u64, app:
 pub fn runner_cancel(id: String) -> Result<bool, String> {
     match RUNS.lock().unwrap().remove(&id) {
         Some(h) => {
+            CANCELLED_RUNS.lock().unwrap().insert(id);
             kill_process_group(h.child_id);
             Ok(true)
         }
@@ -517,8 +671,16 @@ fn detect(root: &std::path::Path) -> Vec<DiagJob> {
 /// Directory names never worth descending into for manifest detection — huge
 /// dep trees and VCS metadata that cannot themselves contain a project root
 /// we care about, but can make an unbounded walk pathologically slow.
-const EXCLUDED_DIR_NAMES: &[&str] =
-    &["node_modules", ".git", "target", "dist", "build", "vendor", ".venv", "__pycache__"];
+const EXCLUDED_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".venv",
+    "__pycache__",
+];
 
 fn is_excluded_dir(path: &std::path::Path) -> bool {
     path.file_name()
@@ -626,7 +788,14 @@ async fn run_jobs_sequentially(root: &str, jobs: Vec<DiagJob>, app: &tauri::AppH
                 let snippet: String = if timed_out {
                     format!("timed out after {DIAG_JOB_DEADLINE:?}")
                 } else if stderr.is_empty() {
-                    stdout.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect()
+                    stdout
+                        .chars()
+                        .rev()
+                        .take(200)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
                 } else {
                     stderr.chars().take(200).collect()
                 };
@@ -679,7 +848,17 @@ mod tests {
         let out = "src/foo.ts(12,5): error TS2322: Type 'x' is not assignable.\nsrc/bar.ts(3,1): warning TS6133: unused.";
         let d = parse_tsc(out);
         assert_eq!(d.len(), 2);
-        assert_eq!(d[0], Diagnostic { path: "src/foo.ts".into(), line: 12, col: 5, severity: "error".into(), message: "Type 'x' is not assignable.".into(), source: "tsc".into() });
+        assert_eq!(
+            d[0],
+            Diagnostic {
+                path: "src/foo.ts".into(),
+                line: 12,
+                col: 5,
+                severity: "error".into(),
+                message: "Type 'x' is not assignable.".into(),
+                source: "tsc".into()
+            }
+        );
         assert_eq!(d[1].severity, "warning");
     }
     #[test]
@@ -688,25 +867,55 @@ mod tests {
 {"reason":"build-finished","success":false}"#;
         let d = parse_cargo(out);
         assert_eq!(d.len(), 1);
-        assert_eq!((d[0].path.as_str(), d[0].line, d[0].col), ("src/lib.rs", 5, 3));
+        assert_eq!(
+            (d[0].path.as_str(), d[0].line, d[0].col),
+            ("src/lib.rs", 5, 3)
+        );
     }
     #[test]
     fn parses_go_vet_and_regex() {
         let d = parse_go("pkg/a.go:12:5: unreachable code");
-        assert_eq!((d[0].line, d[0].col, d[0].severity.as_str()), (12, 5, "error"));
-        let d = parse_regex("E foo.py:3 bad thing", r"^(?P<severity>[EW]) (?P<path>\S+):(?P<line>\d+) (?P<message>.+)$", "lint");
-        assert_eq!((d[0].path.as_str(), d[0].line, d[0].col, d[0].severity.as_str()), ("foo.py", 3, 1, "error"));
+        assert_eq!(
+            (d[0].line, d[0].col, d[0].severity.as_str()),
+            (12, 5, "error")
+        );
+        let d = parse_regex(
+            "E foo.py:3 bad thing",
+            r"^(?P<severity>[EW]) (?P<path>\S+):(?P<line>\d+) (?P<message>.+)$",
+            "lint",
+        );
+        assert_eq!(
+            (
+                d[0].path.as_str(),
+                d[0].line,
+                d[0].col,
+                d[0].severity.as_str()
+            ),
+            ("foo.py", 3, 1, "error")
+        );
     }
     #[test]
     fn parse_diagnostics_makes_paths_absolute_under_job_cwd() {
         // tsc: relative path joins onto the job's cwd.
-        let job = DiagJob { source: "tsc".into(), command: "tsc".into(), cwd: "/tmp/proj".into(), parser: "tsc".into(), regex: None };
+        let job = DiagJob {
+            source: "tsc".into(),
+            command: "tsc".into(),
+            cwd: "/tmp/proj".into(),
+            parser: "tsc".into(),
+            regex: None,
+        };
         let d = parse_diagnostics(&job, "src/foo.ts(12,5): error TS2322: bad.", "");
         assert_eq!(d[0].path, "/tmp/proj/src/foo.ts");
 
         // cargo: cwd is the SUB-CRATE dir (see detect()), not the workspace root —
         // the emitted path must join onto that sub-crate cwd, not some higher root.
-        let cargo_job = DiagJob { source: "cargo".into(), command: "cargo check".into(), cwd: "/tmp/proj/sub".into(), parser: "cargo".into(), regex: None };
+        let cargo_job = DiagJob {
+            source: "cargo".into(),
+            command: "cargo check".into(),
+            cwd: "/tmp/proj/sub".into(),
+            parser: "cargo".into(),
+            regex: None,
+        };
         let cargo_out = r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","spans":[{"file_name":"src/lib.rs","line_start":5,"column_start":3,"is_primary":true}]}}"#;
         let d2 = parse_diagnostics(&cargo_job, cargo_out, "");
         assert_eq!(d2[0].path, "/tmp/proj/sub/src/lib.rs");
@@ -735,12 +944,28 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!((diags[0].line, diags[0].col), (12, 5));
         // With diags parsed, classify_outcome must report Findings, not ToolFailure.
-        assert_eq!(classify_outcome(1, &diags, "pkg/a.go:12:5: unreachable code\n"), Outcome::Findings);
+        assert_eq!(
+            classify_outcome(1, &diags, "pkg/a.go:12:5: unreachable code\n"),
+            Outcome::Findings
+        );
     }
     #[test]
     fn tool_failure_vs_findings() {
         // nonzero exit + parsed diags = findings; nonzero + none + stderr = tool failure
-        assert!(classify_outcome(2, &[Diagnostic{path:"a".into(),line:1,col:1,severity:"error".into(),message:"m".into(),source:"tsc".into()}], "") == Outcome::Findings);
+        assert!(
+            classify_outcome(
+                2,
+                &[Diagnostic {
+                    path: "a".into(),
+                    line: 1,
+                    col: 1,
+                    severity: "error".into(),
+                    message: "m".into(),
+                    source: "tsc".into()
+                }],
+                ""
+            ) == Outcome::Findings
+        );
         assert!(classify_outcome(127, &[], "sh: tsc: not found") == Outcome::ToolFailure);
         assert!(classify_outcome(0, &[], "") == Outcome::Clean);
     }
@@ -751,8 +976,12 @@ mod tests {
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub/Cargo.toml"), "[package]").unwrap();
         let jobs = detect(tmp.path());
-        assert!(jobs.iter().any(|j| j.parser == "tsc" && j.cwd == tmp.path().to_string_lossy()));
-        assert!(jobs.iter().any(|j| j.parser == "cargo" && j.cwd.ends_with("/sub")));
+        assert!(jobs
+            .iter()
+            .any(|j| j.parser == "tsc" && j.cwd == tmp.path().to_string_lossy()));
+        assert!(jobs
+            .iter()
+            .any(|j| j.parser == "cargo" && j.cwd.ends_with("/sub")));
     }
     #[test]
     fn output_tail_cap() {
@@ -762,6 +991,71 @@ mod tests {
         assert!(capped.ends_with('x'));
     }
     #[test]
+    fn task_check_job_id_scopes_root_task_and_automation() {
+        assert_eq!(
+            task_check_job_id("/repo", "task-1", "unit").unwrap(),
+            "task-check:/repo:task-1:unit",
+        );
+        assert_ne!(
+            task_check_job_id("/repo-a", "task-1", "unit").unwrap(),
+            task_check_job_id("/repo-b", "task-1", "unit").unwrap(),
+        );
+        assert_ne!(
+            task_check_job_id("/repo", "task-1", "unit").unwrap(),
+            task_check_job_id("/repo", "task-2", "unit").unwrap(),
+        );
+        assert!(task_check_job_id("/repo", "task:1", "unit").is_err());
+        assert!(task_check_job_id("/repo", "task-1", "unit\n").is_err());
+    }
+    #[test]
+    fn early_cancelled_spawn_failure_is_reported_and_does_not_poison_rerun() {
+        let id = format!("task-check:/runner-test-{}:task-1:unit", std::process::id());
+        release_task_check(&id);
+        assert!(reserve_task_check(&id));
+        assert!(!reserve_task_check(&id), "duplicate active job is refused");
+        assert!(cancel_pending_task_check(&id));
+        assert!(cancel_pending_task_check(&id), "a duplicate cancel stays idempotent while pending");
+
+        let missing_cwd = format!("/definitely-missing-sutra-runner-{}", std::process::id());
+        assert!(spawn_and_wait("true", &missing_cwd, Duration::from_millis(10), |_| {}, || {}).is_err());
+        // This is the `run_to_completion` spawn-error branch: it must emit a
+        // cancelled completion and consume the marker before releasing scope.
+        assert!(take_cancelled(&id));
+        release_task_check(&id);
+
+        assert!(reserve_task_check(&id), "a later same-id check can start cleanly");
+        assert!(!take_cancelled(&id), "no stale cancellation reaches the rerun");
+        release_task_check(&id);
+    }
+    #[test]
+    fn task_check_guard_releases_reservation_on_drop() {
+        let id = format!("task-check:/runner-test-guard-{}:task-1:unit", std::process::id());
+        release_task_check(&id);
+        assert!(reserve_task_check(&id));
+        {
+            let _guard = TaskCheckReservationGuard(id.clone());
+        }
+        assert!(reserve_task_check(&id), "guard drop released the reservation");
+        release_task_check(&id);
+    }
+    #[test]
+    fn task_check_guard_releases_reservation_on_panic_unwind() {
+        // Regression for W2: a panic inside the spawn_blocking worker must not
+        // leak the reservation until app restart. catch_unwind stands in for
+        // spawn_blocking's own panic capture, exercising the same unwind path
+        // that runs the guard's Drop.
+        let id = format!("task-check:/runner-test-guard-panic-{}:task-1:unit", std::process::id());
+        release_task_check(&id);
+        assert!(reserve_task_check(&id));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = TaskCheckReservationGuard(id.clone());
+            panic!("simulated worker panic");
+        }));
+        assert!(result.is_err(), "the panic still propagates past the guard");
+        assert!(reserve_task_check(&id), "a panic-time drop still released the reservation");
+        release_task_check(&id);
+    }
+    #[test]
     fn walk_dirs_skips_excluded_names() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("node_modules/pkg")).unwrap();
@@ -769,7 +1063,9 @@ mod tests {
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         let dirs = walk_dirs(tmp.path(), 2);
         assert!(dirs.iter().any(|d| d.ends_with("sub")));
-        assert!(!dirs.iter().any(|d| d.to_string_lossy().contains("node_modules")));
+        assert!(!dirs
+            .iter()
+            .any(|d| d.to_string_lossy().contains("node_modules")));
     }
     #[test]
     fn run_job_blocking_times_out_and_reports_tool_failure() {
@@ -796,6 +1092,9 @@ mod tests {
         );
         let (_, timed_out, _, _) = result.unwrap();
         assert!(timed_out);
-        assert!(start.elapsed() < Duration::from_secs(5), "kill should not wait out the grandchild's sleep");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "kill should not wait out the grandchild's sleep"
+        );
     }
 }

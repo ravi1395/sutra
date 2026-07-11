@@ -38,13 +38,39 @@ pub struct Lock {
     pub real_root: String, // original-case realpath — use for all filesystem ops
 }
 
-/// `~/Library/Application Support/com.ravi1395.sutra/windows/`
+/// `~/Library/Application Support/com.ravi1395.sutra/windows/` (or an override).
 pub fn registry_dir() -> PathBuf {
-    let base = dirs_app_support().join("com.ravi1395.sutra").join("windows");
+    let base = registry_dir_base();
     let _ = std::fs::create_dir_all(&base);
     base
 }
 
+/// The registry dir path before it's ensured to exist. `cfg(test)` builds
+/// ALWAYS use a per-process tempdir — the env var is ignored there so a stray
+/// `SUTRA_REGISTRY_DIR` in the shell can't repollute the user's real registry
+/// during `cargo test`. Normal builds honor `SUTRA_REGISTRY_DIR` (override),
+/// else the default Application-Support path.
+#[cfg(not(test))]
+fn registry_dir_base() -> PathBuf {
+    if let Some(dir) = std::env::var_os("SUTRA_REGISTRY_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs_app_support().join("com.ravi1395.sutra").join("windows")
+}
+
+#[cfg(test)]
+fn registry_dir_base() -> PathBuf {
+    // One tempdir per test process, shared by all tests (keys are unique, so
+    // no collision). pid — not rand/Date — keeps it stable within a run.
+    use std::sync::OnceLock;
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("sutra-registry-test-{}", std::process::id()))
+    })
+    .clone()
+}
+
+#[cfg_attr(test, allow(dead_code))] // test builds resolve registry_dir to a tempdir
 fn dirs_app_support() -> PathBuf {
     // macOS: ~/Library/Application Support ; fallback to home/.local/share
     if let Some(home) = std::env::var_os("HOME") {
@@ -96,8 +122,9 @@ fn lock_path(root_key: &str) -> PathBuf {
     registry_dir().join(format!("{}.json", root_hash(root_key)))
 }
 
-/// Per-root advisory-lock mutex file. Persistent and reusable (never
-/// removed) — `gc_sweep` only scans `.json`, so it never touches this.
+/// Per-root advisory-lock mutex file. Reused for the life of its `.json`
+/// lock; `gc_sweep`'s orphan pass reclaims guards whose `.json` is absent (see
+/// there) so they don't leak one-per-distinct-root forever.
 fn guard_path(root_key: &str) -> PathBuf {
     registry_dir().join(format!("{}.guard", root_hash(root_key)))
 }
@@ -228,33 +255,78 @@ pub fn release(root_key: &str) {
 /// reclaim arm. If the guard can't be acquired, skip the entry (fail safe:
 /// never remove without the guard).
 pub fn gc_sweep() -> Vec<Lock> {
+    use std::collections::HashSet;
     let mut reclaimed = Vec::new();
     let dir = registry_dir();
+
+    // Single scan → a snapshot: json lockfile paths + the stem sets for json
+    // and guard files. Pass 2 diffs the *snapshot* stems, so it never reasons
+    // about pass 1's own removals — a guard whose root had ANY json this sweep
+    // (dead or live) is excluded from the orphan set entirely.
+    let mut json_paths: Vec<PathBuf> = Vec::new();
+    let mut json_stems: HashSet<String> = HashSet::new();
+    let mut guard_stems: HashSet<String> = HashSet::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let gp = p.with_extension("guard");
-            let outcome = with_root_guard(&gp, || {
-                // Re-read + re-validate INSIDE the guard: a racer may have
-                // reclaimed and republished a live lock at `p` since our
-                // caller-less initial scan, or removed it already.
-                match read_lock(&p) {
-                    Some(l) if !is_live(&l) => {
-                        let _ = std::fs::remove_file(&p);
-                        Some(l)
-                    }
-                    _ => None,
+            let stem = p.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+            match (p.extension().and_then(|s| s.to_str()), stem) {
+                (Some("json"), Some(s)) => {
+                    json_stems.insert(s);
+                    json_paths.push(p);
                 }
-            });
-            if let Ok(Some(l)) = outcome {
-                reclaimed.push(l);
+                (Some("guard"), Some(s)) => {
+                    guard_stems.insert(s);
+                }
+                _ => {}
             }
-            // Err (guard acquisition failed) or Ok(None) (now-live or gone):
-            // skip this entry, never remove.
         }
+    }
+
+    // Pass 1: remove dead lockfiles, guard-serialized (unchanged behavior).
+    for p in json_paths {
+        let gp = p.with_extension("guard");
+        let outcome = with_root_guard(&gp, || {
+            // Re-read + re-validate INSIDE the guard: a racer may have
+            // reclaimed and republished a live lock at `p` since our
+            // caller-less initial scan, or removed it already.
+            match read_lock(&p) {
+                Some(l) if !is_live(&l) => {
+                    let _ = std::fs::remove_file(&p);
+                    Some(l)
+                }
+                _ => None,
+            }
+        });
+        if let Ok(Some(l)) = outcome {
+            reclaimed.push(l);
+        }
+        // Err (guard acquisition failed) or Ok(None) (now-live or gone):
+        // skip this entry, never remove.
+    }
+
+    // Pass 2: reclaim orphan `.guard` files — guards whose `.json` was absent
+    // in the snapshot. Guards are otherwise permanent (they ARE the flock mutex
+    // the whole module leans on), so they accumulate one-per-distinct-root
+    // forever; test-suite churn on unique keys minted thousands that will never
+    // be reused. We take the guard's own lock NON-BLOCKING (`try_lock_exclusive`)
+    // and re-confirm `.json` is still absent before unlinking — a held lock
+    // means a `try_claim` for that root is in flight, so we skip (fail safe).
+    // Residual window: a claimer that opened the guard inode but hasn't locked
+    // it yet could be left holding an orphaned inode if we unlink here; that
+    // degrades at worst to a duplicate window (recoverable, never corruption)
+    // and needs a third process cold-claiming this same root at this exact boot
+    // instant — rarer than the leak it fixes. `try_claim`/`with_root_guard` are
+    // deliberately left untouched.
+    for stem in guard_stems.difference(&json_stems) {
+        let gp = dir.join(format!("{stem}.guard"));
+        let Ok(f) = OpenOptions::new().read(true).write(true).open(&gp) else {
+            continue; // vanished since the scan — nothing to do
+        };
+        if f.try_lock_exclusive().is_ok() && !dir.join(format!("{stem}.json")).exists() {
+            let _ = std::fs::remove_file(&gp);
+        }
+        // `f` drops → lock released (or was never held on the WouldBlock skip).
     }
     reclaimed
 }
@@ -640,5 +712,55 @@ mod tests {
             }
             release(&key);
         }
+    }
+
+    /// Test pollution regression: every test process must resolve
+    /// `registry_dir()` to an isolated tempdir, never the user's real
+    /// Application-Support registry (where `cargo test` was minting ~54 orphan
+    /// guards per run).
+    #[test]
+    fn registry_dir_is_test_isolated() {
+        let s = registry_dir().to_string_lossy().into_owned();
+        assert!(s.contains("sutra-registry-test"), "tests must use an isolated tempdir, got {s}");
+        assert!(!s.contains("Application Support"), "tests must never touch the real registry: {s}");
+    }
+
+    /// Leak regression: `gc_sweep` must reclaim orphan `.guard` files (no
+    /// matching `.json`) while sparing guards backed by a live lock — so guards
+    /// stop accumulating one-per-distinct-root forever.
+    #[test]
+    fn gc_sweep_removes_orphan_guards_but_keeps_backed() {
+        let base = format!("guardgc-{}", std::process::id());
+        let orphan_key = format!("{base}-orphan");
+        let backed_key = format!("{base}-backed");
+
+        // Orphan: a guard file with no matching `.json` (the leak this fixes).
+        let orphan_guard = guard_path(&orphan_key);
+        std::fs::write(&orphan_guard, b"").unwrap();
+        assert!(orphan_guard.exists());
+
+        // Backed: a live claim creates BOTH the guard and the `.json`.
+        let (pid, start, exe) = self_identity();
+        try_claim(&backed_key, || Lock {
+            pid,
+            process_start: start,
+            exe: exe.clone(),
+            focus_port: 3,
+            token: "b".into(),
+            root: backed_key.clone(),
+            real_root: backed_key.clone(),
+        })
+        .unwrap();
+        let backed_guard = guard_path(&backed_key);
+        assert!(backed_guard.exists(), "claim must create the guard");
+        assert!(lock_path(&backed_key).exists(), "claim must publish the json");
+
+        gc_sweep();
+
+        assert!(!orphan_guard.exists(), "orphan guard (no .json) must be reclaimed");
+        assert!(backed_guard.exists(), "guard backed by a live .json must be kept");
+        assert!(lock_path(&backed_key).exists(), "live lock must survive gc_sweep");
+
+        release(&backed_key);
     }
 }

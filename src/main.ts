@@ -1,6 +1,7 @@
 // App entry: instantiates the tree / editor / terminal / diff modules and wires
 // the cross-cutting concerns — toolbar toggles, global shortcuts, save + save-as
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
+import "./styles.css";
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
@@ -19,6 +20,7 @@ import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
+import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
@@ -41,6 +43,12 @@ import {
   copyPath,
   gitChangedFiles,
   gitCheckout,
+  gitCreateWorktree,
+  gitRemoveWorktree,
+  gitWorktrees,
+  gitCommit,
+  gitStageFiles,
+  gitUnstageFiles,
   spawnWindow,
   onPreviewOpen,
   onDrive,
@@ -62,8 +70,11 @@ import {
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
+  deliverToPty,
   runnerRun,
   runnerCancel,
+  taskCheckRun,
+  taskCheckCancel,
   onRunnerDone,
   recentsPush,
   listFiles,
@@ -133,6 +144,26 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
+import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
+import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispatchInput } from "./worktree-dispatch";
+import {
+  appendAutomationEvidence,
+  attachClosedTurnToRunningTask,
+  beginWorktreeSetup,
+  completeWorktreeSetup,
+  hasRequiredAutomationCheck,
+  loadTasks,
+  markMissingWorktree,
+  removeTaskWorktree,
+  saveTasks,
+  setOwnedTurnReview,
+  TaskCheckRunRegistry,
+  taskCheckEvidence,
+  AUTOMATION_OUTPUT_TAIL_LIMIT,
+  TASK_CHECK_TIMEOUT_MS,
+  type Task,
+} from "./tasks";
+import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
@@ -234,12 +265,41 @@ const annotations = new AnnotationsPanel(
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
 );
+// Corrupt/partial annotations.json is quarantined to a .bak by the panel
+// itself; this only needs to tell the user it happened. Reuses the same
+// alertNative surface as other recoverable-file-load issues in this file.
+annotations.onWarnings = (warnings) =>
+  void alertNative(`Annotations file has issues and was backed up to annotations.json.bak:\n${warnings.join("\n")}`);
+annotations.setTaskContext([], annotationsAttach, annotationsDeliver, annotationsDetach);
+
+async function annotationsAttach(task: Task, annotation: import("./annotation-core").Annotation): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) return;
+  await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) =>
+    candidate.id === task.id ? attachAnnotationToTask(candidate, annotation) : candidate,
+  ), async () => currentRoot === task.root && await isWorkspaceTrusted(task.root));
+  const loaded = await loadTasks(task.root);
+  annotations.setTaskContext(loaded.tasks.filter((candidate) => candidate.root === task.root), annotationsAttach, annotationsDeliver, annotationsDetach);
+}
+
+async function annotationsDetach(task: Task, annotation: import("./annotation-core").Annotation, reason?: string): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) return;
+  await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) =>
+    candidate.id === task.id ? detachAnnotationFromTask(candidate, annotation, Date.now(), reason) : candidate,
+  ), async () => currentRoot === task.root && await isWorkspaceTrusted(task.root));
+  const loaded = await loadTasks(task.root);
+  annotations.setTaskContext(loaded.tasks.filter((candidate) => candidate.root === task.root), annotationsAttach, annotationsDeliver, annotationsDetach);
+}
+
+async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
+  if (!currentRoot || currentRoot !== task.root || !(await isWorkspaceTrusted(task.root))) {
+    return alertNative("Visual feedback delivery is disabled until this workspace is trusted.");
+  }
+  const targetId = tasksPanel.getSelectedTargetId();
+  if (!targetId) return alertNative("Choose an agent terminal in the Tasks panel before staging visual feedback.");
+  const result = await deliverToPty({ targetId, text: prompt, submit: false });
+  if (!result.ok) await alertNative(`Could not stage visual feedback: ${result.reason}`);
+}
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
-editor.onHtmlPreview = (url) => {
-  setBrowser(true);
-  browser.show();
-  browser.loadDirect(url);
-};
 
 // Wire terminal link clicks → embedded browser.
 terminals.onLinkActivate = (url: string) => {
@@ -249,17 +309,24 @@ terminals.onLinkActivate = (url: string) => {
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
-// HTML → browser pane (focused); md/diagram → editor preview split.
+// open_preview (real file) → opens the actual file with preview on; html+url
+// (render_html) → browser pane (focused); md/diagram source → ephemeral tab.
 void onPreviewOpen((p) => {
+  if (p.path) {
+    void editor.openFileWithPreview(p.path).catch((e) =>
+      console.error("open_preview failed", e),
+    );
+    return;
+  }
   if (p.kind === "html" && p.url) {
     setBrowser(true);
     browser.show();
     browser.loadDirect(p.url);
     return;
   }
-  void editor.showAgentPreview(p).catch((e) =>
-    console.error("agent preview failed", e),
-  );
+  void editor
+    .openEphemeralPreview(p.kind === "diagram" ? "diagram" : "md", p.source ?? "")
+    .catch((e) => console.error("agent preview failed", e));
 });
 
 // Subscribe to MCP drive events emitted by the Rust MCP server tools.
@@ -338,6 +405,8 @@ window.addEventListener("message", (e) => {
   const d = e.data as { __sutraPrompt?: boolean; id?: number; data?: unknown };
   if (d && d.__sutraPrompt === true && typeof d.id === "number") {
     void mcpUiReply(d.id, d.data ?? {});
+    editor.dismissAgentPreview();
+    promptOrigin = null;
   }
 });
 
@@ -355,7 +424,7 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => annotations.currentRouteAnnotations(),
+    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations().map(redactAnnotationForExternal) : [],
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
@@ -431,6 +500,7 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
 let agentStatus: AgentTrackingStatus = { enabled: false, agentActive: false, changes: [] };
@@ -752,12 +822,13 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   hideTrustToast(); // drop any leftover toast from the previous root
   persistWorkspaceSession();
   suppressSessionSave = true;
+  currentWorkspaceTrusted = false;
   try {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
-    void mcpSetRoot(dir);
     void mcpWriteAgentConfig(dir).then((warnings) => {
       for (const w of warnings) console.warn("MCP config:", w);
     });
@@ -767,6 +838,18 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
     if (settings.restoreSession) await restoreWorkspaceTabs(dir);
+    // Persisted task links need the complete turn manifest (not only the
+    // consume-once turn_poll delta) before the panel renders files/test state.
+    await turnsHydrated;
+    if (currentRoot !== dir) return;
+    await annotations.setRoot(dir);
+    currentWorkspaceTrusted = await isWorkspaceTrusted(dir).catch(() => false);
+    // Publish the MCP root only after annotation state is hydrated; queries
+    // cannot observe the previous project's annotations during a switch.
+    void mcpSetRoot(dir);
+    const annotationTasks = (await loadTasks(dir)).tasks.filter((task) => task.root === dir);
+    annotations.setTaskContext(annotationTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
+    await tasksPanel.reload();
   } finally {
     suppressSessionSave = false;
   }
@@ -774,6 +857,10 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   await terminals.reset(dir, drawerState.open);
+  // A trusted primary dispatch writes this link before launching the worktree
+  // process. Give the new root an integrated terminal immediately; it is ready
+  // for the user to launch their selected terminal-native agent there.
+  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
   await recentsPush(dir, basename(dir));
   void loadRecents().then((r) => { recentsCache = r; });
   void refreshGitState(dir);
@@ -789,6 +876,20 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
+}
+
+/** Hydrate closed historical turns for task links after a restart. turn_poll
+ * only delivers each close once, whereas turn_list is the durable manifest.
+ * The root guard prevents an old IPC result populating a newly selected root. */
+async function hydrateTurnsForWorkspace(root: string): Promise<void> {
+  try {
+    const turns = await turnList(root);
+    if (currentRoot !== root) return;
+    replaceTurns(root, turns);
+  } catch {
+    // A non-Git root or unavailable backend still opens normally; saved task
+    // evidence remains visible without the live turn detail.
+  }
 }
 
 async function openFolderDialog(): Promise<void> {
@@ -879,6 +980,12 @@ function renderTurnStrip(root: string): void {
         // matches what it was testing and get recorded as that turn's result.
         await cancelTurnTestsFrom(root, turn.id);
         const res = await turnRollback(root, rollbackTargetId(turn), paths);
+        // A turn has a rolled-back review disposition only when every file in
+        // that turn was restored. A partial rollback leaves it unresolved for
+        // later explicit review rather than claiming a false whole-turn result.
+        if (turn.files.length > 0 && turn.files.every((file) => res.restored.includes(file.path))) {
+          void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"));
+        }
         // turn_poll is consume-once and never re-delivers a closed turn, so
         // rolled_back (set server-side on the manifest) would otherwise never
         // reach turnsByRoot — re-fetch the full list so the strip reflects it
@@ -963,6 +1070,16 @@ async function refreshDiffFileList(): Promise<void> {
           editor.setAgentChanges(next.changes);
           diffViewer.invalidate();
           void refreshDiffFileList();
+          // Per-file acceptance becomes a task-level turn disposition only
+          // after every file from that linked turn is no longer reviewable.
+          const remainingPaths = new Set(next.changes.map((change) => change.path));
+          for (const turn of getTurns(root)) {
+            if (turn.files.some((file) => file.path === path)
+              && turn.files.length > 0
+              && turn.files.every((file) => !remainingPaths.has(file.path))) {
+              void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "accepted"));
+            }
+          }
         });
       },
       onReject: (path: string, hunk) => {
@@ -1076,6 +1193,196 @@ function setComposer(on: boolean): void {
 }
 btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
 $("composer-close").onclick = () => setComposer(false);
+
+// ---- tasks (control plane) ----
+// Keep this panel dynamically mounted so T2 stays additive: it shares the
+// editor column without taking ownership of the terminal or composer layout.
+const tasksPane = document.createElement("div");
+tasksPane.id = "tasks-panel-host";
+tasksPane.className = "hidden";
+$("editor-area").appendChild(tasksPane);
+const btnTasks = document.createElement("button");
+btnTasks.id = "btn-tasks";
+btnTasks.className = "glyph";
+btnTasks.title = "Toggle tasks";
+btnTasks.setAttribute("aria-label", "Toggle tasks");
+btnTasks.innerHTML = icon("check", 17);
+$("view-tools").insertBefore(btnTasks, $("btn-menu"));
+const activeWorktreeSetups = new Map<string, { root: string; taskId: string; automationId: string }>();
+const tasksPanel = mountTasksPanel({
+  container: tasksPane,
+  getRoot: () => currentRoot,
+  getTurns: (root) => getTurns(root),
+  getComposerDraft: () => {
+    if (!ensureComposer()) return null;
+    return composerPanel?.getTaskDraft() ?? null;
+  },
+  deliverPrompt: async (args) => {
+    if (!ensureComposer()) return { ok: false, reason: "No workspace open" };
+    return composerPanel?.deliverTaskPrompt(args) ?? { ok: false, reason: "Composer unavailable" };
+  },
+  getAutomationChoices: () => automations.map((automation) => ({ id: automation.id, label: automation.name })),
+  runRequiredCheck: runTaskRequiredCheck,
+  cancelRequiredCheck: cancelTaskRequiredCheck,
+  isRequiredCheckRunning: (task, automationId) => !!activeTaskChecks.activeRun(task.root, task.id, automationId),
+  dispatchWorktree: async (task, input: WorktreeDispatchInput) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    const current = (await loadTasks(root)).tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+    if (!current) throw new Error("Task no longer exists; reload before dispatching it.");
+    if (current.worktree) {
+      await spawnWindow(current.worktree.path);
+      return;
+    }
+    // The dialog can outlive an automation edit. Refuse before Git writes when
+    // its selected optional setup command is no longer part of this workspace.
+    const setup = input.setupAutomationId
+      ? automations.find((candidate) => candidate.id === input.setupAutomationId)
+      : undefined;
+    if (input.setupAutomationId && !setup) {
+      throw new Error(`Setup automation “${input.setupAutomationId}” no longer exists; no worktree was created.`);
+    }
+    const runnerId = setup ? `worktree-setup:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}` : null;
+    const created = await gitCreateWorktree(root, input.branch, input.target, input.baseRef);
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Workspace trust changed after the worktree was created; it was left unlinked.");
+    await createDir(`${created.path}/.sutra`);
+    await writeFile(`${created.path}/${WORKTREE_TASK_LINK_FILE}`, serializeWorktreeTaskLink(root, task.id));
+    const linked = await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => {
+      if (candidate.id !== task.id || candidate.worktree) return candidate;
+      return { ...candidate, worktree: { path: created.path, branch: created.branch }, updatedAt: Math.max(Date.now(), candidate.updatedAt) };
+    }), async () => currentRoot === root && await isWorkspaceTrusted(root));
+    if (!linked) throw new Error("Worktree was created but the task link was not saved; it was left intact for recovery.");
+    if (setup) {
+      activeWorktreeSetups.set(runnerId!, { root, taskId: task.id, automationId: setup.id });
+      let started = false;
+      try {
+        started = await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => {
+          if (candidate.id !== task.id) return candidate;
+          return beginWorktreeSetup(candidate, setup.id);
+        }), async () => currentRoot === root && await isWorkspaceTrusted(root));
+      } catch (error) {
+        activeWorktreeSetups.delete(runnerId!);
+        throw error;
+      }
+      if (!started) {
+        activeWorktreeSetups.delete(runnerId!);
+        throw new Error("Worktree was created but setup status was not saved; it was left intact for recovery.");
+      }
+      try {
+        await runnerRun(runnerId!, setup.command, created.path, TASK_CHECK_TIMEOUT_MS);
+      } catch (error) {
+        activeWorktreeSetups.delete(runnerId!);
+        await queueTaskMetadataUpdate(root, (tasks) => tasks.map((candidate) => candidate.id === task.id
+          ? completeWorktreeSetup(candidate, { automationId: setup.id, state: "fail", completedAt: Date.now(), outputTail: String(error) })
+          : candidate));
+        throw new Error(`Could not start setup automation: ${String(error)}`);
+      }
+    }
+    await spawnWindow(created.path);
+  },
+  openWorktree: async (task) => {
+    if (!task.worktree) throw new Error("This task has no linked worktree.");
+    const registered = await gitWorktrees(task.root);
+    if (!registered.some((worktree) => worktree.path === task.worktree?.path)) {
+      await queueTaskMetadataUpdate(task.root, (tasks) => tasks.map((candidate) => candidate.id === task.id
+        ? markMissingWorktree(candidate)
+        : candidate));
+      throw new Error("Linked worktree is missing; task was blocked and no path was recreated.");
+    }
+    await spawnWindow(task.worktree.path);
+  },
+  removeWorktree: async (task, discard) => {
+    if (!task.worktree) throw new Error("This task has no linked worktree.");
+    const expected = task.worktree;
+    return queueTaskMetadataOperation(task.root, async () => {
+      const loaded = await loadTasks(task.root);
+      if (loaded.warnings.length) throw new Error("Task metadata has recoverable errors; repair it before removing the worktree.");
+      const current = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === task.root);
+      if (!current || !current.worktree || current.worktree.path !== expected.path || current.worktree.branch !== expected.branch) {
+        throw new Error("Task worktree changed or no longer exists; reload before removing it.");
+      }
+      if (current.status === "running" && !discard) {
+        throw new Error("Task started while confirmation was open; confirm discard again before removing its worktree.");
+      }
+      // This is intentionally the final await before Git removal. The
+      // per-root operation queue prevents in-app task transitions between the
+      // fresh metadata check and the destructive Git command.
+      const trustedNow = await isWorkspaceTrusted(task.root).catch(() => false);
+      if (!mayPersistTaskForRoot(task.root, currentRoot, trustedNow)) {
+        throw new Error(currentRoot === task.root ? "Tasks are read-only until this workspace is trusted." : "Workspace changed; worktree was not removed.");
+      }
+      const result = await gitRemoveWorktree(task.root, expected.path, discard);
+      if (result.status === "dirty") return result;
+
+      // Read again after Git completes: turn/evidence updates from another
+      // writer are preserved rather than replaced by the rendered card.
+      const after = await loadTasks(task.root);
+      if (after.warnings.length) throw new Error("Worktree changed but task metadata has recoverable errors; repair it to reconcile the link.");
+      const next = after.tasks.map((candidate) => {
+        if (candidate.id !== task.id || candidate.root !== task.root || !candidate.worktree || candidate.worktree.path !== expected.path) return candidate;
+        return result.status === "missing" ? markMissingWorktree(candidate) : removeTaskWorktree(candidate);
+      });
+      if (next.some((candidate, index) => candidate !== after.tasks[index])) {
+        await saveTasks(task.root, next);
+        // In-queue reload (this runs inside queueTaskMetadataOperation) must
+        // skip reconcile so it can never enqueue onto the in-flight op.
+        if (currentRoot === task.root) await tasksPanel.reload(true);
+      }
+      return result;
+    });
+  },
+  cancelWorktreeSetup: async (task) => {
+    if (currentRoot !== task.root || !(await isWorkspaceTrusted(task.root).catch(() => false))) return false;
+    const active = [...activeWorktreeSetups.entries()].find(([, setup]) => setup.root === task.root && setup.taskId === task.id);
+    return active ? runnerCancel(active[0]).catch(() => false) : false;
+  },
+  isWorktreeSetupActive: (task) => [...activeWorktreeSetups.values()].some((setup) => setup.root === task.root && setup.taskId === task.id),
+  confirmDiscard: confirmNative,
+  // G3: explicit, single-shot stage+commit for a task handoff. Trust/root
+  // are rechecked immediately before the write (dispatchWorktree's seam),
+  // and this is invoked ONLY by the dialog's Commit button — never on
+  // Cancel, never automatically, and there is no push/remote call anywhere
+  // in this path.
+  commitHandoff: async (task, input) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    if (!input.paths.length) throw new Error("Select at least one file to commit.");
+    await gitStageFiles(root, input.paths);
+    const sha = await gitCommit(root, input.message);
+    return { sha };
+  },
+  // Explicit, separately-clicked unstage of files staged outside the
+  // handoff selection (git_commit commits the whole index, not just the
+  // paths just staged) — never called from Commit or Cancel.
+  unstageHandoffExtras: async (task, paths) => {
+    const root = task.root;
+    if (currentRoot !== root || !(await isWorkspaceTrusted(root))) throw new Error("Tasks are read-only until this workspace is trusted.");
+    if (!paths.length) return;
+    await gitUnstageFiles(root, paths);
+  },
+  updateTaskMetadata: (root, reduce) => queueTaskMetadataUpdate(root, reduce, async () => {
+    const trusted = await isWorkspaceTrusted(root).catch(() => false);
+    return mayPersistTaskForRoot(root, currentRoot, trusted);
+  }),
+  onTasksChanged: (entries) => {
+    const root = currentRoot;
+    if (root) annotations.setTaskContext(entries.filter((task) => task.root === root), annotationsAttach, annotationsDeliver, annotationsDetach);
+  },
+});
+let tasksAgentRefreshTimer: number | undefined;
+terminals.onAgentAttached = () => {
+  window.clearTimeout(tasksAgentRefreshTimer);
+  // The PTY's foreground process changes just after the command is written.
+  // Wait briefly so pty_list_agents sees Claude/Codex rather than the shell.
+  tasksAgentRefreshTimer = window.setTimeout(() => {
+    if (!tasksPane.classList.contains("hidden")) void tasksPanel.reload();
+  }, 250);
+};
+function setTasks(on: boolean): void {
+  btnTasks.classList.toggle("on", on);
+  if (on) tasksPanel.show(); else tasksPanel.hide();
+}
+btnTasks.onclick = () => setTasks(tasksPane.classList.contains("hidden"));
 
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
@@ -1442,6 +1749,11 @@ function showTrustToast(root: string): void {
       await trustWorkspace(root); // must land before the trust re-check below
       hideTrustToast();
       void runDiagnostics(root); // run the now-permitted jobs immediately
+      // Top-level reload so the now-trusted root runs its one-time worktree
+      // reconcile OUTSIDE the metadata queue (mirrors the File▸Open path).
+      // Without this, the first reconcile could only fire from a queue-
+      // completion reload, which now skips it — leaving setup unreconciled.
+      if (currentRoot === root) void tasksPanel.reload();
     })();
   };
   const closeBtn = document.createElement("button");
@@ -1488,6 +1800,111 @@ ensureDiagnosticsExtension();
   };
 }
 
+// Serialize automatic task mutations per root. turn_poll can close several
+// turns in one tick, and a stale concurrent read/write would otherwise lose a
+// link. Corrupt task files remain read-only: automatic tracking must never
+// "repair" externally malformed metadata by overwriting it.
+const taskMetadataWrites = new Map<string, Promise<unknown>>();
+function queueTaskMetadataUpdate(
+  root: string,
+  reduce: (tasks: readonly Task[]) => readonly Task[],
+  canWrite?: () => Promise<boolean>,
+): Promise<boolean> {
+  const previous = taskMetadataWrites.get(root) ?? Promise.resolve(false);
+  const next = previous.catch(() => {}).then(async () => {
+    const loaded = await loadTasks(root);
+    if (loaded.warnings.length) {
+      console.warn("Task turn association skipped: tasks file has recoverable warnings", loaded.warnings);
+      return false;
+    }
+    if (canWrite && !(await canWrite())) return false;
+    const tasks = reduce(loaded.tasks);
+    if (tasks === loaded.tasks) return false;
+    // The acceptance callback is trust/root gated again immediately before
+    // persistence, after its serialized re-read and reducer execution.
+    if (canWrite && !(await canWrite())) return false;
+    await saveTasks(root, tasks);
+    // skipReconcile=true: this reload runs from inside the queue; letting it
+    // enqueue the reconcile write would re-enter and deadlock the chain.
+    if (currentRoot === root) await tasksPanel.reload(true);
+    return true;
+  });
+  taskMetadataWrites.set(root, next);
+  void next.finally(() => {
+    if (taskMetadataWrites.get(root) === next) taskMetadataWrites.delete(root);
+  }).catch(() => {});
+  return next;
+}
+
+/** Serialize destructive Git/task operations with turn/evidence metadata
+ * writes while allowing the operation to return a typed backend result. */
+function queueTaskMetadataOperation<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  const previous = taskMetadataWrites.get(root) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  taskMetadataWrites.set(root, next);
+  void next.finally(() => {
+    if (taskMetadataWrites.get(root) === next) taskMetadataWrites.delete(root);
+  }).catch(() => {});
+  return next;
+}
+
+// Required-check execution is deliberately separate from the automation bar:
+// PTY/background automations have no authoritative exit code and can never
+// write task evidence. This in-memory registry preserves the last completed
+// evidence throughout a rerun, then correlates the runner-done event without
+// splitting a root-containing job id.
+const activeTaskChecks = new TaskCheckRunRegistry();
+
+/** Programmatic seam for the task panel's later E2 run control. The selected
+ * automation must still be required by this exact task in the current trusted
+ * root; a terminal automation cannot enter this path. */
+export async function runTaskRequiredCheck(task: Task, automationId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const root = task.root;
+  if (currentRoot !== root) return { ok: false, reason: "Open this task's workspace before running its checks." };
+  const loaded = await loadTasks(root);
+  if (loaded.warnings.length) return { ok: false, reason: "Task metadata has recoverable errors; repair it before running checks." };
+  const currentTask = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+  if (!currentTask) return { ok: false, reason: "Task no longer exists; reload before running its check." };
+  if (currentRoot !== root || !(await isWorkspaceTrusted(root))) return { ok: false, reason: "Tasks are read-only until this workspace is trusted." };
+  if (!hasRequiredAutomationCheck(currentTask, automationId)) {
+    return { ok: false, reason: "This automation is not required by the task." };
+  }
+  const automation = automations.find((candidate) => candidate.id === automationId);
+  if (!automation) return { ok: false, reason: `Required automation “${automationId}” no longer exists.` };
+
+  let run;
+  try {
+    run = activeTaskChecks.start(root, currentTask.id, automationId);
+  } catch (error) {
+    return { ok: false, reason: String(error) };
+  }
+  try {
+    const runnerId = await taskCheckRun(root, currentTask.id, automationId, automation.command, TASK_CHECK_TIMEOUT_MS);
+    if (runnerId !== run.id) throw new Error("Task check runner returned an unexpected job id");
+    return { ok: true };
+  } catch (error) {
+    // No runner-done event is guaranteed when the command could not be
+    // scheduled, so release only this unstarted reservation. Existing durable
+    // evidence was intentionally never touched.
+    activeTaskChecks.complete({ id: run.id, exitCode: null, stdout: "", stderr: "", timedOut: false, cancelled: false });
+    return { ok: false, reason: `Could not start required check: ${String(error)}` };
+  }
+}
+
+/** Cancellation remains pending until runner-done appends immutable
+ * `cancelled` evidence. Returning false leaves an already-completed result
+ * untouched. */
+export async function cancelTaskRequiredCheck(task: Task, automationId: string): Promise<boolean> {
+  const root = task.root;
+  if (currentRoot !== root || !(await isWorkspaceTrusted(root))) return false;
+  const loaded = await loadTasks(root);
+  const currentTask = loaded.tasks.find((candidate) => candidate.id === task.id && candidate.root === root);
+  if (loaded.warnings.length || !currentTask || !hasRequiredAutomationCheck(currentTask, automationId)) return false;
+  const run = activeTaskChecks.activeRun(root, task.id, automationId);
+  if (!run) return false;
+  return taskCheckCancel(run.root, run.taskId, run.automationId).catch(() => false);
+}
+
 // Auto-run the project's test automation when an agent turn closes.
 onTurnClosed((root, turn) => {
   void (async () => {
@@ -1499,6 +1916,15 @@ onTurnClosed((root, turn) => {
       .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
       .catch(() => {});
   })();
+});
+
+// Root-level task attribution deliberately runs independently from terminal
+// delivery and test automation. onTurnClosed carries no terminal identity, so
+// a root's one running task is the sole authoritative association target.
+onTurnClosed((root, turn) => {
+  void queueTaskMetadataUpdate(root, (tasks) => attachClosedTurnToRunningTask(tasks, root, turn)).catch((error) => {
+    console.warn("Task turn association failed", error);
+  });
 });
 
 // Runner ids (test:<root>:<turnId>) cancelled by a rollback — consulted by
@@ -1524,6 +1950,32 @@ async function cancelTurnTestsFrom(root: string, minTurnId: number): Promise<voi
 
 // Record pass/fail when a `test:`-prefixed runner completes (id = test:<root>:<turnId>).
 void onRunnerDone((p) => {
+  const setup = activeWorktreeSetups.get(p.id);
+  if (setup) {
+    activeWorktreeSetups.delete(p.id);
+    const state = p.cancelled ? "cancelled" : p.exitCode === 0 && !p.timedOut ? "pass" : "fail";
+    const outputTail = (p.stdout + p.stderr).slice(-AUTOMATION_OUTPUT_TAIL_LIMIT);
+    void queueTaskMetadataUpdate(setup.root, (tasks) => tasks.map((candidate) => candidate.id === setup.taskId
+      ? completeWorktreeSetup(candidate, { automationId: setup.automationId, state, completedAt: Date.now(), outputTail })
+      : candidate)).catch((error) => console.warn("Worktree setup result failed", error));
+    if (currentRoot === setup.root) void tasksPanel.reload();
+    return;
+  }
+  const taskCheck = activeTaskChecks.complete(p);
+  if (taskCheck) {
+    const evidence = taskCheckEvidence(p);
+    void queueTaskMetadataUpdate(taskCheck.root, (tasks) => {
+      const task = tasks.find((candidate) => candidate.id === taskCheck.taskId && candidate.root === taskCheck.root);
+      if (!task) return tasks;
+      // An explicit deselection while the process ran does not delete the
+      // completed audit event; only the completion gate stops requiring it.
+      return tasks.map((candidate) => candidate === task
+        ? appendAutomationEvidence(candidate, { automationId: taskCheck.automationId, ...evidence })
+        : candidate);
+    }).catch((error) => console.warn("Task check evidence failed", error));
+    if (currentRoot === taskCheck.root) void tasksPanel.reload();
+    return;
+  }
   if (!p.id.startsWith("test:")) return;
   // A rollback-driven cancel must not stamp a stale pass/fail for the turn
   // whose code state it just replaced.

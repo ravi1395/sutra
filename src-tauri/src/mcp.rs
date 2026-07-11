@@ -347,6 +347,7 @@ struct PreviewOpen {
     kind: &'static str,     // "html" | "md" | "diagram"
     url: Option<String>,    // file-backed kinds
     source: Option<String>, // inline kinds (md, diagram)
+    path: Option<String>,   // resolved abs path (open_preview: opens the real file)
 }
 
 /// Discriminated drive command emitted to the frontend.
@@ -386,7 +387,7 @@ struct RenderDiagramArgs {
 /// Args for open_preview tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct OpenPreviewArgs {
-    /// Path (absolute or relative to the workspace root) to an .html/.md file.
+    /// Path (absolute or relative to the workspace root) to an .html/.md/.mmd file.
     path: String,
 }
 
@@ -507,9 +508,19 @@ impl SutraMcp {
             .ok_or_else(|| McpError::invalid_request("no workspace open in Sutra", None))
     }
 
-    /// Emit a preview-open event to the Tauri frontend.
+    /// Emit a preview-open event to the focused Sutra window; falls back to the
+    /// "main" window, then any window, so a push is never silently dropped.
     fn emit_preview(&self, payload: PreviewOpen) {
-        let _ = self.app.emit("sutra://preview/open", payload);
+        let window = self
+            .app
+            .webview_windows()
+            .into_values()
+            .find(|w| w.is_focused().unwrap_or(false))
+            .or_else(|| self.app.get_webview_window("main"))
+            .or_else(|| self.app.webview_windows().into_values().next());
+        if let Some(window) = window {
+            let _ = window.emit("sutra://preview/open", payload);
+        }
     }
 
     /// Emit a drive event to the Tauri frontend.
@@ -653,6 +664,7 @@ impl SutraMcp {
             kind: "html",
             url: Some(url.clone()),
             source: None,
+            path: None,
         });
         Ok(Self::ok_preview("html", Some(url)))
     }
@@ -667,6 +679,7 @@ impl SutraMcp {
             kind: "md",
             url: None,
             source: Some(args.md),
+            path: None,
         });
         Ok(Self::ok_preview("md", None))
     }
@@ -681,11 +694,12 @@ impl SutraMcp {
             kind: "diagram",
             url: None,
             source: Some(args.mermaid),
+            path: None,
         });
         Ok(Self::ok_preview("diagram", None))
     }
 
-    #[tool(description = "Open an existing workspace .html or .md file in Sutra's preview pane.")]
+    #[tool(description = "Open an existing workspace .html, .md, or .mmd file in Sutra's preview pane.")]
     fn open_preview(
         &self,
         Parameters(args): Parameters<OpenPreviewArgs>,
@@ -698,35 +712,24 @@ impl SutraMcp {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-        match ext.as_str() {
-            "html" | "htm" => {
-                let url = self
-                    .app
-                    .state::<PreviewServerState>()
-                    .url_for(&root, &file, self.app.state::<LocalAuthToken>().value())
-                    .map_err(|e| McpError::internal_error(e, None))?;
-                self.emit_preview(PreviewOpen {
-                    kind: "html",
-                    url: Some(url.clone()),
-                    source: None,
-                });
-                Ok(Self::ok_preview("html", Some(url)))
+        let kind = match ext.as_str() {
+            "html" | "htm" => "html",
+            "md" | "markdown" => "md",
+            "mmd" => "diagram",
+            _ => {
+                return Err(McpError::invalid_request(
+                    "only .html/.htm/.md/.markdown/.mmd can be previewed",
+                    None,
+                ))
             }
-            "md" | "markdown" => {
-                let text = std::fs::read_to_string(&file)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                self.emit_preview(PreviewOpen {
-                    kind: "md",
-                    url: None,
-                    source: Some(text),
-                });
-                Ok(Self::ok_preview("md", None))
-            }
-            _ => Err(McpError::invalid_request(
-                "only .html/.htm/.md/.markdown can be previewed",
-                None,
-            )),
-        }
+        };
+        self.emit_preview(PreviewOpen {
+            kind,
+            url: None,
+            source: None,
+            path: Some(file.to_string_lossy().into_owned()),
+        });
+        Ok(Self::ok_preview(kind, None))
     }
 
     #[tool(
@@ -876,8 +879,8 @@ impl SutraMcp {
 
     #[tool(
         description = "Get current dev-browser annotations for the active route: \
-                       number, design feedback, selector, tag, element HTML, computed \
-                       styles, and locator hints."
+                       number, design feedback, selector, tag, and locator hints. \
+                       Element HTML and computed styles are redacted."
     )]
     async fn get_annotations(&self) -> Result<CallToolResult, McpError> {
         self.active_root()?;

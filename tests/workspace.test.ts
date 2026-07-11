@@ -90,6 +90,23 @@ test("app layout keeps whisper bar below body and terminal inside webview bounds
   assert.match(mainTs, /vResizer\(vres, sidebar, \{[^}]*onResize:\s*\(\) => terminals\.refit\(\)/s);
 });
 
+test("the app entrypoint loads the stylesheet as a Vite module", () => {
+  const html = readFileSync("index.html", "utf8");
+  const mainTs = readFileSync("src/main.ts", "utf8");
+
+  assert.doesNotMatch(html, /rel="stylesheet" href="\/src\/styles\.css"/);
+  assert.match(mainTs, /import "\.\/styles\.css";/);
+});
+
+test("a visible tasks panel refreshes when an integrated agent starts", () => {
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const terminalTs = readFileSync("src/terminal.ts", "utf8");
+
+  assert.match(terminalTs, /onAgentAttached\?: \(\) => void;/);
+  assert.match(terminalTs, /this\.onAgentAttached\?\.\(\);/);
+  assert.match(mainTs, /terminals\.onAgentAttached = \(\) => \{[\s\S]*?!tasksPane\.classList\.contains\("hidden"\)[\s\S]*?tasksPanel\.reload\(\)/);
+});
+
 test("pathBelongsToRoot rejects sibling path prefixes", () => {
   assert.equal(pathBelongsToRoot("/tmp/project/src/main.ts", "/tmp/project"), true);
   assert.equal(pathBelongsToRoot("/tmp/project-old/src/main.ts", "/tmp/project"), false);
@@ -283,16 +300,20 @@ test("detectLanguage covers requested syntax highlighted extensions", () => {
   }
 });
 
-test("preview-created split does not clone the active file into the preview pane", () => {
+test("blank secondary split does not clone the active file", () => {
   assert.equal(splitClonesActiveTab("editor"), true);
-  assert.equal(splitClonesActiveTab("preview"), false);
+  assert.equal(splitClonesActiveTab("blank"), false);
 });
 
 test("preview tabs expose their source and refresh markdown live but html from disk", () => {
   assert.equal(previewTabName("README.md"), "Preview: README.md");
   assert.equal(previewRefreshModeForName("README.md"), "live");
-  assert.equal(previewRefreshModeForName("index.html"), "save");
+  assert.equal(previewRefreshModeForName("index.html"), "live");
   assert.equal(previewRefreshModeForName("main.ts"), null);
+});
+
+test("previewRefreshModeForName treats mmd as live", () => {
+  assert.equal(previewRefreshModeForName("chart.mmd"), "live");
 });
 
 test("preview shortcut is handled before focused editor paste handlers", () => {

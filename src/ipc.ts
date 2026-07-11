@@ -84,6 +84,20 @@ export interface WorktreeInfo {
 export const gitWorktrees = (root: string) =>
   invoke<WorktreeInfo[]>("git_worktrees", { root });
 
+export interface CreatedWorktree {
+  path: string;
+  branch: string;
+}
+export const gitCreateWorktree = (root: string, branch: string, target: string, baseRef: string) =>
+  invoke<CreatedWorktree>("git_create_worktree", { root, branch, target, baseRef });
+export interface RemovedWorktree {
+  path: string;
+  status: "removed" | "dirty" | "missing";
+  dirty: boolean;
+}
+export const gitRemoveWorktree = (root: string, target: string, discard: boolean) =>
+  invoke<RemovedWorktree>("git_remove_worktree", { root, target, discard });
+
 export interface BranchInfo {
   name: string;
   is_current: boolean;
@@ -95,6 +109,20 @@ export const gitBranches = (root: string) =>
   invoke<BranchInfo[]>("git_branches", { root });
 export const gitCheckout = (root: string, branch: string) =>
   invoke<void>("git_checkout", { root, branch });
+
+// --- Explicit stage/unstage/commit (whole files only, no push/remote) ---
+export const gitStageFiles = (root: string, paths: string[]) =>
+  invoke<void>("git_stage_files", { root, paths });
+export const gitUnstageFiles = (root: string, paths: string[]) =>
+  invoke<void>("git_unstage_files", { root, paths });
+export interface IndexStatus {
+  staged: GitStatusEntry[];
+  unstaged: GitStatusEntry[];
+}
+export const gitIndexStatus = (root: string) =>
+  invoke<IndexStatus>("git_index_status", { root });
+export const gitCommit = (root: string, message: string) =>
+  invoke<string>("git_commit", { root, message });
 
 export interface AgentChange extends ChangedFile {
   humanTouched: boolean;
@@ -166,6 +194,7 @@ export interface PreviewOpenPayload {
   kind: PreviewOpenKind;
   url?: string; // present for file-backed (html)
   source?: string; // present for inline (md, diagram)
+  path?: string; // present when open_preview resolved a real workspace file
 }
 export const onPreviewOpen = (
   cb: (p: PreviewOpenPayload) => void,
@@ -407,7 +436,7 @@ export async function deliverToPty(args: {
 // against these exact shapes. Rust structs serialize camelCase.
 export interface Diagnostic { path: string; line: number; col: number; severity: "error" | "warning"; message: string; source: string }
 export interface DiagJob { source: string; command: string; cwd: string; parser: "tsc" | "cargo" | "go" | "ruff" | "regex"; regex?: string }
-export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean }
+export interface RunnerDone { id: string; exitCode: number | null; durationMs: number; stdout: string; stderr: string; timedOut: boolean; cancelled: boolean }
 export interface TestStatus { state: "running" | "pass" | "fail" | "skipped"; exitCode?: number | null; durationMs?: number; outputTail: string }
 export interface TurnFileEntry { path: string; beforeHash?: string | null; afterHash?: string | null; snapshotted: boolean; unsafeBefore?: boolean }
 export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
@@ -421,6 +450,13 @@ export async function runnerRun(id: string, cmd: string, cwd: string, timeoutMs:
 }
 export async function runnerCancel(id: string): Promise<boolean> {
   return invoke<boolean>("runner_cancel", { id });
+}
+/** Required task checks run headlessly via runner.rs, never through a PTY. */
+export async function taskCheckRun(root: string, taskId: string, automationId: string, cmd: string, timeoutMs: number): Promise<string> {
+  return invoke<string>("task_check_run", { root, taskId, automationId, cmd, timeoutMs });
+}
+export async function taskCheckCancel(root: string, taskId: string, automationId: string): Promise<boolean> {
+  return invoke<boolean>("task_check_cancel", { root, taskId, automationId });
 }
 export async function diagDetect(root: string): Promise<DiagJob[]> {
   return invoke<DiagJob[]>("diag_detect", { root });

@@ -1,23 +1,81 @@
 // Parent-side canonical owner of annotation state. Bridges the in-iframe agent
 // (validated postMessage) and the side list. DOM-bound; verified manually.
 import { reduce, isTrustedMessage, type Annotation, type AnnAction } from "./annotation-core";
+import { annotationId, buildAnnotationContextPack } from "./annotation-context";
+import { annotationsForRoute, backupCorruptAnnotationsFile, loadAnnotations, saveAnnotations, type AnnotationPersistence } from "./annotation-store";
+import type { Task } from "./tasks";
 
 export class AnnotationsPanel {
   private state: Annotation[] = [];
   private route = "";
   private proxyOrigin = "";
   private armed = false;
+  private root: string | null = null;
+  private tasks: readonly Task[] = [];
+  private onAttach: ((task: Task, annotation: Annotation) => Promise<void>) | null = null;
+  private onDetach: ((task: Task, annotation: Annotation, reason?: string) => Promise<void>) | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
+  private onDeliver: ((task: Task, prompt: string) => Promise<void>) | null = null;
+  /** Surfaces recoverable load warnings (corrupt/partial annotations file) to the shell. */
+  onWarnings: ((warnings: string[]) => void) | null = null;
+  /** Resolves once the in-flight setRoot() hydration completes. Inbound browser
+   * messages are gated on this so a picked/reanchorResult mid-load can never
+   * mutate state that setRoot is about to overwrite (or save a partial file
+   * before a corrupt-file backup has been written). */
+  private hydrating: Promise<void> | null = null;
 
   constructor(
     private iframe: HTMLIFrameElement,
     private listEl: HTMLElement,
     private toggleBtn: HTMLButtonElement,
+    private persistence?: AnnotationPersistence,
   ) {
     this.toggleBtn.addEventListener("click", () => this.toggle());
     window.addEventListener("message", (e) => this.onMessage(e));
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.armed) { e.preventDefault(); this.toggle(); }
     }, true);
+  }
+
+  async setRoot(root: string | null): Promise<void> {
+    this.root = root;
+    // Clear synchronously before the async read so a root switch can never
+    // expose the previous project's annotations during hydration.
+    this.state = [];
+    this.route = "";
+    this.render();
+    if (!root) { this.hydrating = null; return; }
+    let resolveHydrating!: () => void;
+    this.hydrating = new Promise((resolve) => { resolveHydrating = resolve; });
+    try {
+      const loaded = await loadAnnotations(root, this.persistence);
+      if (this.root !== root) return;
+      if (loaded.warnings.length > 0) {
+        this.onWarnings?.(loaded.warnings);
+        // Must complete before hydration releases gated messages, so a
+        // corrupt file is quarantined before any save can overwrite it.
+        await backupCorruptAnnotationsFile(root, this.persistence).catch((error) =>
+          console.warn("Annotation backup failed", error));
+      }
+      this.state = loaded.annotations;
+      this.render();
+    } finally {
+      if (this.root === root) this.hydrating = null;
+      resolveHydrating();
+    }
+  }
+
+  setTaskContext(
+    tasks: readonly Task[],
+    onAttach: (task: Task, annotation: Annotation) => Promise<void>,
+    onDeliver: (task: Task, prompt: string) => Promise<void>,
+    onDetach?: (task: Task, annotation: Annotation, reason?: string) => Promise<void>,
+  ): void {
+    this.tasks = tasks;
+    this.onAttach = onAttach;
+    this.onDetach = onDetach ?? null;
+    this.onDeliver = onDeliver;
+    this.render();
   }
 
   /** Retarget annotation messaging and disarm the previous frame. */
@@ -31,7 +89,7 @@ export class AnnotationsPanel {
   }
 
   currentRouteAnnotations(): Annotation[] {
-    return this.state.filter((a) => a.route === this.route);
+    return annotationsForRoute(this.state, this.route);
   }
 
   private toggle() {
@@ -48,12 +106,28 @@ export class AnnotationsPanel {
 
   private dispatch(action: AnnAction) {
     this.state = reduce(this.state, action);
+    if (this.root) {
+      const root = this.root;
+      const state = [...this.state];
+      const persistence = this.persistence;
+      this.saveQueue = this.saveQueue.catch(() => {}).then(() => saveAnnotations(root, state, persistence));
+      void this.saveQueue.catch((error) => console.warn("Annotation save failed", error));
+    }
     this.render();
   }
 
   private onMessage(e: MessageEvent) {
     if (!isTrustedMessage(e, this.proxyOrigin, this.iframe.contentWindow)) return;
-    const m = e.data as any;
+    // A message that arrives while setRoot() is hydrating must wait: acting on
+    // it now would mutate/save state that setRoot is about to overwrite. Retry
+    // through onMessage (not straight to handleMessage) so a root switch that
+    // starts a *second* hydration while this one is queued gates it again
+    // instead of firing into the stale window between the two loads.
+    if (this.hydrating) { void this.hydrating.then(() => this.onMessage(e)); return; }
+    this.handleMessage(e.data as any);
+  }
+
+  private handleMessage(m: any) {
     switch (m.type) {
       case "ready":
         this.route = m.route;
@@ -129,6 +203,11 @@ export class AnnotationsPanel {
       del.dataset.n = String(a.n);
       del.addEventListener("click", (e) => {
         e.stopPropagation(); // don't trigger the row's scroll-to-pin
+        // Cascade-detach first: a deleted annotation must never leave a
+        // dangling id in a task's annotationIds, which would otherwise block
+        // "Stage feedback" forever with no way to recover in the UI.
+        const owners = this.tasks.filter((candidate) => candidate.annotationIds.includes(annotationId(a)));
+        for (const owner of owners) void this.onDetach?.(owner, a, "Annotation deleted");
         this.dispatch({ type: "remove", n: a.n });
         this.postToAgent({ type: "removePin", n: a.n });
       });
@@ -139,6 +218,49 @@ export class AnnotationsPanel {
       row.addEventListener("click", () => this.postToAgent({ type: "scrollToPin", n: a.n }));
 
       row.append(num, sel, fb, del);
+      if (this.tasks.length && this.onAttach) {
+        const task = this.tasks.find((candidate) => candidate.annotationIds.includes(annotationId(a)));
+        const taskSelect = document.createElement("select");
+        taskSelect.setAttribute("aria-label", `Task for annotation ${a.n}`);
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "Attach to task…";
+        taskSelect.appendChild(none);
+        for (const candidate of this.tasks.filter((candidate) => candidate.status !== "abandoned" && candidate.root === this.root)) {
+          const option = document.createElement("option");
+          option.value = candidate.id;
+          option.textContent = candidate.title;
+          option.selected = candidate.id === task?.id;
+          taskSelect.appendChild(option);
+        }
+        taskSelect.value = task?.id ?? "";
+        taskSelect.onchange = () => {
+          const target = this.tasks.find((candidate) => candidate.id === taskSelect.value);
+          if (target) void this.onAttach?.(target, a);
+          else if (task) void this.onDetach?.(task, a, "Explicitly detached from task");
+        };
+        row.appendChild(taskSelect);
+        if (task && this.onDeliver) {
+          const deliver = document.createElement("button");
+          deliver.textContent = "Stage feedback";
+          deliver.onclick = () => {
+            const pack = buildAnnotationContextPack(this.state, task.annotationIds, this.root ?? "", this.route);
+            if (pack.omittedIds.length) {
+              window.alert(`Resolve or explicitly exclude omitted annotations before staging. Omitted: ${pack.omittedIds.join(", ")}`);
+              return;
+            }
+            void this.onDeliver?.(task, pack.text);
+          };
+          row.appendChild(deliver);
+          if (a.stale && this.onDetach) {
+            const exclude = document.createElement("button");
+            exclude.textContent = "Exclude stale";
+            exclude.title = "Detach this stale annotation from the task without deleting its history.";
+            exclude.onclick = () => void this.onDetach?.(task, a, "Excluded stale annotation from follow-up context; resolve or review separately.");
+            row.appendChild(exclude);
+          }
+        }
+      }
       this.listEl.appendChild(row);
     }
   }
