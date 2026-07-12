@@ -25,7 +25,7 @@ import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
-import { mountDebugStrip, filterDebugPaletteCommands } from "./debug-strip";
+import { mountDebugStrip, filterDebugPaletteCommands, type DebugStripHandle } from "./debug-strip";
 import { mountDebugChip, debugChipEl } from "./debug-chip";
 import {
   chooseAdapterForRoot,
@@ -203,9 +203,11 @@ editor.onGotoDefinitionMulti = (locs) => {
 
 // --- Debugger session ---
 const debugSlot = mountDebuggerSidebarSlot($("main"));
+let debugStrip: DebugStripHandle | undefined;
 const debugSession = new DebugSession({
   editor,
   slot: debugSlot,
+  onAgentActive: (on) => debugStrip?.setAgentActive(on),
   // Only adapters using runInTerminal (debugpy/node, post-v1) hit this; codelldb
   // launches directly. Returning the terminal id is a best-effort pid stand-in.
   runInTerminal: async (args) => {
@@ -216,7 +218,7 @@ const debugSession = new DebugSession({
 });
 // Floating session-only control strip (mockup variant A) over the editor pane; absent
 // from the DOM until a session starts, torn down on stop/adapter-death.
-mountDebugStrip($("panes"), debugSession);
+debugStrip = mountDebugStrip($("panes"), debugSession);
 // Gutter clicks toggle the persistent breakpoint store + push to the live session.
 setBreakpointToggleHandler((path, line) => {
   debugSession.toggleBreakpoint(path, line);
@@ -469,12 +471,24 @@ window.addEventListener("message", (e) => {
   }
 });
 
+const TRUST_REQUIRED = "This folder is not trusted. Trust it in Sutra before creating or running automations.";
+
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
-// Automation actions (create/list/run) are async and route to resolveAutomationUi;
-// the read-only queries resolve synchronously via resolveUiQuery.
+// Automation and debug actions are async; read-only editor queries resolve synchronously.
 void onUiRequest((r) => {
-  if (r.query === "createAutomation" || r.query === "listAutomations" || r.query === "runAutomation") {
-    void resolveAutomationUi(r.query, r.params).then(
+  const query = r.query as string;
+  if (query.startsWith("debug")) {
+    void resolveDebugUi(query, r.params).then(
+      (payload) => void mcpUiReply(r.id, payload),
+      (e) => void mcpUiReply(r.id, { error: String(e) }),
+    );
+    return;
+  }
+  if (query === "createAutomation" || query === "listAutomations" || query === "runAutomation") {
+    void resolveAutomationUi(
+      query as "createAutomation" | "listAutomations" | "runAutomation",
+      r.params,
+    ).then(
       (payload) => void mcpUiReply(r.id, payload),
       (e) => void mcpUiReply(r.id, { error: String(e) }),
     );
@@ -487,6 +501,74 @@ void onUiRequest((r) => {
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
+
+/** Resolve a trust-gated MCP debugger request in the one live DebugSession. */
+async function resolveDebugUi(query: string, params: unknown): Promise<unknown> {
+  const root = currentRoot;
+  if (!root) return { error: "No workspace open in Sutra" };
+  if (!(await isWorkspaceTrusted(root).catch(() => false))) return { error: TRUST_REQUIRED };
+
+  const readWithoutSession = query === "debugState" || query === "debugEvaluate";
+  if (!debugSession.active) {
+    return readWithoutSession ? debugSession.debugState() : { error: "No active debug session" };
+  }
+  const p = (params ?? {}) as {
+    expression?: unknown;
+    path?: unknown;
+    line?: unknown;
+    condition?: unknown;
+    hitCondition?: unknown;
+    logMessage?: unknown;
+    kind?: unknown;
+  };
+
+  if (query === "debugState") return debugSession.debugState();
+  if (query === "debugEvaluate") {
+    if (typeof p.expression !== "string" || !p.expression.trim()) return { error: "Expression is required" };
+    const value = await debugSession.runAgentAction("", () => debugSession.evaluate(p.expression as string, "repl"));
+    return { value };
+  }
+
+  if (typeof p.path !== "string" || !Number.isInteger(p.line) || (p.line as number) < 1) {
+    return { error: "Breakpoint path and positive line are required" };
+  }
+  const path = p.path.startsWith("/") ? p.path : `${root.replace(/\/+$/, "")}/${p.path}`;
+  if (!pathBelongsToRoot(path, root)) return { error: "Breakpoint path must be inside the workspace" };
+  const line = p.line as number;
+
+  if (query === "debugSetBreakpoint") {
+    const fields = {
+      ...(typeof p.condition === "string" && p.condition ? { condition: p.condition } : {}),
+      ...(typeof p.hitCondition === "string" && p.hitCondition ? { hitCondition: p.hitCondition } : {}),
+      ...(typeof p.logMessage === "string" && p.logMessage ? { logMessage: p.logMessage } : {}),
+    };
+    await debugSession.runAgentAction("set breakpoint", async () => {
+      debugSession.setBreakpoint(path, line, fields);
+    });
+    saveBreakpointStore(root);
+    return { ok: true, path, line };
+  }
+  if (query === "debugRemoveBreakpoint") {
+    await debugSession.runAgentAction("remove breakpoint", async () => {
+      debugSession.removeBreakpoint(path, line);
+    });
+    saveBreakpointStore(root);
+    return { ok: true, path, line };
+  }
+  if (query === "debugContinue") {
+    await debugSession.runAgentAction("continue", () => debugSession.continue());
+    return { ok: true };
+  }
+  if (query === "debugStep") {
+    if (p.kind !== "over" && p.kind !== "in" && p.kind !== "out") return { error: "Step kind must be over, in, or out" };
+    const kind = p.kind as "over" | "in" | "out";
+    await debugSession.runAgentAction(`step ${kind}`, () =>
+      kind === "over" ? debugSession.stepOver() : kind === "in" ? debugSession.stepIn() : debugSession.stepOut(),
+    );
+    return { ok: true };
+  }
+  return { error: `unknown query: ${query}` };
+}
 
 // Handle MCP automation actions from an AI agent/skill: create/list/run automations
 // against the current workspace, reusing the same validation + persistence + bar
@@ -506,7 +588,7 @@ async function resolveAutomationUi(
   // Create/run persist or execute a shell command; a prompt-injected agent must not
   // reach that in an untrusted folder. Listing (read-only) above stays allowed.
   if (!(await isWorkspaceTrusted(root))) {
-    return { error: "This folder is not trusted. Trust it in Sutra before creating or running automations." };
+    return { error: TRUST_REQUIRED };
   }
 
   if (query === "createAutomation") {

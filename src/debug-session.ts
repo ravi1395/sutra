@@ -8,6 +8,8 @@ import {
   debugStart,
   debugStop,
   breakpointStore,
+  buildSetBreakpointsArgs,
+  type Breakpoint,
   type AdapterSpec,
   type LaunchConfig,
   type TauriTransport,
@@ -29,6 +31,7 @@ export interface SessionDeps {
   editor: EditorBridge;
   slot: DebuggerSidebarSlot;
   onConsole?: (text: string) => void;
+  onAgentActive?: (on: boolean) => void;
   // Launch the debuggee in a Sutra terminal for adapters using runInTerminal.
   runInTerminal?: (args: unknown) => Promise<number>;
 }
@@ -73,6 +76,8 @@ export class DebugSession implements HoverEvaluator {
   // and gotoPausedLine() — the single source of truth for debug-chip's click-to-frame.
   private pausedLocation: { path: string; line: number } | null = null;
   private uiListeners: Array<(state: DebugUiState) => void> = [];
+  private agentActionDepth = 0;
+  private actionQueue: Promise<void> = Promise.resolve();
 
   constructor(private deps: SessionDeps) {
     this.sidebar = new DebuggerSidebar({
@@ -148,6 +153,36 @@ export class DebugSession implements HoverEvaluator {
     return { active: this.active, paused: this.pausedLocation };
   }
 
+  /** Return the debugger snapshot exposed to trusted MCP callers. */
+  debugState(): Record<string, unknown> {
+    if (!this.client) return { active: false, message: "No active debug session" };
+    return {
+      active: true,
+      sessionId: this.sessionId,
+      state: this.client.state,
+      paused: this.pausedLocation,
+      frame: this.model.callStack[0] ?? null,
+      stack: this.model.callStack,
+      variables: this.model.variables,
+      watch: this.model.watch,
+    };
+  }
+
+  /** Run one MCP action with the strip badge and console attribution enabled. */
+  async runAgentAction<T>(label: string, action: () => Promise<T>): Promise<T> {
+    const outer = this.agentActionDepth === 0;
+    this.agentActionDepth++;
+    if (outer) this.deps.onAgentActive?.(true);
+    try {
+      const result = await action();
+      if (label) this.appendConsole(label);
+      return result;
+    } finally {
+      this.agentActionDepth--;
+      if (outer) this.deps.onAgentActive?.(false);
+    }
+  }
+
   /** Reveal the editor at the current paused frame — debug-chip's click-to-frame
    * delegates here instead of touching the editor bridge itself. No-op if not paused. */
   async gotoPausedLine(): Promise<void> {
@@ -203,10 +238,12 @@ export class DebugSession implements HoverEvaluator {
   }
 
   /** Resume execution (DAP `continue`). No-op when no session is paused. */
-  async continue(): Promise<void> {
-    if (!this.client) return;
-    this.clearPaused();
-    await this.client.request("continue", { threadId: this.currentThreadId }).catch(() => {});
+  continue(): Promise<void> {
+    return this.enqueueAction(async () => {
+      if (!this.client) return;
+      this.clearPaused();
+      await this.client.request("continue", { threadId: this.currentThreadId }).catch(() => {});
+    });
   }
 
   /** Step over (`next`) / into (`stepIn`) / out (`stepOut`) the current line. */
@@ -221,15 +258,26 @@ export class DebugSession implements HoverEvaluator {
   }
 
   /** Pause a running debuggee (DAP `pause`). No-op when no session is active. */
-  async pause(): Promise<void> {
-    if (!this.client) return;
-    await this.client.request("pause", { threadId: this.currentThreadId }).catch(() => {});
+  pause(): Promise<void> {
+    return this.enqueueAction(async () => {
+      if (!this.client) return;
+      await this.client.request("pause", { threadId: this.currentThreadId }).catch(() => {});
+    });
   }
 
-  private async step(command: "next" | "stepIn" | "stepOut"): Promise<void> {
-    if (!this.client) return;
-    this.clearPaused(); // optimistic: drop the paused line until the next `stopped`
-    await this.client.request(command, { threadId: this.currentThreadId }).catch(() => {});
+  private step(command: "next" | "stepIn" | "stepOut"): Promise<void> {
+    return this.enqueueAction(async () => {
+      if (!this.client) return;
+      this.clearPaused(); // optimistic: drop the paused line until the next `stopped`
+      await this.client.request(command, { threadId: this.currentThreadId }).catch(() => {});
+    });
+  }
+
+  /** Serialize human and MCP thread-scoped DAP actions through one session queue. */
+  private enqueueAction(action: () => Promise<void>): Promise<void> {
+    const next = this.actionQueue.then(action, action);
+    this.actionQueue = next.then(() => {}, () => {});
+    return next;
   }
 
   /** Stop the session: DAP disconnect, then drop the proxy + reset the UI. */
@@ -262,19 +310,50 @@ export class DebugSession implements HoverEvaluator {
     if (idx >= 0) bps.splice(idx, 1);
     else bps.push({ line });
     breakpointStore.set(path, bps);
+    this.renderBreakpoints(path, bps);
+  }
+
+  /** Set an MCP breakpoint through the persistent store and live adapter sync. */
+  setBreakpoint(
+    path: string,
+    line: number,
+    fields: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage"> = {},
+  ): void {
+    const bps = breakpointStore.get(path) ?? [];
+    const existing = bps.find((b) => b.line === line);
+    if (existing) Object.assign(existing, fields);
+    else bps.push({ line, ...fields });
+    bps.sort((a, b) => a.line - b.line);
+    breakpointStore.set(path, bps);
+    this.renderBreakpoints(path, bps);
+  }
+
+  /** Remove an MCP breakpoint through the persistent store and live adapter sync. */
+  removeBreakpoint(path: string, line: number): void {
+    const bps = (breakpointStore.get(path) ?? []).filter((b) => b.line !== line);
+    breakpointStore.set(path, bps);
+    this.renderBreakpoints(path, bps);
+  }
+
+  private renderBreakpoints(path: string, bps: Breakpoint[]): void {
     this.deps.editor.applyDebugEffects(
-      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: false }))),
+      setBreakpointMarks.of(
+        bps.map((b) => ({
+          line: b.line,
+          verified: b.verified ?? false,
+          condition: b.condition,
+          hitCondition: b.hitCondition,
+          logMessage: b.logMessage,
+        })),
+      ),
       path,
     );
-    if (this.client) {
-      this.client
-        .request("setBreakpoints", {
-          source: { path },
-          breakpoints: bps.map((b) => ({ line: b.line })),
-        })
-        .then((resp) => this.applyVerified(path, resp?.breakpoints ?? []))
-        .catch(() => {});
-    }
+    if (!this.client) return;
+    const { args } = buildSetBreakpointsArgs(path, bps, this.client.capabilities);
+    this.client
+      .request("setBreakpoints", args)
+      .then((resp) => this.applyVerified(path, resp?.breakpoints ?? []))
+      .catch(() => {});
   }
 
   // --- internals ---
@@ -416,8 +495,9 @@ export class DebugSession implements HoverEvaluator {
   }
 
   private appendConsole(text: string): void {
-    this.model.console.push(text);
-    this.deps.onConsole?.(text);
+    const line = this.agentActionDepth > 0 ? `[agent] ${text}` : text;
+    this.model.console.push(line);
+    this.deps.onConsole?.(line);
     this.sidebar.render(this.model);
   }
 
