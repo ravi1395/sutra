@@ -143,6 +143,23 @@ test("returns null when no signal matches", () => {
   assert.equal(detectAdapter(new Set(["README.md"]), null), null);
 });
 
+test("detects js-debug/node from package.json (socket, not from workspace)", () => {
+  const spec = detectAdapter(new Set(["package.json"]), null, "/usr/local/bin/js-debug");
+  assert.equal(spec?.type, "node");
+  assert.equal(spec?.transport.kind, "socket");
+  assert.equal((spec?.transport as any).command, "/usr/local/bin/js-debug");
+  assert.equal(spec?.fromWorkspace, false);
+});
+
+test("does not detect Node adapter when js-debug path is missing", () => {
+  assert.equal(detectAdapter(new Set(["package.json"]), null, null), null);
+});
+
+test("existing signal priority wins over package.json when both are present (Cargo.toml + package.json)", () => {
+  const spec = detectAdapter(new Set(["Cargo.toml", "package.json"]), "/usr/local/bin/codelldb", "/usr/local/bin/js-debug");
+  assert.equal(spec?.type, "lldb");
+});
+
 test("workspace-sourced adapter command requires a trust prompt the first time", () => {
   const spec = {
     type: "custom",
@@ -207,6 +224,19 @@ test("Go launch config uses package directory and debug mode", async () => {
   assert.deepEqual(resolved, {
     ok: true,
     config: { type: "go", request: "launch", program: "/repo/cmd/app", mode: "debug" },
+  });
+});
+
+test("Node launch config sets program to the active file and cwd to the project root", async () => {
+  const resolved = await resolveLaunchConfig(
+    { type: "node", transport: { kind: "socket", host: "127.0.0.1", port: 0 }, fromWorkspace: false },
+    "/repo",
+    "/repo/src/index.js",
+    { readText: async () => "", exists: async () => true },
+  );
+  assert.deepEqual(resolved, {
+    ok: true,
+    config: { type: "node", request: "launch", program: "/repo/src/index.js", cwd: "/repo" },
   });
 });
 

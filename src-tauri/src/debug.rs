@@ -85,17 +85,21 @@ fn is_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Locate an executable by name in PATH.
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|path| is_file(path))
-    })
+/// Search `dirs` in order for the first entry named `name`. Underlies both
+/// the real PATH lookup (`resolve_debug_adapter`, real `env::split_paths`)
+/// and the unit tests (an injected tempdir list) — keeps binary discovery
+/// testable without mutating the process-global `PATH` env var.
+fn find_in_dirs(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(name))
+        .find(|path| is_file(path))
 }
 
-/// Locate CodeLLDB inside common VS Code-compatible extension directories.
-fn find_codelldb_extension_in(home: &Path) -> Option<PathBuf> {
+/// Locate a binary inside common VS Code-compatible extension directories,
+/// among entries whose directory name starts with `prefix`, at `rel_path`
+/// relative to that entry (joined segment by segment). Picks the
+/// highest-versioned match when more than one extension version is present.
+fn find_extension_binary_in(home: &Path, prefix: &str, rel_path: &[&str]) -> Option<PathBuf> {
     let dirs = [
         ".vscode/extensions",
         ".vscode-oss/extensions",
@@ -110,10 +114,13 @@ fn find_codelldb_extension_in(home: &Path) -> Option<PathBuf> {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("vadimcn.vscode-lldb-") {
+            if !name.starts_with(prefix) {
                 continue;
             }
-            let path = entry.path().join("adapter").join("codelldb");
+            let mut path = entry.path();
+            for seg in rel_path {
+                path = path.join(seg);
+            }
             if is_file(&path) {
                 candidates.push(path);
             }
@@ -123,21 +130,60 @@ fn find_codelldb_extension_in(home: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
-/// Locate CodeLLDB inside the current user's extension directories.
-fn find_codelldb_extension() -> Option<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    find_codelldb_extension_in(&home)
+/// Locate CodeLLDB inside common VS Code-compatible extension directories.
+fn find_codelldb_extension_in(home: &Path) -> Option<PathBuf> {
+    find_extension_binary_in(home, "vadimcn.vscode-lldb-", &["adapter", "codelldb"])
+}
+
+/// Locate js-debug (vscode-js-debug) inside common VS Code-compatible
+/// extension directories.
+fn find_js_debug_extension_in(home: &Path) -> Option<PathBuf> {
+    find_extension_binary_in(home, "ms-vscode.js-debug-", &["dapDebugServer"])
+}
+
+/// Resolve `adapter`'s binary from an already-collected PATH directory list
+/// plus an optional HOME dir — pure and injectable so discovery is unit
+/// tested without touching real process env (`resolve_debug_adapter` below
+/// is the thin env-reading wrapper Tauri actually calls).
+///
+/// Registry (adapter -> discovery -> transport, decided by the TS side):
+///   - `codelldb`: PATH `codelldb`, else VS Code ext dir
+///     `vadimcn.vscode-lldb-*/adapter/codelldb` — socket transport,
+///     `{port}`-templated args (unchanged).
+///   - `debugpy`: PATH `python3`, else PATH `python` — stdio transport
+///     (`python -m debugpy.adapter`); no extension-dir fallback, debugpy is
+///     a pip package, not a VS Code extension.
+///   - `js-debug`: PATH `dapDebugServer`, else VS Code ext dir
+///     `ms-vscode.js-debug-*/dapDebugServer` — socket transport,
+///     `{port}`-templated args, mirrors codelldb.
+///   - anything else: `None` (preserves the pre-registry codelldb-only guard's
+///     behavior for unrecognized adapter names).
+fn resolve_adapter_path(
+    adapter: &str,
+    path_dirs: &[PathBuf],
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    match adapter {
+        "codelldb" => find_in_dirs(path_dirs, "codelldb")
+            .or_else(|| home.and_then(find_codelldb_extension_in)),
+        "debugpy" => {
+            find_in_dirs(path_dirs, "python3").or_else(|| find_in_dirs(path_dirs, "python"))
+        }
+        "js-debug" => find_in_dirs(path_dirs, "dapDebugServer")
+            .or_else(|| home.and_then(find_js_debug_extension_in)),
+        _ => None,
+    }
 }
 
 /// Resolve a known debug adapter binary from settings, PATH, or extension dirs.
 #[tauri::command]
 pub fn resolve_debug_adapter(root: String, adapter: String) -> Result<Option<String>, String> {
     let _ = root; // Reserved for workspace settings when a debugger setting exists.
-    if adapter != "codelldb" {
-        return Ok(None);
-    }
-    Ok(find_on_path("codelldb")
-        .or_else(find_codelldb_extension)
+    let path_dirs: Vec<PathBuf> = env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let home = env::var_os("HOME").map(PathBuf::from);
+    Ok(resolve_adapter_path(&adapter, &path_dirs, home.as_deref())
         .map(|p| p.to_string_lossy().into_owned()))
 }
 
@@ -328,7 +374,10 @@ pub fn debug_stop(state: State<'_, DebugState>, session_id: String) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_frames, find_codelldb_extension_in};
+    use super::{
+        drain_frames, find_codelldb_extension_in, find_js_debug_extension_in, resolve_adapter_path,
+    };
+    use std::path::PathBuf;
 
     fn frame(body: &str) -> Vec<u8> {
         format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
@@ -375,5 +424,74 @@ mod tests {
         let codelldb = adapter.join("codelldb");
         std::fs::write(&codelldb, "").unwrap();
         assert_eq!(find_codelldb_extension_in(dir.path()), Some(codelldb));
+    }
+
+    #[test]
+    fn registry_resolves_codelldb_from_path_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codelldb");
+        std::fs::write(&bin, "").unwrap();
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(
+            resolve_adapter_path("codelldb", &path_dirs, None),
+            Some(bin)
+        );
+    }
+
+    #[test]
+    fn registry_resolves_debugpy_from_path_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("python3");
+        std::fs::write(&bin, "").unwrap();
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), Some(bin));
+    }
+
+    #[test]
+    fn registry_resolves_js_debug_from_path_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("dapDebugServer");
+        std::fs::write(&bin, "").unwrap();
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(
+            resolve_adapter_path("js-debug", &path_dirs, None),
+            Some(bin)
+        );
+    }
+
+    #[test]
+    fn registry_absent_binary_returns_none_for_debugpy_and_js_debug() {
+        let dir = tempfile::tempdir().unwrap(); // empty — nothing installed
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), None);
+        assert_eq!(resolve_adapter_path("js-debug", &path_dirs, None), None);
+    }
+
+    #[test]
+    fn finds_js_debug_in_vscode_extension_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = dir
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("ms-vscode.js-debug-1.90.0");
+        std::fs::create_dir_all(&ext).unwrap();
+        let bin = ext.join("dapDebugServer");
+        std::fs::write(&bin, "").unwrap();
+        assert_eq!(find_js_debug_extension_in(dir.path()), Some(bin.clone()));
+        // also reachable through the registry dispatch when PATH has nothing
+        assert_eq!(
+            resolve_adapter_path("js-debug", &[], Some(dir.path())),
+            Some(bin)
+        );
+    }
+
+    #[test]
+    fn registry_unknown_adapter_returns_none() {
+        let path_dirs: Vec<PathBuf> = vec![];
+        assert_eq!(
+            resolve_adapter_path("unknown-adapter", &path_dirs, None),
+            None
+        );
     }
 }

@@ -410,11 +410,18 @@ export const isTrusted = (spec: AdapterSpec, root: string) =>
   !requiresTrustPrompt(spec, trustedRoots, root);
 
 /**
- * Map present project-root files to a v1 adapter. `codelldbPath` is the
- * resolved codelldb binary (PATH or ~/.vscode/extensions) or null if missing.
- * Returns null when no signal matches.
+ * Map present project-root files to a v1 adapter. `codelldbPath`/`jsDebugPath`
+ * are the resolved adapter binaries (PATH or VS Code-compatible extension
+ * dirs — see `resolve_debug_adapter` in `debug.rs`) or null if missing.
+ * Priority when multiple signals are present: Cargo.toml > requirements.txt/
+ * pyproject.toml > go.mod > package.json — first match wins, do not reorder.
+ * Returns null when no signal matches (or its adapter binary is unresolved).
  */
-export function detectAdapter(signals: Set<string>, codelldbPath: string | null): AdapterSpec | null {
+export function detectAdapter(
+  signals: Set<string>,
+  codelldbPath: string | null,
+  jsDebugPath: string | null = null,
+): AdapterSpec | null {
   if (signals.has("Cargo.toml") && codelldbPath) {
     return {
       type: "lldb",
@@ -437,6 +444,19 @@ export function detectAdapter(signals: Set<string>, codelldbPath: string | null)
   }
   if (signals.has("go.mod")) {
     return { type: "go", transport: { kind: "stdio", command: "dlv", args: ["dap"] }, fromWorkspace: false };
+  }
+  if (signals.has("package.json") && jsDebugPath) {
+    return {
+      type: "node",
+      transport: {
+        kind: "socket",
+        host: "127.0.0.1",
+        port: 0,
+        command: jsDebugPath,
+        args: ["{port}"],
+      },
+      fromWorkspace: false,
+    };
   }
   return null;
 }
@@ -485,6 +505,11 @@ export async function resolveLaunchConfig(
   if (spec.type === "go") {
     const program = activePath.endsWith(".go") ? dirname(activePath) : root;
     return { ok: true, config: { type: spec.type, request: "launch", program, mode: "debug" } };
+  }
+  if (spec.type === "node") {
+    // Node module resolution (require/import) is relative to cwd, unlike
+    // lldb/python/go — set it to the project root explicitly.
+    return { ok: true, config: { type: spec.type, request: "launch", program: activePath, cwd: root } };
   }
   return { ok: true, config: { type: spec.type, request: "launch", program: activePath } };
 }
