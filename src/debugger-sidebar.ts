@@ -9,6 +9,9 @@ export interface SidebarCallbacks {
   onRemoveWatch: (expr: string) => void;
   onToggleExceptionFilter: (filter: string, enabled: boolean) => void;
   onSelectFrame: (frameId: number, path: string, line: number) => void;
+  // Console REPL evaluate — resolves once appended (input clears); rejects on adapter
+  // error (input is left in place so the user can edit and retry).
+  onEvaluate: (expr: string) => Promise<void>;
 }
 
 export interface SidebarModel {
@@ -17,10 +20,20 @@ export interface SidebarModel {
   callStack: { id: number; name: string; path: string; line: number }[];
   exceptionFilters: { filter: string; label: string; enabled: boolean }[];
   console: string[];
+  // True while a DAP session is live — gates the console evaluate input row (hidden,
+  // not disabled, when there's no session to send an evaluate request to).
+  hasSession: boolean;
 }
 
 export function emptyModel(): SidebarModel {
-  return { variables: [], watch: [], callStack: [], exceptionFilters: [], console: [] };
+  return { variables: [], watch: [], callStack: [], exceptionFilters: [], console: [], hasSession: false };
+}
+
+/** True when a console-evaluate submission should be ignored: empty after trim, or
+ * containing a newline (pasted multi-line text has no single expression to send). */
+export function shouldIgnoreEvaluateInput(raw: string): boolean {
+  const trimmed = raw.trim();
+  return trimmed.length === 0 || /[\r\n]/.test(trimmed);
 }
 
 export class DebuggerSidebar {
@@ -37,7 +50,7 @@ export class DebuggerSidebar {
       this.panel("Watch", this.watchView(m.watch)),
       this.panel("Call Stack", this.callStackView(m.callStack)),
       this.panel("Exception Breakpoints", this.exceptionView(m.exceptionFilters)),
-      this.panel("Debug Console", this.consoleView(m.console)),
+      this.panel("Debug Console", this.consoleView(m.console, m.hasSession)),
     );
   }
 
@@ -119,10 +132,39 @@ export class DebuggerSidebar {
     return ul;
   }
 
-  private consoleView(lines: string[]): HTMLElement {
+  private consoleView(lines: string[], hasSession: boolean): HTMLElement {
     const pre = document.createElement("pre");
     pre.className = "dbg-console";
-    pre.textContent = lines.join("");
+    // Render each entry as its own line (not one joined blob) so error lines can
+    // carry a distinct class — evaluate() prefixes adapter failures with "Error: ".
+    for (const line of lines) {
+      const entry = document.createElement("div");
+      entry.className = line.startsWith("Error: ") ? "dbg-console-line dbg-console-error" : "dbg-console-line";
+      entry.textContent = line;
+      pre.append(entry);
+    }
+
+    if (hasSession) {
+      const input = document.createElement("input");
+      input.className = "dbg-console-input";
+      input.placeholder = "evaluate expression…";
+      input.onkeydown = (e) => {
+        if (e.key !== "Enter") return;
+        const expr = input.value;
+        if (shouldIgnoreEvaluateInput(expr)) return;
+        void this.cb.onEvaluate(expr.trim()).then(
+          () => {
+            input.value = "";
+          },
+          () => {
+            // Adapter error is already appended to the console by evaluate(); keep
+            // the text in place so the user can edit and retry.
+          },
+        );
+      };
+      pre.append(input);
+    }
+
     return pre;
   }
 }

@@ -15,6 +15,7 @@ import {
 import { DebuggerSidebar, emptyModel, type SidebarModel } from "./debugger-sidebar";
 import { setBreakpointMarks, setPausedLine, setInlineHints } from "./editor";
 import { matchIdentifiers } from "./debug-hints";
+import { setHoverEvaluator, type HoverEvaluator } from "./lang";
 import type { DebuggerSidebarSlot } from "./layout";
 
 // Minimal editor surface the controller needs (EditorManager satisfies it).
@@ -32,7 +33,24 @@ export interface SessionDeps {
   runInTerminal?: (args: unknown) => Promise<number>;
 }
 
-export class DebugSession {
+/**
+ * Build the DAP `evaluate` request args: `frameId` is included only while paused with
+ * a resolved frame — a stale frame id left over from before a `continue` must never be
+ * sent once the adapter is running again. Standalone (mirrors debug.ts's
+ * buildSetBreakpointsArgs) so the shape is unit-testable without a live client.
+ */
+export function buildEvaluateArgs(
+  expr: string,
+  context: "repl" | "hover",
+  state: "idle" | "running" | "paused",
+  frameId: number | null,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = { expression: expr, context };
+  if (state === "paused" && frameId != null) args.frameId = frameId;
+  return args;
+}
+
+export class DebugSession implements HoverEvaluator {
   private client: DapClient | null = null;
   private transport: TauriTransport | null = null;
   private sessionId = "";
@@ -58,7 +76,11 @@ export class DebugSession {
       },
       onToggleExceptionFilter: (filter, enabled) => void this.toggleException(filter, enabled),
       onSelectFrame: (frameId, path, line) => void this.selectFrame(frameId, path, line),
+      onEvaluate: (expr) => this.evaluate(expr, "repl").then(() => {}),
     });
+    // There is exactly one DebugSession per window — self-register so lang.ts's
+    // paused hover-evaluate can reach it without editor.ts/main.ts wiring a callback.
+    setHoverEvaluator(this);
   }
 
   /** Start a session for an already-resolved adapter spec and launch config. */
@@ -79,6 +101,7 @@ export class DebugSession {
     }
 
     this.deps.slot.show(this.sidebar.el);
+    this.model.hasSession = true; // reveals the console evaluate input row
     this.sidebar.render(this.model);
 
     await debugStart(this.sessionId, spec.transport, cwd);
@@ -91,6 +114,48 @@ export class DebugSession {
   /** True while a DAP session is live (used by F-key shortcuts to pick start vs continue). */
   get active(): boolean {
     return this.client != null;
+  }
+
+  /** True while paused with an adapter that declares `supportsEvaluateForHovers` — the
+   * gate lang.ts's hover tooltip checks before routing through evaluate(word, "hover")
+   * instead of the normal language hover. */
+  get canHoverEvaluate(): boolean {
+    return (
+      !!this.client &&
+      this.client.state === "paused" &&
+      this.client.capabilities.supportsEvaluateForHovers === true
+    );
+  }
+
+  /**
+   * DAP `evaluate` — resolves the value, or rejects with the adapter's error message.
+   * `context:"repl"` (console input) echoes `> expr` and the result/error into the
+   * console and refreshes watch values afterward (side effects may have changed
+   * frame-local state); `context:"hover"` is silent — lang.ts's tooltip renders the
+   * value itself, no console noise and no error surfaced on failure.
+   */
+  async evaluate(expr: string, context: "repl" | "hover"): Promise<string> {
+    const client = this.client;
+    if (!client) throw new Error("no active debug session");
+    if (context === "repl") this.appendConsole(`> ${expr}`);
+
+    const args = buildEvaluateArgs(expr, context, client.state, this.currentFrameId);
+    try {
+      const resp = await client.request("evaluate", args);
+      const value = String((resp as { result?: unknown } | undefined)?.result ?? "");
+      if (context === "repl") {
+        this.appendConsole(value);
+        // Isolated from the eval outcome: a refresh failure (e.g. a transient
+        // scopes/variables rejection) must never turn a successful evaluate into a
+        // fabricated error or leave the console input un-cleared.
+        await this.refreshPaused().catch(() => {});
+      }
+      return value;
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (context === "repl") this.appendConsole(`Error: ${err.message}`);
+      throw err;
+    }
   }
 
   /** Resume execution (DAP `continue`). No-op when no session is paused. */

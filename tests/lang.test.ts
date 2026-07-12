@@ -48,7 +48,7 @@ function makeDoc(content: string): { length: number; lineAt(offset: number): Fak
 }
 
 // Import the pure functions under test.
-import { offsetToPos, posToOffset, cmCompletionType, langCompletionSource } from "../src/lang";
+import { offsetToPos, posToOffset, cmCompletionType, langCompletionSource, debugHoverValue, wordAt, type HoverEvaluator } from "../src/lang";
 import type { Pos } from "../src/ipc";
 
 // ---------------------------------------------------------------------------
@@ -279,4 +279,55 @@ test("cmCompletionType: type/typedef → type", () => {
 
 test("cmCompletionType: constant → constant", () => {
   assert.equal(cmCompletionType("constant"), "constant");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2: paused hover-evaluate routing (debugHoverValue / wordAt).
+// No CM6 EditorView needed — debugHoverValue takes a CM6-shaped Text (the same
+// makeDoc fake used above) and a structural HoverEvaluator, mirroring how
+// debug-hints.ts's matchIdentifiers is tested standalone from the editor.
+// ---------------------------------------------------------------------------
+
+test("debugHoverValue: paused session with supportsEvaluateForHovers evaluates the word under the cursor", async () => {
+  const doc = makeDoc("let turn = 3;");
+  // Sanity check on the underlying word-extraction: "turn" spans offsets [4,8);
+  // 5 is inside it. Offset 9 (the '=' sign) has no identifier under it.
+  assert.deepEqual(wordAt(doc as never, 5), { from: 4, to: 8, text: "turn" });
+  assert.equal(wordAt(doc as never, 9), null);
+
+  const calls: { expr: string; context: string }[] = [];
+  const session: HoverEvaluator = {
+    canHoverEvaluate: true,
+    evaluate: async (expr, context) => {
+      calls.push({ expr, context });
+      return "3";
+    },
+  };
+  const result = await debugHoverValue(session, doc as never, 5);
+  assert.deepEqual(result, { from: 4, to: 8, word: "turn", value: "3" });
+  assert.deepEqual(calls, [{ expr: "turn", context: "hover" }]);
+});
+
+test("debugHoverValue: no session or unpaused/unsupported session falls through to normal hover (returns null)", async () => {
+  const doc = makeDoc("let turn = 3;");
+  const notEvaluable: HoverEvaluator = {
+    canHoverEvaluate: false,
+    evaluate: async () => {
+      throw new Error("must not be called when canHoverEvaluate is false");
+    },
+  };
+  assert.equal(await debugHoverValue(notEvaluable, doc as never, 5), null);
+  assert.equal(await debugHoverValue(null, doc as never, 5), null);
+});
+
+test("debugHoverValue: adapter evaluate rejection falls back silently (no throw)", async () => {
+  const doc = makeDoc("let turn = 3;");
+  const failing: HoverEvaluator = {
+    canHoverEvaluate: true,
+    evaluate: async () => {
+      throw new Error("not available");
+    },
+  };
+  const result = await debugHoverValue(failing, doc as never, 5);
+  assert.equal(result, null);
 });
