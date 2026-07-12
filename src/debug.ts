@@ -12,6 +12,9 @@ export interface DapTransport {
 export interface Breakpoint {
   line: number;
   verified?: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
 }
 export type BreakpointStore = Map<string, Breakpoint[]>; // file path → BPs
 
@@ -31,6 +34,54 @@ export interface LaunchResolverIO {
 }
 
 type Pending = { resolve: (body: unknown) => void; reject: (e: Error) => void };
+
+export interface DroppedBreakpointField {
+  path: string;
+  line: number;
+  field: "condition" | "hitCondition" | "logMessage";
+}
+
+export interface SetBreakpointsArgs {
+  source: { path: string };
+  breakpoints: Record<string, unknown>[];
+}
+
+/**
+ * Build one path's `setBreakpoints` DAP request args. A field is only
+ * included when the adapter's `initialize` capabilities declared support for
+ * it (`supportsConditionalBreakpoints` / `supportsHitConditionalBreakpoints` /
+ * `supportsLogPoints`) — never send a field the adapter didn't declare.
+ * Anything withheld is reported in `dropped` so the caller can log one notice.
+ */
+export function buildSetBreakpointsArgs(
+  path: string,
+  bps: readonly Breakpoint[],
+  capabilities: Record<string, unknown>,
+): { args: SetBreakpointsArgs; dropped: DroppedBreakpointField[] } {
+  const supportsCondition = capabilities.supportsConditionalBreakpoints === true;
+  const supportsHitCondition = capabilities.supportsHitConditionalBreakpoints === true;
+  const supportsLogPoints = capabilities.supportsLogPoints === true;
+  const dropped: DroppedBreakpointField[] = [];
+
+  const breakpoints = bps.map((b) => {
+    const out: Record<string, unknown> = { line: b.line };
+    if (b.condition !== undefined) {
+      if (supportsCondition) out.condition = b.condition;
+      else dropped.push({ path, line: b.line, field: "condition" });
+    }
+    if (b.hitCondition !== undefined) {
+      if (supportsHitCondition) out.hitCondition = b.hitCondition;
+      else dropped.push({ path, line: b.line, field: "hitCondition" });
+    }
+    if (b.logMessage !== undefined) {
+      if (supportsLogPoints) out.logMessage = b.logMessage;
+      else dropped.push({ path, line: b.line, field: "logMessage" });
+    }
+    return out;
+  });
+
+  return { args: { source: { path }, breakpoints }, dropped };
+}
 
 export class DapClient {
   state: "idle" | "running" | "paused" = "idle";
@@ -95,10 +146,12 @@ export class DapClient {
         clearTimeout(timer);
         try {
           for (const [path, bps] of breakpoints) {
-            const resp = await this.request("setBreakpoints", {
-              source: { path },
-              breakpoints: bps.map((b) => ({ line: b.line })),
-            });
+            const { args, dropped } = buildSetBreakpointsArgs(path, bps, this.capabilities);
+            if (dropped.length > 0) {
+              const fields = [...new Set(dropped.map((d) => d.field))].join(", ");
+              console.warn(`DAP: adapter does not support ${fields} — withheld from ${path}`);
+            }
+            const resp = await this.request("setBreakpoints", args);
             onVerified?.(path, resp?.breakpoints ?? []);
           }
           await this.request("setExceptionBreakpoints", { filters: exceptionFilters });
@@ -219,6 +272,123 @@ export interface AdapterSpec {
 // Module-level breakpoint store — independent of any active session, so BPs
 // persist across debug sessions (spec: gutter BPs survive stop/terminate).
 export const breakpointStore: BreakpointStore = new Map();
+
+// ---- per-root disk persistence (mirrors src/settings.ts's
+// `sutra.testAutoRun.<root>` idiom: one localStorage key per root, plain
+// try/catch around every access — never let storage failure crash the app). ----
+
+const BP_STORE_PREFIX = "sutra.breakpoints:";
+
+/** localStorage key for `root`'s persisted breakpoints. Exported for tests. */
+export function breakpointStoreKey(root: string): string {
+  return `${BP_STORE_PREFIX}${root.replace(/\/+$/, "") || "/"}`;
+}
+
+interface StoredBreakpoint {
+  line: number;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+}
+
+function isStoredBreakpoint(v: unknown): v is StoredBreakpoint {
+  if (!v || typeof v !== "object") return false;
+  const b = v as Record<string, unknown>;
+  if (typeof b.line !== "number") return false;
+  return (["condition", "hitCondition", "logMessage"] as const).every(
+    (k) => b[k] === undefined || typeof b[k] === "string",
+  );
+}
+
+/** `verified` is deliberately dropped — the adapter must re-confirm a
+ * breakpoint's location fresh each session, so a reloaded breakpoint always
+ * starts unverified (renders ◌ until the file opens and a session verifies it). */
+function toStored(b: Breakpoint): StoredBreakpoint {
+  return {
+    line: b.line,
+    ...(b.condition !== undefined ? { condition: b.condition } : {}),
+    ...(b.hitCondition !== undefined ? { hitCondition: b.hitCondition } : {}),
+    ...(b.logMessage !== undefined ? { logMessage: b.logMessage } : {}),
+  };
+}
+
+export function serializeBreakpointStore(store: BreakpointStore): string {
+  return JSON.stringify(Array.from(store.entries()).map(([path, bps]) => [path, bps.map(toStored)]));
+}
+
+/** Parse a persisted breakpoint-store blob. Any structural defect (bad JSON,
+ * wrong shape, non-string path, malformed breakpoint) is treated as fully
+ * corrupt — never partially recovered — and returns null. */
+export function deserializeBreakpointStore(raw: string | null): BreakpointStore | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const store: BreakpointStore = new Map();
+    for (const entry of parsed) {
+      if (!Array.isArray(entry) || entry.length !== 2) return null;
+      const [path, bps] = entry as [unknown, unknown];
+      if (typeof path !== "string" || !Array.isArray(bps) || !bps.every(isStoredBreakpoint)) return null;
+      store.set(path, (bps as StoredBreakpoint[]).map((b) => ({ ...b })));
+    }
+    return store;
+  } catch {
+    return null;
+  }
+}
+
+/** Repopulate the module `breakpointStore` in place from disk for `root`.
+ * Corrupt or absent data yields a fresh empty store; never throws. */
+export function loadBreakpointStore(root: string): void {
+  breakpointStore.clear();
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(breakpointStoreKey(root));
+  } catch {
+    raw = null;
+  }
+  const loaded = deserializeBreakpointStore(raw);
+  if (!loaded) {
+    if (raw) console.warn("sutra: stored breakpoints for this root were corrupt — starting fresh");
+    return;
+  }
+  for (const [path, bps] of loaded) breakpointStore.set(path, bps);
+}
+
+/** Persist the module `breakpointStore` for `root`. Best-effort — a full or
+ * unavailable store logs a notice and never throws. */
+export function saveBreakpointStore(root: string): void {
+  try {
+    localStorage.setItem(breakpointStoreKey(root), serializeBreakpointStore(breakpointStore));
+  } catch {
+    console.warn("sutra: could not persist breakpoints (storage unavailable or full)");
+  }
+}
+
+/**
+ * Merge condition/hitCondition/logMessage into `path`:`line`'s entry in the
+ * module `breakpointStore` (creating one only if a field is actually set —
+ * an untouched popover on a bare line should not fabricate a breakpoint).
+ * Returns the path's updated list, or null when there was nothing to do.
+ */
+export function upsertBreakpointFields(
+  path: string,
+  line: number,
+  fields: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage">,
+): Breakpoint[] | null {
+  const bps = breakpointStore.get(path) ?? [];
+  const idx = bps.findIndex((b) => b.line === line);
+  if (idx >= 0) {
+    bps[idx] = { ...bps[idx], ...fields };
+  } else if (fields.condition || fields.hitCondition || fields.logMessage) {
+    bps.push({ line, ...fields });
+    bps.sort((a, b) => a.line - b.line);
+  } else {
+    return null;
+  }
+  breakpointStore.set(path, bps);
+  return bps;
+}
 
 // Workspace roots the user has approved adapter execution for, this run.
 const trustedRoots = new Set<string>();

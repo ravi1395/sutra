@@ -23,9 +23,19 @@ import { resolveUiQuery } from "./annotation-core";
 import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
-import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
+import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
-import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointStore } from "./debug";
+import {
+  detectAdapter,
+  isTrusted,
+  markTrusted,
+  resolveLaunchConfig,
+  breakpointStore,
+  loadBreakpointStore,
+  saveBreakpointStore,
+  upsertBreakpointFields,
+} from "./debug";
+import { showBreakpointPopover } from "./breakpoint-popover";
 import {
   agentTrackingPoll,
   agentBaseContent,
@@ -203,7 +213,45 @@ const debugSession = new DebugSession({
   },
 });
 // Gutter clicks toggle the persistent breakpoint store + push to the live session.
-setBreakpointToggleHandler((path, line) => debugSession.toggleBreakpoint(path, line));
+setBreakpointToggleHandler((path, line) => {
+  debugSession.toggleBreakpoint(path, line);
+  if (currentRoot) saveBreakpointStore(currentRoot);
+});
+
+// Gutter right-click opens the condition/hit-count/log-message popover; every
+// keystroke commits straight into the persistent store + repaints the gutter.
+setBreakpointContextMenuHandler((path, line, x, y, containerEl) => {
+  const existing = (breakpointStore.get(path) ?? []).find((b) => b.line === line);
+  showBreakpointPopover({
+    x,
+    y,
+    containerEl,
+    path,
+    line,
+    initial: {
+      condition: existing?.condition,
+      hitCondition: existing?.hitCondition,
+      logMessage: existing?.logMessage,
+    },
+    onChange: (fields) => {
+      const bps = upsertBreakpointFields(path, line, fields);
+      if (!bps) return; // empty popover on a line with no breakpoint yet — nothing to create
+      if (currentRoot) saveBreakpointStore(currentRoot);
+      editor.applyDebugEffects(
+        setBreakpointMarks.of(
+          bps.map((b) => ({
+            line: b.line,
+            verified: b.verified ?? false,
+            condition: b.condition,
+            hitCondition: b.hitCondition,
+            logMessage: b.logMessage,
+          })),
+        ),
+        path,
+      );
+    },
+  });
+});
 
 // Resolve the project's debug adapter and launch a session from the palette.
 async function startDebugging(): Promise<void> {
@@ -544,7 +592,15 @@ editor.onActiveTabChanged = (tab) => {
   if (tab?.path) {
     const bps = breakpointStore.get(tab.path) ?? [];
     editor.applyDebugEffects(
-      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: b.verified ?? false }))),
+      setBreakpointMarks.of(
+        bps.map((b) => ({
+          line: b.line,
+          verified: b.verified ?? false,
+          condition: b.condition,
+          hitCondition: b.hitCondition,
+          logMessage: b.logMessage,
+        })),
+      ),
       tab.path,
     );
   }
@@ -827,6 +883,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    loadBreakpointStore(dir); // per-root persisted breakpoints; gutter repaints via onActiveTabChanged
     const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
     void mcpWriteAgentConfig(dir).then((warnings) => {
