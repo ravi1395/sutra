@@ -111,6 +111,19 @@ test("mountDebugStrip: absent from the container until active, torn down (not hi
   }
 });
 
+test("mountDebugStrip: active child sessions append their count to the session label", () => {
+  const restore = setupDom();
+  try {
+    const container = new FakeElement();
+    const session = new FakeSession();
+    const handle = mountDebugStrip(container, session);
+    session.emit({ active: true, paused: null, childCount: 2 });
+    assert.equal(handle.el.children[0].textContent, "running · 2 children");
+  } finally {
+    restore();
+  }
+});
+
 test("mountDebugStrip: every button is pure delegation to the session's own methods", () => {
   const restore = setupDom();
   try {

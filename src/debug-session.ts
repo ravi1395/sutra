@@ -34,6 +34,39 @@ export interface SessionDeps {
   onAgentActive?: (on: boolean) => void;
   // Launch the debuggee in a Sutra terminal for adapters using runInTerminal.
   runInTerminal?: (args: unknown) => Promise<number>;
+  // Injectable seams keep child-session lifecycle tests independent of Tauri.
+  createTransport?: (sessionId: string) => TauriTransport;
+  createClient?: (transport: TauriTransport) => SessionClient;
+  startProxy?: typeof debugStart;
+  stopProxy?: typeof debugStop;
+  resolveChildAdapter?: (type: string, cwd: string) => Promise<AdapterSpec | null>;
+}
+
+export interface SessionClient {
+  state: "idle" | "running" | "paused";
+  capabilities: Record<string, unknown>;
+  onRunInTerminal?: (args: unknown) => Promise<number>;
+  onStartDebugging?: (args: unknown) => Promise<boolean>;
+  on(event: string, cb: (body: any) => void): void;
+  request(command: string, args?: unknown, timeoutMs?: number): Promise<any>;
+  launch(
+    config: LaunchConfig,
+    breakpoints: typeof breakpointStore,
+    exceptionFilters?: string[],
+    onVerified?: (path: string, breakpoints: { verified?: boolean; line?: number }[]) => void,
+  ): Promise<void>;
+}
+
+interface SessionNode {
+  id: string;
+  client: SessionClient;
+  transport: TauriTransport;
+  spec: AdapterSpec;
+  cwd: string;
+  parent: SessionNode | null;
+  children: SessionNode[];
+  nextChildIndex: number;
+  stopping: boolean;
 }
 
 /** Session UI-state snapshot: the only thing debug-strip.ts/debug-chip.ts read from
@@ -41,6 +74,7 @@ export interface SessionDeps {
 export interface DebugUiState {
   active: boolean;
   paused: { path: string; line: number } | null;
+  childCount?: number;
 }
 
 /**
@@ -61,9 +95,11 @@ export function buildEvaluateArgs(
 }
 
 export class DebugSession implements HoverEvaluator {
-  private client: DapClient | null = null;
+  private client: SessionClient | null = null;
   private transport: TauriTransport | null = null;
   private sessionId = "";
+  private rootNode: SessionNode | null = null;
+  private pausedClient: SessionClient | null = null;
   private sidebar: DebuggerSidebar;
   private model: SidebarModel = emptyModel();
   private watchExprs: string[] = [];
@@ -102,26 +138,31 @@ export class DebugSession implements HoverEvaluator {
   /** Start a session for an already-resolved adapter spec and launch config. */
   async start(spec: AdapterSpec, cwd: string, config: LaunchConfig): Promise<void> {
     this.sessionId = `dbg-${Date.now()}`;
-    const transport = tauriTransport(this.sessionId);
+    const transport = this.createTransport(this.sessionId);
     this.transport = transport;
     await transport.ready;
-    const client = new DapClient(transport);
+    const client = this.createClient(transport);
     this.client = client;
-
-    if (this.deps.runInTerminal) client.onRunInTerminal = this.deps.runInTerminal;
-    client.on("stopped", (b) => void this.onStopped(b));
-    client.on("continued", () => this.clearPaused());
-    client.on("output", (b) => this.appendConsole(b?.output ?? ""));
-    for (const ev of ["terminated", "exited", "__transportClosed"]) {
-      client.on(ev, () => void this.reset());
-    }
+    const node: SessionNode = {
+      id: this.sessionId,
+      client,
+      transport,
+      spec,
+      cwd,
+      parent: null,
+      children: [],
+      nextChildIndex: 1,
+      stopping: false,
+    };
+    this.rootNode = node;
+    this.bindClient(node);
 
     this.deps.slot.show(this.sidebar.el);
     this.model.hasSession = true; // reveals the console evaluate input row
     this.sidebar.render(this.model);
     this.emitState(); // strip/chip mount now — don't wait on the adapter's launch round-trip
 
-    await debugStart(this.sessionId, spec.transport, cwd);
+    await this.startProxy()(this.sessionId, spec.transport, cwd);
     const filters = this.exceptionFilters(client).map((f) => f.filter);
     await client.launch(config, breakpointStore, filters, (path, bps) =>
       this.applyVerified(path, bps),
@@ -150,7 +191,12 @@ export class DebugSession implements HoverEvaluator {
 
   /** Current session UI-state snapshot. */
   uiState(): DebugUiState {
-    return { active: this.active, paused: this.pausedLocation };
+    return { active: this.active, paused: this.pausedLocation, childCount: this.childCount };
+  }
+
+  /** Number of direct child sessions attached to the primary session. */
+  get childCount(): number {
+    return this.rootNode?.children.length ?? 0;
   }
 
   /** Return the debugger snapshot exposed to trusted MCP callers. */
@@ -214,7 +260,7 @@ export class DebugSession implements HoverEvaluator {
    * value itself, no console noise and no error surfaced on failure.
    */
   async evaluate(expr: string, context: "repl" | "hover"): Promise<string> {
-    const client = this.client;
+    const client = this.pausedClient ?? this.client;
     if (!client) throw new Error("no active debug session");
     if (context === "repl") this.appendConsole(`> ${expr}`);
 
@@ -240,9 +286,10 @@ export class DebugSession implements HoverEvaluator {
   /** Resume execution (DAP `continue`). No-op when no session is paused. */
   continue(): Promise<void> {
     return this.enqueueAction(async () => {
-      if (!this.client) return;
+      const client = this.actionClient();
+      if (!client) return;
       this.clearPaused();
-      await this.client.request("continue", { threadId: this.currentThreadId }).catch(() => {});
+      await client.request("continue", { threadId: this.currentThreadId }).catch(() => {});
     });
   }
 
@@ -260,16 +307,18 @@ export class DebugSession implements HoverEvaluator {
   /** Pause a running debuggee (DAP `pause`). No-op when no session is active. */
   pause(): Promise<void> {
     return this.enqueueAction(async () => {
-      if (!this.client) return;
-      await this.client.request("pause", { threadId: this.currentThreadId }).catch(() => {});
+      const client = this.actionClient();
+      if (!client) return;
+      await client.request("pause", { threadId: this.currentThreadId }).catch(() => {});
     });
   }
 
   private step(command: "next" | "stepIn" | "stepOut"): Promise<void> {
     return this.enqueueAction(async () => {
-      if (!this.client) return;
+      const client = this.actionClient();
+      if (!client) return;
       this.clearPaused(); // optimistic: drop the paused line until the next `stopped`
-      await this.client.request(command, { threadId: this.currentThreadId }).catch(() => {});
+      await client.request(command, { threadId: this.currentThreadId }).catch(() => {});
     });
   }
 
@@ -282,13 +331,17 @@ export class DebugSession implements HoverEvaluator {
 
   /** Stop the session: DAP disconnect, then drop the proxy + reset the UI. */
   async stop(): Promise<void> {
+    if (this.rootNode) {
+      await this.stopNode(this.rootNode);
+      return;
+    }
     if (!this.client) return;
     try {
       await this.client.request("disconnect", { terminateDebuggee: true }, 2000);
     } catch {
       // ignore — we force-kill below
     }
-    await debugStop(this.sessionId);
+    await this.stopProxy()(this.sessionId).catch(() => {});
     await this.reset();
   }
 
@@ -348,12 +401,13 @@ export class DebugSession implements HoverEvaluator {
       ),
       path,
     );
-    if (!this.client) return;
-    const { args } = buildSetBreakpointsArgs(path, bps, this.client.capabilities);
-    this.client
-      .request("setBreakpoints", args)
-      .then((resp) => this.applyVerified(path, resp?.breakpoints ?? []))
-      .catch(() => {});
+    for (const node of this.nodes()) {
+      const { args } = buildSetBreakpointsArgs(path, bps, node.client.capabilities);
+      node.client
+        .request("setBreakpoints", args)
+        .then((resp) => this.applyVerified(path, resp?.breakpoints ?? []))
+        .catch(() => {});
+    }
   }
 
   // --- internals ---
@@ -377,17 +431,16 @@ export class DebugSession implements HoverEvaluator {
     );
   }
 
-  private exceptionFilters(client: DapClient) {
+  private exceptionFilters(client: SessionClient) {
     const raw = (client.capabilities.exceptionBreakpointFilters as
       | { filter: string; label: string; default?: boolean }[]
       | undefined) ?? [{ filter: "uncaught", label: "Uncaught Exceptions", default: true }];
     return raw.map((f) => ({ filter: f.filter, label: f.label, enabled: f.default ?? false }));
   }
 
-  private async onStopped(body: any): Promise<void> {
-    const client = this.client;
-    if (!client) return;
+  private async onStopped(client: SessionClient, body: any): Promise<void> {
     const gen = ++this.renderGen;
+    this.pausedClient = client;
     this.currentThreadId = body?.threadId ?? 1;
     const stack = await client.request("stackTrace", { threadId: this.currentThreadId, levels: 20 });
     if (this.stale(gen, client)) return;
@@ -410,13 +463,13 @@ export class DebugSession implements HoverEvaluator {
   }
 
   /** True when render token `gen` was superseded or the session changed mid-flight. */
-  private stale(gen: number, client: DapClient): boolean {
-    return gen !== this.renderGen || this.client !== client;
+  private stale(gen: number, client: SessionClient): boolean {
+    return gen !== this.renderGen || !this.nodes().some((node) => node.client === client);
   }
 
   /** Fetch scope variables + watches for a frame, paint paused line + inline hints. */
   private async renderFrame(frameId: number, path: string, line: number, gen: number): Promise<void> {
-    const client = this.client;
+    const client = this.pausedClient ?? this.client;
     if (!client) return;
     this.currentFrameId = frameId;
     if (path) await this.deps.editor.revealAt(path, line);
@@ -491,6 +544,7 @@ export class DebugSession implements HoverEvaluator {
   private clearPaused(): void {
     this.deps.editor.applyDebugEffects([setPausedLine.of(null), setInlineHints.of(null)]);
     this.pausedLocation = null;
+    this.pausedClient = null;
     this.emitState();
   }
 
@@ -510,7 +564,157 @@ export class DebugSession implements HoverEvaluator {
     this.currentFrameId = null;
     this.renderGen++; // invalidate any in-flight render
     this.model = emptyModel();
+    this.rootNode = null;
     // Breakpoints intentionally remain in breakpointStore + gutter across sessions.
     this.emitState(); // active flips false here — strip/chip tear down (stop + adapter-death alike)
+  }
+
+  private createTransport(sessionId: string): TauriTransport {
+    return this.deps.createTransport?.(sessionId) ?? tauriTransport(sessionId);
+  }
+
+  private createClient(transport: TauriTransport): SessionClient {
+    return this.deps.createClient?.(transport) ?? new DapClient(transport);
+  }
+
+  private startProxy() {
+    return this.deps.startProxy ?? debugStart;
+  }
+
+  private stopProxy() {
+    return this.deps.stopProxy ?? debugStop;
+  }
+
+  private nodes(): SessionNode[] {
+    if (!this.rootNode) return [];
+    const nodes: SessionNode[] = [];
+    const visit = (node: SessionNode) => {
+      nodes.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this.rootNode);
+    return nodes;
+  }
+
+  private actionClient(): SessionClient | null {
+    return this.pausedClient ?? this.client;
+  }
+
+  private bindClient(node: SessionNode): void {
+    const client = node.client;
+    if (this.deps.runInTerminal) client.onRunInTerminal = this.deps.runInTerminal;
+    client.onStartDebugging = (args) => this.startChild(node, args);
+    client.on("stopped", (body) => void this.onStopped(client, body));
+    client.on("continued", () => {
+      if (this.pausedClient === client) this.clearPaused();
+    });
+    client.on("output", (body) => this.appendConsole(body?.output ?? ""));
+    for (const ev of ["terminated", "exited", "__transportClosed"]) {
+      client.on(ev, () => {
+        if (node.parent) void this.handleChildDeath(node);
+        else void this.handleRootDeath(node);
+      });
+    }
+  }
+
+  private async handleRootDeath(node: SessionNode): Promise<void> {
+    if (node.stopping || this.rootNode !== node) return;
+    node.stopping = true;
+    for (const child of [...node.children].reverse()) await this.stopNode(child);
+    await this.finishNode(node);
+    await this.reset();
+  }
+
+  private async handleChildDeath(node: SessionNode): Promise<void> {
+    if (node.stopping || !node.parent) return;
+    node.stopping = true;
+    for (const child of [...node.children].reverse()) await this.stopNode(child);
+    this.detachNode(node);
+    await this.finishNode(node);
+    if (this.pausedClient === node.client) this.clearPaused();
+    this.appendConsole(`Debug child session ${node.id} ended`);
+    this.emitState();
+  }
+
+  private async finishNode(node: SessionNode): Promise<void> {
+    try {
+      await this.stopProxy()(node.id);
+    } catch {
+      // The adapter may already have died; cleanup remains best effort.
+    }
+    node.transport.dispose();
+  }
+
+  private detachNode(node: SessionNode): void {
+    if (!node.parent) return;
+    node.parent.children = node.parent.children.filter((child) => child !== node);
+  }
+
+  private async stopNode(node: SessionNode): Promise<void> {
+    if (node.stopping) return;
+    node.stopping = true;
+    for (const child of [...node.children].reverse()) await this.stopNode(child);
+    try {
+      await node.client.request("disconnect", { terminateDebuggee: true }, 2000);
+    } catch {
+      // ignore — force-kill below
+    }
+    this.detachNode(node);
+    await this.finishNode(node);
+    if (!node.parent && this.rootNode === node) await this.reset();
+    else this.emitState();
+  }
+
+  private async startChild(parent: SessionNode, args: unknown): Promise<boolean> {
+    const raw = args && typeof args === "object" ? args as Record<string, unknown> : {};
+    const rawConfig = raw.configuration && typeof raw.configuration === "object" ? raw.configuration : raw;
+    const config = rawConfig as LaunchConfig;
+    if (typeof config.type !== "string") {
+      this.appendConsole("Debug child session rejected: missing adapter type");
+      return false;
+    }
+    const spec = await this.childAdapter(parent, config.type);
+    if (!spec) {
+      this.appendConsole(`Debug child session rejected: adapter ${config.type} could not be resolved`);
+      return false;
+    }
+    const id = `${parent.id}-child-${parent.nextChildIndex++}`;
+    const transport = this.createTransport(id);
+    await transport.ready;
+    const client = this.createClient(transport);
+    const node: SessionNode = {
+      id,
+      client,
+      transport,
+      spec,
+      cwd: typeof config.cwd === "string" ? config.cwd : parent.cwd,
+      parent,
+      children: [],
+      nextChildIndex: 1,
+      stopping: false,
+    };
+    parent.children.push(node);
+    this.bindClient(node);
+    this.emitState();
+    try {
+      await this.startProxy()(id, spec.transport, node.cwd);
+      const filters = this.exceptionFilters(client).map((f) => f.filter);
+      await client.launch(config, breakpointStore, filters, (path, bps) => this.applyVerified(path, bps));
+      return true;
+    } catch (e) {
+      this.appendConsole(`Debug child session ${id} failed: ${e instanceof Error ? e.message : String(e)}`);
+      await this.stopNode(node);
+      return false;
+    }
+  }
+
+  private async childAdapter(parent: SessionNode, type: string): Promise<AdapterSpec | null> {
+    const sameAdapter =
+      type === parent.spec.type ||
+      (parent.spec.type === "lldb" && type === "codelldb") ||
+      (parent.spec.type === "python" && type === "debugpy") ||
+      (parent.spec.type === "node" && type === "js-debug");
+    if (sameAdapter) return parent.spec;
+    return (await this.deps.resolveChildAdapter?.(type, parent.cwd)) ?? null;
   }
 }

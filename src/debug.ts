@@ -88,6 +88,8 @@ export class DapClient {
   // Capabilities reported by the adapter's `initialize` response (shape varies).
   capabilities: Record<string, unknown> = {};
   onRunInTerminal?: (args: unknown) => Promise<number>;
+  /** Handle an adapter-initiated child-session request. */
+  onStartDebugging?: (args: unknown) => Promise<boolean>;
 
   private seq = 1;
   private pending = new Map<number, Pending>();
@@ -222,9 +224,15 @@ export class DapClient {
     if (msg.command === "runInTerminal") {
       const pid = await this.onRunInTerminal?.(msg.arguments);
       this.respond(msg.seq, "runInTerminal", true, { processId: pid });
+    } else if (msg.command === "startDebugging") {
+      let success = false;
+      try {
+        success = (await this.onStartDebugging?.(msg.arguments)) === true;
+      } catch (e) {
+        console.warn(`DAP: startDebugging child session failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      this.respond(msg.seq, msg.command, success, success ? {} : undefined);
     } else {
-      // startDebugging (multi-session) deferred in v1 — reply false so the
-      // adapter unblocks rather than hanging on an unanswered request.
       this.respond(msg.seq, msg.command, false);
     }
   }

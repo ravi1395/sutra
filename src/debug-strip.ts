@@ -89,7 +89,9 @@ export function mountDebugStrip(container: HTMLElement, session: StripSession): 
 
   let mounted = false;
   const unsubscribe = session.onStateChange((state) => {
-    label.textContent = state.paused ? "paused" : "running";
+    const children = state.childCount ?? 0;
+    const childLabel = children === 0 ? "" : ` · ${children} ${children === 1 ? "child" : "children"}`;
+    label.textContent = `${state.paused ? "paused" : "running"}${childLabel}`;
     if (state.active && !mounted) {
       container.append(el);
       mounted = true;

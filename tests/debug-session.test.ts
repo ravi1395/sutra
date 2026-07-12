@@ -8,6 +8,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import { DebugSession, buildEvaluateArgs, type EditorBridge } from "../src/debug-session";
 import type { DebuggerSidebarSlot } from "../src/layout";
+import { breakpointStore, type AdapterSpec, type LaunchConfig, type TauriTransport } from "../src/debug";
 
 // ---- minimal DOM shim: constructing a DebugSession builds a DebuggerSidebar, which
 // touches document.createElement/replaceChildren — mirrors tests/rollback-dialog.test.ts.
@@ -74,6 +75,130 @@ class FakeClient {
     return this.impl(command, args);
   }
 }
+
+class LifecycleClient {
+  state: "idle" | "running" | "paused" = "idle";
+  capabilities: Record<string, unknown> = {};
+  onRunInTerminal?: (args: unknown) => Promise<number>;
+  onStartDebugging?: (args: unknown) => Promise<boolean>;
+  launches: { config: LaunchConfig; breakpoints: unknown }[] = [];
+  requests: { command: string; args: unknown }[] = [];
+  private handlers = new Map<string, (body: unknown) => void>();
+
+  on(event: string, cb: (body: unknown) => void): void {
+    this.handlers.set(event, cb);
+  }
+  async launch(config: LaunchConfig, breakpoints: unknown): Promise<void> {
+    this.launches.push({ config, breakpoints });
+    this.state = "running";
+  }
+  async request(command: string, args: unknown): Promise<unknown> {
+    this.requests.push({ command, args });
+    return {};
+  }
+  emit(event: string, body?: unknown): void {
+    this.handlers.get(event)?.(body);
+  }
+}
+
+class LifecycleTransport implements TauriTransport {
+  ready = Promise.resolve();
+  disposed = false;
+  send(): void {}
+  onMessage(): void {}
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+const childSpec: AdapterSpec = {
+  type: "python",
+  transport: { kind: "stdio", command: "python", args: ["-m", "debugpy.adapter"] },
+  fromWorkspace: false,
+};
+const childConfig: LaunchConfig = { type: "python", request: "launch", program: "/repo/main.py" };
+
+async function sessionWithLifecycleFakes() {
+  const clients: LifecycleClient[] = [];
+  const stopped: string[] = [];
+  const session = new DebugSession({
+    editor: new FakeEditor(),
+    slot: new FakeSlot(),
+    onConsole: (text) => consoleLines.push(text),
+    createTransport: () => new LifecycleTransport(),
+    createClient: () => {
+      const client = new LifecycleClient();
+      clients.push(client);
+      return client;
+    },
+    startProxy: async () => {},
+    stopProxy: async (id) => {
+      stopped.push(id);
+    },
+  });
+  await session.start(childSpec, "/repo", childConfig);
+  return { session, clients, stopped };
+}
+
+let consoleLines: string[] = [];
+
+test("child attach shares the breakpoint store and broadcasts later breakpoint changes", async () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  consoleLines = [];
+  try {
+    breakpointStore.set("/repo/worker.py", [{ line: 4 }]);
+    const { session, clients } = await sessionWithLifecycleFakes();
+    const accepted = await clients[0].onStartDebugging?.({ configuration: { ...childConfig, program: "/repo/worker.py" } });
+    assert.equal(accepted, true);
+    assert.equal(session.childCount, 1);
+    assert.equal(clients[1].launches[0]?.breakpoints, breakpointStore);
+
+    session.toggleBreakpoint("/repo/worker.py", 8);
+    assert.deepEqual(clients[1].requests.at(-1), {
+      command: "setBreakpoints",
+      args: { source: { path: "/repo/worker.py" }, breakpoints: [{ line: 4 }, { line: 8 }] },
+    });
+  } finally {
+    breakpointStore.clear();
+    consoleLines = [];
+    restore();
+  }
+});
+
+test("stopping a parent tears down children in reverse attach order before the parent", async () => {
+  const restore = setupDom();
+  try {
+    const { session, clients, stopped } = await sessionWithLifecycleFakes();
+    await clients[0].onStartDebugging?.({ configuration: childConfig });
+    await clients[0].onStartDebugging?.({ configuration: childConfig });
+    await session.stop();
+    assert.deepEqual(stopped.map((id) => id.replace(/^dbg-\d+/, "dbg")), [
+      "dbg-child-2",
+      "dbg-child-1",
+      "dbg",
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test("child adapter death removes only that child and leaves the parent active", async () => {
+  const restore = setupDom();
+  consoleLines = [];
+  try {
+    const { session, clients } = await sessionWithLifecycleFakes();
+    await clients[0].onStartDebugging?.({ configuration: childConfig });
+    clients[1].emit("__transportClosed");
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(session.active, true);
+    assert.equal(session.childCount, 0);
+    assert.match(consoleLines.join("\n"), /child session .* ended/i);
+  } finally {
+    consoleLines = [];
+    restore();
+  }
+});
 
 test("buildEvaluateArgs: frameId included only when paused with a current frame, omitted otherwise", () => {
   assert.deepEqual(buildEvaluateArgs("x.len()", "repl", "paused", 7), {

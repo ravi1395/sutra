@@ -82,6 +82,32 @@ test("answers runInTerminal reverse request with a pid", async () => {
   assert.ok(resp?.success && resp.body.processId === 4321);
 });
 
+test("accepts a startDebugging reverse request when the child session starts", async () => {
+  const tr = new MockTransport();
+  const c = new DapClient(tr);
+  let received: unknown;
+  c.onStartDebugging = async (args) => {
+    received = args;
+    return true;
+  };
+  const arguments_ = { configuration: { type: "python", request: "launch", program: "worker.py" } };
+  tr.emit({ seq: 100, type: "request", command: "startDebugging", arguments: arguments_ });
+  await new Promise((r) => setTimeout(r, 0));
+  const resp = tr.sent.find((m) => m.type === "response" && m.request_seq === 100);
+  assert.deepEqual(received, arguments_);
+  assert.equal(resp?.success, true);
+});
+
+test("rejects a startDebugging reverse request when the child adapter cannot start", async () => {
+  const tr = new MockTransport();
+  const c = new DapClient(tr);
+  c.onStartDebugging = async () => false;
+  tr.emit({ seq: 101, type: "request", command: "startDebugging", arguments: {} });
+  await new Promise((r) => setTimeout(r, 0));
+  const resp = tr.sent.find((m) => m.type === "response" && m.request_seq === 101);
+  assert.equal(resp?.success, false);
+});
+
 test("config sequence fires on initialized event, not the launch response", async () => {
   const tr = new MockTransport();
   const c = new DapClient(tr);
