@@ -461,6 +461,60 @@ export function detectAdapter(
   return null;
 }
 
+// Adapter kinds backed by the Rust `resolve_debug_adapter` registry
+// (`src-tauri/src/debug.rs::resolve_adapter_path`). go.mod/dlv is deliberately
+// excluded — it's assumed present on PATH, unchanged pre-registry behavior.
+export type AdapterKind = "codelldb" | "debugpy" | "js-debug";
+
+const ADAPTER_NOT_FOUND_MESSAGES: Record<AdapterKind, string> = {
+  codelldb: "codelldb not found — install the CodeLLDB VS Code extension",
+  debugpy: "debugpy not found — pip install debugpy",
+  "js-debug": "js-debug not found — install the VS Code js-debug extension or put dapDebugServer on PATH",
+};
+
+export interface ChosenAdapter {
+  spec: AdapterSpec | null;
+  // Set only when a signal implied a registry adapter and its binary didn't resolve.
+  notFoundAdapter?: AdapterKind;
+  notFoundMessage?: string;
+}
+
+/**
+ * Which registry-backed adapter (if any) `signals` imply, mirroring
+ * `detectAdapter`'s own priority: Cargo.toml > requirements.txt/pyproject.toml
+ * > go.mod > package.json. go.mod returns null (dlv isn't registry-resolved).
+ */
+function impliedAdapterKind(signals: Set<string>): AdapterKind | null {
+  if (signals.has("Cargo.toml")) return "codelldb";
+  if (signals.has("requirements.txt") || signals.has("pyproject.toml")) return "debugpy";
+  if (signals.has("go.mod")) return null;
+  if (signals.has("package.json")) return "js-debug";
+  return null;
+}
+
+/**
+ * Resolve this root's implied adapter binary via `resolver` (wraps the Rust
+ * `resolve_debug_adapter` command) and feed the result into `detectAdapter`.
+ * When a signal implies a registry adapter (codelldb/debugpy/js-debug) whose
+ * binary doesn't resolve, returns an honest not-found message and skips
+ * `detectAdapter` — no spec is produced, so the caller never spawns anything.
+ * Pure aside from `resolver`, so it's testable with an injected fake (no real
+ * FS/VS Code extension dirs touched).
+ */
+export async function chooseAdapterForRoot(
+  signals: Set<string>,
+  resolver: (adapter: AdapterKind) => Promise<string | null>,
+): Promise<ChosenAdapter> {
+  const kind = impliedAdapterKind(signals);
+  const path = kind ? await resolver(kind) : null;
+  if (kind && !path) {
+    return { spec: null, notFoundAdapter: kind, notFoundMessage: ADAPTER_NOT_FOUND_MESSAGES[kind] };
+  }
+  const codelldbPath = kind === "codelldb" ? path : null;
+  const jsDebugPath = kind === "js-debug" ? path : null;
+  return { spec: detectAdapter(signals, codelldbPath, jsDebugPath) };
+}
+
 /** Parent directory for slash-separated absolute paths used by the Tauri backend. */
 function dirname(path: string): string {
   const trimmed = path.replace(/\/+$/, "");

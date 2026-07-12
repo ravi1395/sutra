@@ -55,8 +55,13 @@ class FakeEditor implements EditorBridge {
   }
 }
 class FakeSlot implements DebuggerSidebarSlot {
-  show(): void {}
-  hide(): void {}
+  shown: unknown = null;
+  show(content: unknown): void {
+    this.shown = content;
+  }
+  hide(): void {
+    this.shown = null;
+  }
 }
 
 class FakeClient {
@@ -124,6 +129,25 @@ test("evaluate: repl context echoes the expression then appends the result, in o
     const value2 = await session.evaluate("turn.files.len()", "repl");
     assert.equal(value2, "3");
     assert.deepEqual(lines, ["> turn.files.len()", "3", "> turn.files.len()", "3"]);
+  } finally {
+    restore();
+  }
+});
+
+test("showNotice: shows the sidebar and appends exactly one console line without starting a session", () => {
+  const restore = setupDom();
+  try {
+    const lines: string[] = [];
+    const slot = new FakeSlot();
+    const session = new DebugSession({
+      editor: new FakeEditor(),
+      slot,
+      onConsole: (t) => lines.push(t),
+    });
+    session.showNotice("debugpy not found — pip install debugpy");
+    assert.deepEqual(lines, ["debugpy not found — pip install debugpy"]);
+    assert.ok(slot.shown); // sidebar became visible
+    assert.equal(session.active, false); // no DAP client/session — nothing was spawned
   } finally {
     restore();
   }

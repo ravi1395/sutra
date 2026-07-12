@@ -314,7 +314,7 @@ export const debugStart = (sessionId: string, transport: Transport, cwd: string 
 export const debugSend = (sessionId: string, message: string) =>
   invoke<void>("debug_send", { sessionId, message });
 export const debugStop = (sessionId: string) => invoke<void>("debug_stop", { sessionId });
-export const resolveDebugAdapter = (root: string, adapter: "codelldb") =>
+export const resolveDebugAdapter = (root: string, adapter: "codelldb" | "debugpy" | "js-debug") =>
   invoke<string | null>("resolve_debug_adapter", { root, adapter });
 
 export interface DapEventPayload {

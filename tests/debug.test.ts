@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   DapClient,
   detectAdapter,
+  chooseAdapterForRoot,
   resolveLaunchConfig,
   requiresTrustPrompt,
   breakpointStore,
@@ -12,6 +13,7 @@ import {
   breakpointStoreKey,
   loadBreakpointStore,
   saveBreakpointStore,
+  type AdapterKind,
   type DapTransport,
 } from "../src/debug";
 import { bpGlyphChar } from "../src/editor";
@@ -158,6 +160,49 @@ test("does not detect Node adapter when js-debug path is missing", () => {
 test("existing signal priority wins over package.json when both are present (Cargo.toml + package.json)", () => {
   const spec = detectAdapter(new Set(["Cargo.toml", "package.json"]), "/usr/local/bin/codelldb", "/usr/local/bin/js-debug");
   assert.equal(spec?.type, "lldb");
+});
+
+// ---- chooseAdapterForRoot: the resolve-then-detect flow startDebugging() drives ----
+
+test("chooseAdapterForRoot: package.json root resolves js-debug and detectAdapter returns the node spec", async () => {
+  const calls: AdapterKind[] = [];
+  const resolver = async (adapter: AdapterKind) => {
+    calls.push(adapter);
+    return adapter === "js-debug" ? "/fake/dapDebugServer" : null;
+  };
+  const chosen = await chooseAdapterForRoot(new Set(["package.json"]), resolver);
+  assert.equal(chosen.spec?.type, "node");
+  assert.equal((chosen.spec?.transport as any).command, "/fake/dapDebugServer");
+  assert.equal(chosen.notFoundMessage, undefined);
+  assert.deepEqual(calls, ["js-debug"]);
+});
+
+test("chooseAdapterForRoot: requirements.txt root resolves debugpy and detectAdapter returns the python spec", async () => {
+  const calls: AdapterKind[] = [];
+  const resolver = async (adapter: AdapterKind) => {
+    calls.push(adapter);
+    return adapter === "debugpy" ? "/usr/bin/python3" : null;
+  };
+  const chosen = await chooseAdapterForRoot(new Set(["requirements.txt"]), resolver);
+  assert.equal(chosen.spec?.type, "python");
+  assert.equal(chosen.notFoundMessage, undefined);
+  assert.deepEqual(calls, ["debugpy"]);
+});
+
+test("chooseAdapterForRoot: unresolvable implied adapter returns one honest not-found message and no spec (nothing to spawn)", async () => {
+  const calls: AdapterKind[] = [];
+  let spawnCalls = 0;
+  const resolver = async (adapter: AdapterKind) => {
+    calls.push(adapter);
+    return null; // debugpy absent
+  };
+  const chosen = await chooseAdapterForRoot(new Set(["requirements.txt"]), resolver);
+  if (chosen.spec) spawnCalls++; // mirrors main.ts: a spawn is only ever reachable through a produced spec
+  assert.equal(chosen.spec, null);
+  assert.equal(spawnCalls, 0);
+  assert.equal(chosen.notFoundAdapter, "debugpy");
+  assert.equal(chosen.notFoundMessage, "debugpy not found — pip install debugpy");
+  assert.deepEqual(calls, ["debugpy"]); // exactly one resolve call — no fallthrough probing of other adapters
 });
 
 test("workspace-sourced adapter command requires a trust prompt the first time", () => {

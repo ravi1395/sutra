@@ -200,6 +200,17 @@ export class DebugSession implements HoverEvaluator {
     await this.reset();
   }
 
+  /**
+   * Show the debug sidebar with a single honest notice line, without starting
+   * a session — used when an implied adapter's binary can't be resolved (no
+   * spawn attempted). Reuses the same console-append path a live session's
+   * `output` events go through.
+   */
+  showNotice(text: string): void {
+    this.deps.slot.show(this.sidebar.el);
+    this.appendConsole(text);
+  }
+
   /** Toggle a breakpoint for `path`:`line` in the store and push to the adapter + gutter. */
   toggleBreakpoint(path: string, line: number): void {
     const bps = breakpointStore.get(path) ?? [];

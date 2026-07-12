@@ -26,7 +26,7 @@ import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
 import {
-  detectAdapter,
+  chooseAdapterForRoot,
   isTrusted,
   markTrusted,
   resolveLaunchConfig,
@@ -259,15 +259,21 @@ async function startDebugging(): Promise<void> {
   const root = currentRoot;
   const entries = await listDir(root).catch(() => []);
   const signals = new Set(entries.map((e) => e.name));
-  const codelldbPath = signals.has("Cargo.toml")
-    ? await resolveDebugAdapter(root, "codelldb").catch(() => null)
-    : null;
-  const spec = detectAdapter(signals, codelldbPath);
+  const { spec, notFoundAdapter, notFoundMessage } = await chooseAdapterForRoot(signals, (adapter) =>
+    resolveDebugAdapter(root, adapter).catch(() => null),
+  );
   if (!spec) {
-    const msg = signals.has("Cargo.toml") && !codelldbPath
-      ? "codelldb not found — install the CodeLLDB VS Code extension"
-      : "No debug adapter detected for this project.";
-    await message(msg, { title: "Sutra", kind: "warning" });
+    if (notFoundMessage && notFoundAdapter !== "codelldb") {
+      // debugpy/js-debug: honest resolve failure surfaced in the visible debug
+      // sidebar console — no dialog, no spawn attempt, session never starts.
+      debugSession.showNotice(notFoundMessage);
+    } else {
+      // codelldb not-found (or no signal matched anything): pre-3b UX, byte-identical.
+      await message(notFoundMessage ?? "No debug adapter detected for this project.", {
+        title: "Sutra",
+        kind: "warning",
+      });
+    }
     return;
   }
   if (!isTrusted(spec, root)) {
