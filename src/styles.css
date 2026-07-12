@@ -3443,6 +3443,7 @@ button:hover {
 
 /* -- statusbar chips: small pills matching the gitbar badge styling -- */
 #diag-chip,
+#debug-chip,
 .turn-chip,
 .hunk-diag-badge,
 .session-badge--busy,
@@ -3464,6 +3465,71 @@ button:hover {
 .diag-chip--clean { color: var(--em); border-color: var(--em-dim); }
 .diag-chip--dirty { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 55%, transparent); }
 .diag-chip--toolfail { color: var(--added); border-color: color-mix(in srgb, var(--added) 55%, transparent); }
+
+/* -- debug chip (mockup variant D) — mirrors #diag-chip; unlike it, absent from the DOM
+   (not styled :empty{display:none}) whenever no session is live, so no idle rule here. -- */
+.debug-chip--running { color: var(--em); border-color: var(--em-dim); }
+.debug-chip--paused {
+  color: var(--added);
+  border-color: color-mix(in srgb, var(--added) 55%, transparent);
+  cursor: pointer;
+}
+.debug-chip--paused:hover { background: var(--bg-4); }
+
+/* -- debug control strip (mockup variant A) — floating pill, session-only. Mounted into
+   #panes (already position:relative for split-drop overlays), absent from the DOM
+   entirely with no session. -- */
+.debug-strip {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.85);
+}
+.debug-strip-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 0 8px;
+  border-right: 1px solid var(--line);
+}
+.debug-strip button {
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 13px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  cursor: pointer;
+  line-height: 1;
+}
+.debug-strip button:hover { background: var(--bg-4); color: var(--fg); }
+.debug-strip button.go { color: var(--em); }
+.debug-strip button.stop { color: var(--deleted); }
+.agent-badge {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-left: 6px;
+}
+/* Ships dark: setAgentActive(true) (Phase 5, MCP-initiated actions) adds .lit. */
+.agent-badge.lit { display: inline-flex; }
 
 /* -- turns (review panel) -- */
 .turn-header {

@@ -33,6 +33,13 @@ export interface SessionDeps {
   runInTerminal?: (args: unknown) => Promise<number>;
 }
 
+/** Session UI-state snapshot: the only thing debug-strip.ts/debug-chip.ts read from
+ * DebugSession — a push notification seam (onStateChange) rather than polling. */
+export interface DebugUiState {
+  active: boolean;
+  paused: { path: string; line: number } | null;
+}
+
 /**
  * Build the DAP `evaluate` request args: `frameId` is included only while paused with
  * a resolved frame — a stale frame id left over from before a `continue` must never be
@@ -62,6 +69,10 @@ export class DebugSession implements HoverEvaluator {
   private currentThreadId = 1;
   // Monotonic render token: a newer stop/frame-select aborts in-flight renders (latest wins).
   private renderGen = 0;
+  // Top-frame source location while paused; null once running/idle. Backs uiState().paused
+  // and gotoPausedLine() — the single source of truth for debug-chip's click-to-frame.
+  private pausedLocation: { path: string; line: number } | null = null;
+  private uiListeners: Array<(state: DebugUiState) => void> = [];
 
   constructor(private deps: SessionDeps) {
     this.sidebar = new DebuggerSidebar({
@@ -103,6 +114,7 @@ export class DebugSession implements HoverEvaluator {
     this.deps.slot.show(this.sidebar.el);
     this.model.hasSession = true; // reveals the console evaluate input row
     this.sidebar.render(this.model);
+    this.emitState(); // strip/chip mount now — don't wait on the adapter's launch round-trip
 
     await debugStart(this.sessionId, spec.transport, cwd);
     const filters = this.exceptionFilters(client).map((f) => f.filter);
@@ -114,6 +126,38 @@ export class DebugSession implements HoverEvaluator {
   /** True while a DAP session is live (used by F-key shortcuts to pick start vs continue). */
   get active(): boolean {
     return this.client != null;
+  }
+
+  /**
+   * Subscribe to session UI-state changes (active/paused) — the only hook debug-strip.ts
+   * and debug-chip.ts use; they own zero debug logic of their own. Calls `cb` immediately
+   * with the current snapshot (so a mount before any session starts sees `{active:false,
+   * paused:null}` without a separate initial fetch), then again on every start/stop/
+   * pause/resume/adapter-death. Returns an unsubscribe function.
+   */
+  onStateChange(cb: (state: DebugUiState) => void): () => void {
+    this.uiListeners.push(cb);
+    cb(this.uiState());
+    return () => {
+      this.uiListeners = this.uiListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /** Current session UI-state snapshot. */
+  uiState(): DebugUiState {
+    return { active: this.active, paused: this.pausedLocation };
+  }
+
+  /** Reveal the editor at the current paused frame — debug-chip's click-to-frame
+   * delegates here instead of touching the editor bridge itself. No-op if not paused. */
+  async gotoPausedLine(): Promise<void> {
+    if (!this.pausedLocation) return;
+    await this.deps.editor.revealAt(this.pausedLocation.path, this.pausedLocation.line);
+  }
+
+  private emitState(): void {
+    const state = this.uiState();
+    for (const l of this.uiListeners) l(state);
   }
 
   /** True while paused with an adapter that declares `supportsEvaluateForHovers` — the
@@ -276,10 +320,14 @@ export class DebugSession implements HoverEvaluator {
       line: f.line,
     }));
     const top = frames[0];
-    if (top) await this.renderFrame(top.id, top.source?.path ?? "", top.line, gen);
+    if (top) {
+      this.pausedLocation = { path: top.source?.path ?? "", line: top.line };
+      await this.renderFrame(top.id, top.source?.path ?? "", top.line, gen);
+    }
     if (this.stale(gen, client)) return;
     this.model.exceptionFilters = this.exceptionFilters(client);
     this.sidebar.render(this.model);
+    this.emitState();
   }
 
   /** True when render token `gen` was superseded or the session changed mid-flight. */
@@ -363,6 +411,8 @@ export class DebugSession implements HoverEvaluator {
 
   private clearPaused(): void {
     this.deps.editor.applyDebugEffects([setPausedLine.of(null), setInlineHints.of(null)]);
+    this.pausedLocation = null;
+    this.emitState();
   }
 
   private appendConsole(text: string): void {
@@ -381,5 +431,6 @@ export class DebugSession implements HoverEvaluator {
     this.renderGen++; // invalidate any in-flight render
     this.model = emptyModel();
     // Breakpoints intentionally remain in breakpointStore + gutter across sessions.
+    this.emitState(); // active flips false here — strip/chip tear down (stop + adapter-death alike)
   }
 }

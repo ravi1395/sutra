@@ -25,6 +25,8 @@ import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
 import { DebugSession } from "./debug-session";
+import { mountDebugStrip, filterDebugPaletteCommands } from "./debug-strip";
+import { mountDebugChip, debugChipEl } from "./debug-chip";
 import {
   chooseAdapterForRoot,
   isTrusted,
@@ -212,6 +214,9 @@ const debugSession = new DebugSession({
     return typeof id === "number" ? id : 0;
   },
 });
+// Floating session-only control strip (mockup variant A) over the editor pane; absent
+// from the DOM until a session starts, torn down on stop/adapter-death.
+mountDebugStrip($("panes"), debugSession);
 // Gutter clicks toggle the persistent breakpoint store + push to the live session.
 setBreakpointToggleHandler((path, line) => {
   debugSession.toggleBreakpoint(path, line);
@@ -2114,7 +2119,10 @@ function renderWhisperBar(): void {
   // Called every 1.5 s by the agent poll — skip the DOM teardown/rebuild unless
   // something visible actually changed. diag chip + aggregate strip are singleton
   // nodes mutated in place elsewhere, so their live textContent is the source of truth.
-  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
+  // debug chip is absent (not just empty) with no session, so its active flag is part
+  // of the signature too — an active→inactive flip with identical leftover text must
+  // still trigger the rebuild that drops it from the DOM.
+  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${debugSession.active}:${debugChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
   if (sig === lastWhisperSig) return;
   lastWhisperSig = sig;
 
@@ -2140,8 +2148,10 @@ function renderWhisperBar(): void {
   const right = document.createElement("div");
   right.className = "whisper-right";
   if (lnText) right.textContent = lnText;
-  // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
-  whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
+  // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
+  // hidden, with no session), multi-session aggregate strip.
+  const dbgChip = debugSession.active ? [debugChipEl()] : [];
+  whisperBar.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -2629,7 +2639,9 @@ function recentPaletteCommands(): Command[] {
 }
 
 palette = mountPalette({
-  commands: () => paletteCommands,
+  // Session-only debug verbs (continue/step*/pause/stop — the strip's mirrored actions,
+  // Q5 single-home rule) list only while a session is live; debug-start always does.
+  commands: () => filterDebugPaletteCommands(paletteCommands, debugSession.active),
   workspaces: () => recentPaletteCommands(),
   files: () => listFiles(currentRoot ?? ""),
   symbols: (query, limit) => langWorkspaceSymbols(query, limit),
@@ -2706,6 +2718,13 @@ editor.onDocChanged = () => {
   const activePath = editor.active?.path;
   if (activePath) notifyDocChanged(activePath);
 };
+
+// Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
+// by the same state notification the strip uses. Wired here (not beside the strip near
+// debugSession's construction) because onStateChange calls back immediately on
+// subscribe, and renderWhisperBar touches whisperBar/editor/agentStatus — all defined
+// by this point in boot, none of them earlier.
+mountDebugChip(debugSession, () => renderWhisperBar());
 
 // ---- boot ----
 editor.renderAllTabs();
