@@ -2,7 +2,13 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { breakpointStore } from "../src/debug";
-import { DebugSession, type EditorBridge } from "../src/debug-session";
+import {
+  DebugSession,
+  resolveDebugUiCore,
+  TRUST_REQUIRED_MESSAGE,
+  type DebugUiSession,
+  type EditorBridge,
+} from "../src/debug-session";
 import type { DebuggerSidebarSlot } from "../src/layout";
 
 class FakeElement {
@@ -60,6 +66,61 @@ test("debugState reports an explicit no-active-session result", () => {
   } finally {
     restore();
   }
+});
+
+// ---- resolveDebugUiCore: trust gate + query dispatch, executable (no source-grep) ----
+
+/** Session spy: every method records its name and args; step/continue/eval
+ * resolve trivially. Lets tests assert exactly which session method (if any)
+ * a query reaches. */
+function spySession(calls: string[]): DebugUiSession {
+  return {
+    active: true,
+    debugState: () => {
+      calls.push("debugState");
+      return { active: true };
+    },
+    evaluate: async (expr) => {
+      calls.push(`evaluate:${expr}`);
+      return "";
+    },
+    runAgentAction: async (_label, action) => action(),
+    setBreakpoint: (path, line) => {
+      calls.push(`setBreakpoint:${path}:${line}`);
+    },
+    removeBreakpoint: (path, line) => {
+      calls.push(`removeBreakpoint:${path}:${line}`);
+    },
+    continue: async () => {
+      calls.push("continue");
+    },
+    stepOver: async () => {
+      calls.push("stepOver");
+    },
+    stepIn: async () => {
+      calls.push("stepIn");
+    },
+    stepOut: async () => {
+      calls.push("stepOut");
+    },
+  };
+}
+
+test("resolveDebugUiCore: debugContinue/debugStep reach the live session with no path/line in params", async () => {
+  const calls: string[] = [];
+  const deps = { root: "/repo", isTrusted: async () => true, session: spySession(calls) };
+
+  const c = await resolveDebugUiCore("debugContinue", null, deps);
+  assert.deepEqual(c, { ok: true });
+
+  const over = await resolveDebugUiCore("debugStep", { kind: "over" }, deps);
+  assert.deepEqual(over, { ok: true });
+  const into = await resolveDebugUiCore("debugStep", { kind: "in" }, deps);
+  assert.deepEqual(into, { ok: true });
+  const out = await resolveDebugUiCore("debugStep", { kind: "out" }, deps);
+  assert.deepEqual(out, { ok: true });
+
+  assert.deepEqual(calls, ["continue", "stepOver", "stepIn", "stepOut"]);
 });
 
 test("main routes every debug request through the trust check before dispatch", () => {

@@ -19,6 +19,7 @@ import { setBreakpointMarks, setPausedLine, setInlineHints } from "./editor";
 import { matchIdentifiers } from "./debug-hints";
 import { setHoverEvaluator, type HoverEvaluator } from "./lang";
 import type { DebuggerSidebarSlot } from "./layout";
+import { resolveWorkspacePath } from "./workspace";
 
 // Minimal editor surface the controller needs (EditorManager satisfies it).
 export interface EditorBridge {
@@ -729,4 +730,122 @@ export class DebugSession implements HoverEvaluator {
     if (sameAdapter) return parent.spec;
     return (await this.deps.resolveChildAdapter?.(type, parent.cwd)) ?? null;
   }
+}
+
+// ---- MCP debug_* dispatch core ----
+// Extracted out of main.ts (which is not importable under node:test — it has
+// top-level DOM/Tauri side effects) so the trust gate and query routing are
+// covered by real executable tests against an injected session spy, instead
+// of a source-text regex assertion.
+
+/** Minimal session surface resolveDebugUiCore dispatches MCP debug_* queries
+ * onto. DebugSession satisfies this structurally — main.ts passes the real
+ * debugSession straight through; tests pass a spy. */
+export interface DebugUiSession {
+  readonly active: boolean;
+  debugState(): unknown;
+  evaluate(expr: string, context: "repl" | "hover"): Promise<string>;
+  runAgentAction<T>(label: string, action: () => Promise<T>): Promise<T>;
+  setBreakpoint(
+    path: string,
+    line: number,
+    fields?: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage">,
+  ): void;
+  removeBreakpoint(path: string, line: number): void;
+  continue(): Promise<void>;
+  stepOver(): Promise<void>;
+  stepIn(): Promise<void>;
+  stepOut(): Promise<void>;
+}
+
+export interface ResolveDebugUiDeps {
+  root: string | null;
+  isTrusted(): Promise<boolean>;
+  session: DebugUiSession;
+}
+
+export const TRUST_REQUIRED_MESSAGE =
+  "This folder is not trusted. Trust it in Sutra before creating or running automations.";
+
+/**
+ * Trust-gated MCP debugger dispatch core: every debug_* UI query funnels
+ * through here. An untrusted workspace (or no workspace open) refuses BEFORE
+ * `deps.session` is touched at all — no debug_* query may reach the live
+ * session while untrusted (security). Path/line validation is scoped to the
+ * breakpoint queries only — debugContinue/debugStep never carry those fields
+ * and must not be gated on them (they were previously statically
+ * unreachable: the check ran unconditionally before the continue/step
+ * branches).
+ */
+export async function resolveDebugUiCore(
+  query: string,
+  params: unknown,
+  deps: ResolveDebugUiDeps,
+): Promise<unknown> {
+  const root = deps.root;
+  if (!root) return { error: "No workspace open in Sutra" };
+  if (!(await deps.isTrusted().catch(() => false))) return { error: TRUST_REQUIRED_MESSAGE };
+
+  const session = deps.session;
+  const readWithoutSession = query === "debugState" || query === "debugEvaluate";
+  if (!session.active) {
+    return readWithoutSession ? session.debugState() : { error: "No active debug session" };
+  }
+  const p = (params ?? {}) as {
+    expression?: unknown;
+    path?: unknown;
+    line?: unknown;
+    condition?: unknown;
+    hitCondition?: unknown;
+    logMessage?: unknown;
+    kind?: unknown;
+  };
+
+  if (query === "debugState") return session.debugState();
+  if (query === "debugEvaluate") {
+    if (typeof p.expression !== "string" || !p.expression.trim()) return { error: "Expression is required" };
+    const value = await session.runAgentAction("", () => session.evaluate(p.expression as string, "repl"));
+    return { value };
+  }
+
+  if (query === "debugSetBreakpoint" || query === "debugRemoveBreakpoint") {
+    if (typeof p.path !== "string" || !Number.isInteger(p.line) || (p.line as number) < 1) {
+      return { error: "Breakpoint path and positive line are required" };
+    }
+    // Lexical containment with `.`/`..` collapsed — a `../outside.py` traversal
+    // must never persist/broadcast a breakpoint outside the workspace.
+    const path = resolveWorkspacePath(p.path, root);
+    if (!path) return { error: "Breakpoint path must be inside the workspace" };
+    const line = p.line as number;
+
+    if (query === "debugSetBreakpoint") {
+      const fields = {
+        ...(typeof p.condition === "string" && p.condition ? { condition: p.condition } : {}),
+        ...(typeof p.hitCondition === "string" && p.hitCondition ? { hitCondition: p.hitCondition } : {}),
+        ...(typeof p.logMessage === "string" && p.logMessage ? { logMessage: p.logMessage } : {}),
+      };
+      await session.runAgentAction("set breakpoint", async () => {
+        session.setBreakpoint(path, line, fields);
+      });
+      return { ok: true, path, line };
+    }
+    await session.runAgentAction("remove breakpoint", async () => {
+      session.removeBreakpoint(path, line);
+    });
+    return { ok: true, path, line };
+  }
+
+  if (query === "debugContinue") {
+    await session.runAgentAction("continue", () => session.continue());
+    return { ok: true };
+  }
+  if (query === "debugStep") {
+    if (p.kind !== "over" && p.kind !== "in" && p.kind !== "out") return { error: "Step kind must be over, in, or out" };
+    const kind = p.kind as "over" | "in" | "out";
+    await session.runAgentAction(`step ${kind}`, () =>
+      kind === "over" ? session.stepOver() : kind === "in" ? session.stepIn() : session.stepOut(),
+    );
+    return { ok: true };
+  }
+  return { error: `unknown query: ${query}` };
 }

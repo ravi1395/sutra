@@ -139,10 +139,12 @@ test("resolveWorkspacePath: MCP breakpoint paths join to the root, normalize, an
   assert.equal(resolveWorkspacePath("./a/./b.py", "/tmp/project"), "/tmp/project/a/b.py");
   assert.equal(resolveWorkspacePath("src/main.py", "/tmp/project"), "/tmp/project/src/main.py");
   assert.equal(resolveWorkspacePath("/tmp/project/src/main.py", "/tmp/project"), "/tmp/project/src/main.py");
-  // main.ts's MCP breakpoint validation must route through this helper (not a raw
-  // string-prefix check) so the persisted/broadcast path is the normalized one.
-  const mainTs = readFileSync("src/main.ts", "utf8");
-  assert.match(mainTs, /const path = resolveWorkspacePath\(p\.path, root\);/);
+  // The MCP breakpoint validation (resolveDebugUiCore, extracted out of main.ts
+  // for testability — see B2/B5 in plans/tasks/gate-fixes-round-1.md) must route
+  // through this helper (not a raw string-prefix check) so the persisted/
+  // broadcast path is the normalized one.
+  const debugSessionTs = readFileSync("src/debug-session.ts", "utf8");
+  assert.match(debugSessionTs, /const path = resolveWorkspacePath\(p\.path, root\);/);
 });
 
 test("filterWorkspaceTabs keeps only files inside the opened root", () => {

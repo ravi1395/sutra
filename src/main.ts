@@ -24,7 +24,7 @@ import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
-import { DebugSession } from "./debug-session";
+import { DebugSession, resolveDebugUiCore } from "./debug-session";
 import { mountDebugStrip, filterDebugPaletteCommands, type DebugStripHandle } from "./debug-strip";
 import { mountDebugChip, debugChipEl } from "./debug-chip";
 import {
@@ -138,7 +138,6 @@ import {
   loadWorkspaceSession,
   pathBelongsToRoot,
   resolveOpenPath,
-  resolveWorkspacePath,
   pruneWorkspaceSession,
   saveWorkspaceSession,
   seedRecentsFromLocalStorage,
@@ -507,74 +506,24 @@ void onUiRequest((r) => {
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
 
-/** Resolve a trust-gated MCP debugger request in the one live DebugSession. */
+/** Resolve a trust-gated MCP debugger request in the one live DebugSession.
+ * Trust-check + query dispatch itself lives in resolveDebugUiCore (main.ts
+ * has top-level DOM/Tauri side effects and isn't importable under
+ * node:test, so that logic is extracted where it's executable-testable
+ * against a session spy) — this wrapper only supplies the live deps and
+ * persists the breakpoint store on a successful write. */
 async function resolveDebugUi(query: string, params: unknown): Promise<unknown> {
   const root = currentRoot;
-  if (!root) return { error: "No workspace open in Sutra" };
-  if (!(await isWorkspaceTrusted(root).catch(() => false))) return { error: TRUST_REQUIRED };
-
-  const readWithoutSession = query === "debugState" || query === "debugEvaluate";
-  if (!debugSession.active) {
-    return readWithoutSession ? debugSession.debugState() : { error: "No active debug session" };
-  }
-  const p = (params ?? {}) as {
-    expression?: unknown;
-    path?: unknown;
-    line?: unknown;
-    condition?: unknown;
-    hitCondition?: unknown;
-    logMessage?: unknown;
-    kind?: unknown;
-  };
-
-  if (query === "debugState") return debugSession.debugState();
-  if (query === "debugEvaluate") {
-    if (typeof p.expression !== "string" || !p.expression.trim()) return { error: "Expression is required" };
-    const value = await debugSession.runAgentAction("", () => debugSession.evaluate(p.expression as string, "repl"));
-    return { value };
-  }
-
-  if (typeof p.path !== "string" || !Number.isInteger(p.line) || (p.line as number) < 1) {
-    return { error: "Breakpoint path and positive line are required" };
-  }
-  // Lexical containment with `.`/`..` collapsed — a `../outside.py` traversal must
-  // never persist/broadcast a breakpoint outside the workspace (security).
-  const path = resolveWorkspacePath(p.path, root);
-  if (!path) return { error: "Breakpoint path must be inside the workspace" };
-  const line = p.line as number;
-
-  if (query === "debugSetBreakpoint") {
-    const fields = {
-      ...(typeof p.condition === "string" && p.condition ? { condition: p.condition } : {}),
-      ...(typeof p.hitCondition === "string" && p.hitCondition ? { hitCondition: p.hitCondition } : {}),
-      ...(typeof p.logMessage === "string" && p.logMessage ? { logMessage: p.logMessage } : {}),
-    };
-    await debugSession.runAgentAction("set breakpoint", async () => {
-      debugSession.setBreakpoint(path, line, fields);
-    });
+  const result = await resolveDebugUiCore(query, params, {
+    root,
+    isTrusted: () => (root ? isWorkspaceTrusted(root) : Promise.resolve(false)),
+    session: debugSession,
+  });
+  const isBreakpointWrite = query === "debugSetBreakpoint" || query === "debugRemoveBreakpoint";
+  if (root && isBreakpointWrite && (result as { ok?: boolean } | null)?.ok) {
     saveBreakpointStore(root);
-    return { ok: true, path, line };
   }
-  if (query === "debugRemoveBreakpoint") {
-    await debugSession.runAgentAction("remove breakpoint", async () => {
-      debugSession.removeBreakpoint(path, line);
-    });
-    saveBreakpointStore(root);
-    return { ok: true, path, line };
-  }
-  if (query === "debugContinue") {
-    await debugSession.runAgentAction("continue", () => debugSession.continue());
-    return { ok: true };
-  }
-  if (query === "debugStep") {
-    if (p.kind !== "over" && p.kind !== "in" && p.kind !== "out") return { error: "Step kind must be over, in, or out" };
-    const kind = p.kind as "over" | "in" | "out";
-    await debugSession.runAgentAction(`step ${kind}`, () =>
-      kind === "over" ? debugSession.stepOver() : kind === "in" ? debugSession.stepIn() : debugSession.stepOut(),
-    );
-    return { ok: true };
-  }
-  return { error: `unknown query: ${query}` };
+  return result;
 }
 
 // Handle MCP automation actions from an AI agent/skill: create/list/run automations
