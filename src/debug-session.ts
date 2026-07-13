@@ -199,6 +199,14 @@ export class DebugSession implements HoverEvaluator {
     return this.rootNode?.children.length ?? 0;
   }
 
+  /** Live adapter capabilities while a session is active, undefined otherwise.
+   * The breakpoint popover gates its fields on these; undefined = "unknown" —
+   * authoring isn't blocked, unsupported fields are withheld at send
+   * (debug.ts's buildSetBreakpointsArgs). */
+  get adapterCapabilities(): Record<string, unknown> | undefined {
+    return this.client?.capabilities;
+  }
+
   /** Return the debugger snapshot exposed to trusted MCP callers. */
   debugState(): Record<string, unknown> {
     if (!this.client) return { active: false, message: "No active debug session" };

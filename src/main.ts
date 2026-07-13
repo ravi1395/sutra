@@ -241,6 +241,10 @@ setBreakpointContextMenuHandler((path, line, x, y, containerEl) => {
       hitCondition: existing?.hitCondition,
       logMessage: existing?.logMessage,
     },
+    // Live session → real adapter capabilities gate the popover fields; no
+    // session → undefined = all enabled (unknown capabilities never block
+    // authoring; unsupported fields are still withheld at send).
+    capabilities: debugSession.adapterCapabilities,
     onChange: (fields) => {
       const bps = upsertBreakpointFields(path, line, fields);
       if (!bps) return; // empty popover on a line with no breakpoint yet — nothing to create
