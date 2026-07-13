@@ -249,6 +249,61 @@ test("applyVerified preserves condition/hitCondition/logMessage in the repainted
   }
 });
 
+test("debugState reports the selected frame's data, not always callStack[0] — frame and variables must agree", async () => {
+  const restore = setupDom();
+  try {
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    const client = new FakeClient("paused", async (command) => {
+      if (command === "scopes") {
+        return { scopes: [{ name: "Locals", presentationHint: "locals", variablesReference: 5 }] };
+      }
+      if (command === "variables") {
+        return { variables: [{ name: "y", value: "20", variablesReference: 0 }] };
+      }
+      return {};
+    });
+    (session as unknown as { client: unknown }).client = client;
+    // renderFrame's staleness guard requires the client to be reachable from a
+    // registered session node — poke a minimal rootNode alongside client (mirrors
+    // what start() would have built) so the render isn't dropped as stale.
+    (session as unknown as { rootNode: unknown }).rootNode = {
+      id: "dbg-test",
+      client,
+      transport: {},
+      spec: {},
+      cwd: "/repo",
+      parent: null,
+      children: [],
+      nextChildIndex: 1,
+      stopping: false,
+    };
+    (
+      session as unknown as {
+        model: { callStack: { id: number; name: string; path: string; line: number }[] };
+      }
+    ).model.callStack = [
+      { id: 1, name: "f1", path: "/a.rs", line: 10 },
+      { id: 2, name: "f2", path: "/a.rs", line: 20 },
+    ];
+
+    // Simulate the sidebar's onSelectFrame callback picking the second (non-top) frame.
+    await (
+      session as unknown as {
+        selectFrame(frameId: number, path: string, line: number): Promise<void>;
+      }
+    ).selectFrame(2, "/a.rs", 20);
+
+    const state = session.debugState() as { frame: unknown; variables: unknown };
+    // Pre-fix: debugState() always reported callStack[0] (frame 1) regardless of
+    // which frame was selected, while `variables` already reflected the selected
+    // frame — the two disagreed about which frame the caller was looking at.
+    assert.deepEqual(state.frame, { id: 2, name: "f2", path: "/a.rs", line: 20 });
+    assert.deepEqual(state.variables, [{ name: "y", value: "20", variablesReference: 0 }]);
+  } finally {
+    restore();
+  }
+});
+
 test("buildEvaluateArgs: frameId included only when paused with a current frame, omitted otherwise", () => {
   assert.deepEqual(buildEvaluateArgs("x.len()", "repl", "paused", 7), {
     expression: "x.len()",

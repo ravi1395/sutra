@@ -208,15 +208,20 @@ export class DebugSession implements HoverEvaluator {
     return this.client?.capabilities;
   }
 
-  /** Return the debugger snapshot exposed to trusted MCP callers. */
+  /** Return the debugger snapshot exposed to trusted MCP callers. `frame` is the
+   * SELECTED frame (tracked by currentFrameId, same as renderFrame/`variables`) —
+   * falling back to the top frame before any selection — so `frame` and
+   * `variables` always describe the same frame instead of disagreeing. */
   debugState(): Record<string, unknown> {
     if (!this.client) return { active: false, message: "No active debug session" };
+    const frame =
+      this.model.callStack.find((f) => f.id === this.currentFrameId) ?? this.model.callStack[0] ?? null;
     return {
       active: true,
       sessionId: this.sessionId,
       state: this.client.state,
       paused: this.pausedLocation,
-      frame: this.model.callStack[0] ?? null,
+      frame,
       stack: this.model.callStack,
       variables: this.model.variables,
       watch: this.model.watch,
