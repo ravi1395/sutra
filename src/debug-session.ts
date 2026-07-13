@@ -717,16 +717,38 @@ export class DebugSession implements HoverEvaluator {
 
   private async startChild(parent: SessionNode, args: unknown): Promise<boolean> {
     const raw = args && typeof args === "object" ? args as Record<string, unknown> : {};
-    const rawConfig = raw.configuration && typeof raw.configuration === "object" ? raw.configuration : raw;
-    const config = rawConfig as LaunchConfig;
-    if (typeof config.type !== "string") {
-      this.appendConsole("Debug child session rejected: missing adapter type");
+    const rawConfig = raw.configuration && typeof raw.configuration === "object"
+      ? raw.configuration as Record<string, unknown>
+      : raw;
+    // DAP startDebugging carries launch-vs-attach beside `configuration`.
+    // debugpy intentionally removes `request` from the nested config, so
+    // dropping the outer verb relaunches the parent program recursively.
+    const nestedRequest = rawConfig.request;
+    const request = raw.request === "launch" || raw.request === "attach"
+      ? raw.request
+      : nestedRequest === "launch" || nestedRequest === "attach"
+        ? nestedRequest
+        : undefined;
+    const type = typeof rawConfig.type === "string" ? rawConfig.type : parent.spec.type;
+    const config = { ...rawConfig, type, ...(request ? { request } : {}) } as LaunchConfig;
+    let spec = await this.childAdapter(parent, type);
+    if (!spec) {
+      this.appendConsole(`Debug child session rejected: adapter ${type} could not be resolved`);
       return false;
     }
-    const spec = await this.childAdapter(parent, config.type);
-    if (!spec) {
-      this.appendConsole(`Debug child session rejected: adapter ${config.type} could not be resolved`);
-      return false;
+    if (request === "attach" && parent.spec.type === "python") {
+      const connect = rawConfig.connect && typeof rawConfig.connect === "object"
+        ? rawConfig.connect as Record<string, unknown>
+        : null;
+      const host = connect?.host;
+      const port = connect?.port;
+      if (typeof host !== "string" || host.length === 0 || !Number.isInteger(port) || (port as number) <= 0 || (port as number) > 65535) {
+        this.appendConsole("Debug child session rejected: invalid Python attach target");
+        return false;
+      }
+      // debugpy already owns the child adapter endpoint; connect to it directly.
+      // Spawning another stdio adapter here relaunches the copied parent program.
+      spec = { ...spec, transport: { kind: "socket", host, port: port as number } };
     }
     const id = `${parent.id}-child-${parent.nextChildIndex++}`;
     const transport = this.createTransport(id);

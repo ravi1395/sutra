@@ -141,6 +141,7 @@ const childConfig: LaunchConfig = { type: "python", request: "launch", program: 
 async function sessionWithLifecycleFakes() {
   const clients: LifecycleClient[] = [];
   const stopped: string[] = [];
+  const proxyStarts: { id: string; transport: AdapterSpec["transport"]; cwd: string | null }[] = [];
   const session = new DebugSession({
     editor: new FakeEditor(),
     slot: new FakeSlot(),
@@ -151,13 +152,15 @@ async function sessionWithLifecycleFakes() {
       clients.push(client);
       return client;
     },
-    startProxy: async () => {},
+    startProxy: async (id, transport, cwd) => {
+      proxyStarts.push({ id, transport, cwd });
+    },
     stopProxy: async (id) => {
       stopped.push(id);
     },
   });
   await session.start(childSpec, "/repo", childConfig);
-  return { session, clients, stopped };
+  return { session, clients, stopped, proxyStarts };
 }
 
 let consoleLines: string[] = [];
@@ -168,11 +171,21 @@ test("child attach shares the breakpoint store and broadcasts later breakpoint c
   consoleLines = [];
   try {
     breakpointStore.set("/repo/worker.py", [{ line: 4 }]);
-    const { session, clients } = await sessionWithLifecycleFakes();
-    const accepted = await clients[0].onStartDebugging?.({ configuration: { ...childConfig, program: "/repo/worker.py" } });
+    const { session, clients, proxyStarts } = await sessionWithLifecycleFakes();
+    const accepted = await clients[0].onStartDebugging?.({
+      request: "attach",
+      configuration: {
+        program: "/repo/worker.py",
+        connect: { host: "127.0.0.1", port: 5678 },
+        subProcessId: 42,
+      },
+    });
     assert.equal(accepted, true);
     assert.equal(session.childCount, 1);
     assert.equal(clients[1].launches[0]?.breakpoints, breakpointStore);
+    assert.equal(clients[1].launches[0]?.config.request, "attach");
+    assert.equal(clients[1].launches[0]?.config.type, "python");
+    assert.deepEqual(proxyStarts.at(-1)?.transport, { kind: "socket", host: "127.0.0.1", port: 5678 });
 
     session.toggleBreakpoint("/repo/worker.py", 8);
     assert.deepEqual(clients[1].requests.at(-1), {
@@ -182,6 +195,22 @@ test("child attach shares the breakpoint store and broadcasts later breakpoint c
   } finally {
     breakpointStore.clear();
     consoleLines = [];
+    restore();
+  }
+});
+
+test("child attach rejects a malformed debugpy connect target without starting a proxy", async () => {
+  const restore = setupDom();
+  try {
+    const { session, clients, proxyStarts } = await sessionWithLifecycleFakes();
+    const accepted = await clients[0].onStartDebugging?.({
+      request: "attach",
+      configuration: { subProcessId: 42, connect: { host: "127.0.0.1", port: 0 } },
+    });
+    assert.equal(accepted, false);
+    assert.equal(session.childCount, 0);
+    assert.equal(proxyStarts.length, 1);
+  } finally {
     restore();
   }
 });
