@@ -59,7 +59,7 @@ CLI installer 2.3.2. Typed outcome, safe privileged-command quoting, Copy/Close 
 
 | Date | Version | Criterion | Surface | Evidence | Status |
 |---|---|---|---|---|---|
-| 2026-07-13 | 2.3.2 | CLI-1: Install CLI visibly handles administrator fallback and installed shim forwards a path | UI/shell | First live click against the already-running dev app closed the menu but showed no native dialog; stale backend vs click targeting unresolved. | BLOCKED(restart current `npm run tauri dev`; click Install CLI command → native dialog shows full command + Copy command / Close; Copy writes exact command; run it in Terminal; `command -v sutra` succeeds and `sutra <fixture-path>` opens/focuses that path) |
+| 2026-07-13 | 2.3.2 | CLI-1: Install CLI visibly handles administrator fallback and installed shim forwards a path | UI/shell | Restarted current 2.3.2 dev build with captured logs. Computer Use clicks repeatedly hit adjacent menu/tree rows; a temporary tagged Rust boundary probe stayed silent, so the real Install CLI click/dialog was not exercised. Probe removed. | BLOCKED(human click Install CLI command → native dialog shows full command + Copy command / Close; Copy writes exact command; run it in Terminal; `command -v sutra` succeeds and `sutra <fixture-path>` opens/focuses that path) |
 
 Debugger v2 Phase 1: conditional/hit-count/log breakpoints + gutter popover (branch `feat/debugger-v2`). Field serialization, capability gating, glyph selection, and persistence round-trip are all unit-proven (tests/debug.test.ts). Rows below need a real DAP adapter session (codelldb) and cannot be proven by unit tests — drive each in `npm run tauri dev` against a Rust fixture project with a loop.
 
