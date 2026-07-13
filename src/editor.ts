@@ -251,6 +251,23 @@ export function setBreakpointContextMenuHandler(
 }
 
 /**
+ * Gutter mousedown → breakpoint toggle decision (exported for tests). Only the
+ * primary button toggles; right/middle clicks return unhandled so the
+ * contextmenu handler opens the popover on a still-present breakpoint instead
+ * of one this mousedown just removed. Returns whether the event was handled.
+ */
+export function breakpointGutterMouseDown(
+  button: number,
+  lineNo: number,
+  path: string | null | undefined,
+  toggle: (path: string, line: number) => void,
+): boolean {
+  if (button !== 0) return false;
+  if (path) toggle(path, lineNo);
+  return true;
+}
+
+/**
  * Which glyph a breakpoint draws: unverified always shows the hollow dot —
  * the adapter hasn't confirmed the location yet, so field-type is moot.
  * Once verified: a log message makes it a logpoint (◇, DAP never emits
@@ -629,11 +646,12 @@ export class Pane {
         class: "cm-bp-gutter",
         markers: (view) => view.state.field(bpField),
         domEventHandlers: {
-          mousedown: (view, line) => {
+          mousedown: (view, line, event) => {
             const lineNo = view.state.doc.lineAt(line.from).number;
             const path = this.active?.path;
-            if (path) onBreakpointToggle?.(path, lineNo, view);
-            return true;
+            return breakpointGutterMouseDown((event as MouseEvent).button, lineNo, path, (p, l) =>
+              onBreakpointToggle?.(p, l, view),
+            );
           },
           contextmenu: (view, line, event) => {
             const mouse = event as MouseEvent;

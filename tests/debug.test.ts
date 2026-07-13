@@ -16,7 +16,7 @@ import {
   type AdapterKind,
   type DapTransport,
 } from "../src/debug";
-import { bpGlyphChar } from "../src/editor";
+import { bpGlyphChar, breakpointGutterMouseDown } from "../src/editor";
 import { popoverFieldsEnabled } from "../src/breakpoint-popover";
 
 // node:test runs without DOM localStorage; per-root breakpoint persistence
@@ -348,6 +348,23 @@ test("capability gating (popover): fields default enabled with unknown capabilit
     popoverFieldsEnabled({ supportsConditionalBreakpoints: true, supportsHitConditionalBreakpoints: true }),
     { condition: true, hitCondition: true, logMessage: false },
   );
+});
+
+test("gutter mousedown toggles a breakpoint only on the primary button — right-click leaves it for the popover", () => {
+  const toggles: [string, number][] = [];
+  const toggle = (p: string, l: number) => toggles.push([p, l]);
+  // Right (2) / middle (1) button: NO toggle and unhandled — the contextmenu
+  // handler must open the popover on a still-present breakpoint, not one the
+  // mousedown just removed.
+  assert.equal(breakpointGutterMouseDown(2, 5, "/repo/a.py", toggle), false);
+  assert.equal(breakpointGutterMouseDown(1, 5, "/repo/a.py", toggle), false);
+  assert.deepEqual(toggles, []);
+  // Primary button toggles and handles the event.
+  assert.equal(breakpointGutterMouseDown(0, 5, "/repo/a.py", toggle), true);
+  assert.deepEqual(toggles, [["/repo/a.py", 5]]);
+  // No active file path: handled, but nothing to toggle.
+  assert.equal(breakpointGutterMouseDown(0, 5, null, toggle), true);
+  assert.deepEqual(toggles, [["/repo/a.py", 5]]);
 });
 
 test("glyph selection: verified breakpoint glyph follows field presence — plain/conditional/logpoint", () => {
