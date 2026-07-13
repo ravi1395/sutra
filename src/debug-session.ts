@@ -130,6 +130,7 @@ export class DebugSession implements HoverEvaluator {
       onToggleExceptionFilter: (filter, enabled) => void this.toggleException(filter, enabled),
       onSelectFrame: (frameId, path, line) => void this.selectFrame(frameId, path, line),
       onEvaluate: (expr) => this.evaluate(expr, "repl").then(() => {}),
+      onSelectBreakpoint: (path, line) => void this.deps.editor.revealAt(path, line),
     });
     // There is exactly one DebugSession per window — self-register so lang.ts's
     // paused hover-evaluate can reach it without editor.ts/main.ts wiring a callback.
@@ -384,7 +385,7 @@ export class DebugSession implements HoverEvaluator {
   setBreakpoint(
     path: string,
     line: number,
-    fields: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage"> = {},
+    fields: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage" | "agent"> = {},
   ): void {
     const bps = breakpointStore.get(path) ?? [];
     const existing = bps.find((b) => b.line === line);
@@ -414,8 +415,30 @@ export class DebugSession implements HoverEvaluator {
     }));
   }
 
+  /** Rebuild the Breakpoints panel model from the cross-file breakpointStore
+   * (not session-scoped — agent-set breakpoints elsewhere stay visible) and
+   * repaint the sidebar. */
+  private syncBreakpointsModel(): void {
+    const rows: SidebarModel["breakpoints"] = [];
+    for (const [path, bps] of breakpointStore) {
+      for (const b of bps) {
+        rows.push({
+          path,
+          line: b.line,
+          condition: b.condition,
+          hitCondition: b.hitCondition,
+          logMessage: b.logMessage,
+          agent: b.agent,
+        });
+      }
+    }
+    this.model.breakpoints = rows;
+    this.sidebar.render(this.model);
+  }
+
   private renderBreakpoints(path: string, bps: Breakpoint[]): void {
     this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
+    this.syncBreakpointsModel();
     for (const node of this.nodes()) {
       const { args } = buildSetBreakpointsArgs(path, bps, node.client.capabilities);
       node.client
@@ -754,7 +777,7 @@ export interface DebugUiSession {
   setBreakpoint(
     path: string,
     line: number,
-    fields?: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage">,
+    fields?: Pick<Breakpoint, "condition" | "hitCondition" | "logMessage" | "agent">,
   ): void;
   removeBreakpoint(path: string, line: number): void;
   continue(): Promise<void>;
@@ -824,7 +847,13 @@ export async function resolveDebugUiCore(
     const line = p.line as number;
 
     if (query === "debugSetBreakpoint") {
+      // This dispatch is reachable only through the MCP UI-request channel (see
+      // onUiRequest's `query.startsWith("debug")` routing in main.ts) — every
+      // breakpoint set here is agent-attributed by construction, unlike the
+      // human gutter-click path (DebugSession.toggleBreakpoint), which never
+      // passes an `agent` field.
       const fields = {
+        agent: true,
         ...(typeof p.condition === "string" && p.condition ? { condition: p.condition } : {}),
         ...(typeof p.hitCondition === "string" && p.hitCondition ? { hitCondition: p.hitCondition } : {}),
         ...(typeof p.logMessage === "string" && p.logMessage ? { logMessage: p.logMessage } : {}),

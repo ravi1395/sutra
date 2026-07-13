@@ -63,6 +63,7 @@ const noopCb: SidebarCallbacks = {
   onToggleExceptionFilter: () => {},
   onSelectFrame: () => {},
   onEvaluate: async () => {},
+  onSelectBreakpoint: () => {},
 };
 
 test("console evaluate input: absent with no session, present once a session exists; multiline/empty submissions ignored", () => {
@@ -107,6 +108,37 @@ test("console entries render kind-specific classes — result/error/agent lines 
     assert.equal(findAllByClass(sidebar.el, "dbg-console-error").length, 1);
     assert.equal(findAllByClass(sidebar.el, "dbg-console-agent").length, 1);
     assert.equal(findAllByClass(sidebar.el, "dbg-console-result")[0].textContent, "42");
+  } finally {
+    restore();
+  }
+});
+
+test("breakpoints panel: agent-set breakpoints get an agent chip, human ones don't; clicking a row opens the file", () => {
+  const restore = setupDom();
+  try {
+    let selected: [string, number] | null = null;
+    const sidebar = new DebuggerSidebar({
+      ...noopCb,
+      onSelectBreakpoint: (path, line) => {
+        selected = [path, line];
+      },
+    });
+    sidebar.render({
+      ...emptyModel(),
+      breakpoints: [
+        { path: "/repo/src/a.ts", line: 12, agent: true, condition: "x > 1" },
+        { path: "/repo/src/b.ts", line: 4 },
+      ],
+    });
+
+    const rows = findAllByClass(sidebar.el, "dbg-bp-row");
+    assert.equal(rows.length, 2);
+    assert.equal(findAllByClass(rows[0], "dbg-chip-agent").length, 1, "MCP-set breakpoint carries the agent chip");
+    assert.equal(findAllByClass(rows[0], "dbg-chip-cond").length, 1);
+    assert.equal(findAllByClass(rows[1], "dbg-chip-agent").length, 0, "human-set breakpoint has no agent chip");
+
+    rows[0].onclick?.();
+    assert.deepEqual(selected, ["/repo/src/a.ts", 12]);
   } finally {
     restore();
   }

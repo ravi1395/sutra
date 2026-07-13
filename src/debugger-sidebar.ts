@@ -12,6 +12,19 @@ export interface SidebarCallbacks {
   // Console REPL evaluate — resolves once appended (input clears); rejects on adapter
   // error (input is left in place so the user can edit and retry).
   onEvaluate: (expr: string) => Promise<void>;
+  // Breakpoints panel row click — jump the editor to that file:line.
+  onSelectBreakpoint: (path: string, line: number) => void;
+}
+
+/** One row in the cross-file Breakpoints panel. `agent: true` marks a breakpoint
+ * set by an MCP-driven debug_set_breakpoint call rather than a human gutter click. */
+export interface BreakpointRow {
+  path: string;
+  line: number;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+  agent?: boolean;
 }
 
 /** Kind of a console line — drives per-line CSS so eval results, adapter errors,
@@ -29,13 +42,24 @@ export interface SidebarModel {
   callStack: { id: number; name: string; path: string; line: number }[];
   exceptionFilters: { filter: string; label: string; enabled: boolean }[];
   console: ConsoleEntry[];
+  // All breakpoints across every file — not scoped to the active session — so
+  // agent-set breakpoints elsewhere in the workspace stay visible.
+  breakpoints: BreakpointRow[];
   // True while a DAP session is live — gates the console evaluate input row (hidden,
   // not disabled, when there's no session to send an evaluate request to).
   hasSession: boolean;
 }
 
 export function emptyModel(): SidebarModel {
-  return { variables: [], watch: [], callStack: [], exceptionFilters: [], console: [], hasSession: false };
+  return {
+    variables: [],
+    watch: [],
+    callStack: [],
+    exceptionFilters: [],
+    console: [],
+    breakpoints: [],
+    hasSession: false,
+  };
 }
 
 /** True when a console-evaluate submission should be ignored: empty after trim, or
@@ -57,6 +81,7 @@ export class DebuggerSidebar {
     this.el.replaceChildren(
       this.panel("Variables", this.variablesView(m.variables)),
       this.panel("Watch", this.watchView(m.watch)),
+      this.panel("Breakpoints", this.breakpointsView(m.breakpoints)),
       this.panel("Call Stack", this.callStackView(m.callStack)),
       this.panel("Exception Breakpoints", this.exceptionView(m.exceptionFilters)),
       this.panel("Debug Console", this.consoleView(m.console, m.hasSession)),
@@ -111,6 +136,34 @@ export class DebuggerSidebar {
     };
     ul.append(add);
     return ul;
+  }
+
+  /** Cross-file breakpoints list: one row per breakpoint (any file, live session
+   * or not) as `basename:line` with cond/log/agent chips — click jumps the editor
+   * to that file:line. Enable/disable checkboxes are a later round (mockup
+   * aspiration, not this AC). */
+  private breakpointsView(rows: SidebarModel["breakpoints"]): HTMLElement {
+    const ul = document.createElement("ul");
+    ul.className = "dbg-list";
+    for (const b of rows) {
+      const li = document.createElement("li");
+      li.className = "dbg-bp-row";
+      li.textContent = `${b.path.split("/").pop() ?? b.path}:${b.line}`;
+      if (b.condition) li.append(this.chip("dbg-chip-cond", "cond"));
+      if (b.hitCondition) li.append(this.chip("dbg-chip-hit", "hit"));
+      if (b.logMessage) li.append(this.chip("dbg-chip-log", "log"));
+      if (b.agent) li.append(this.chip("dbg-chip-agent", "agent"));
+      li.onclick = () => this.cb.onSelectBreakpoint(b.path, b.line);
+      ul.append(li);
+    }
+    return ul;
+  }
+
+  private chip(cls: string, text: string): HTMLElement {
+    const chip = document.createElement("span");
+    chip.className = `dbg-chip ${cls}`;
+    chip.textContent = text;
+    return chip;
   }
 
   private callStackView(frames: SidebarModel["callStack"]): HTMLElement {

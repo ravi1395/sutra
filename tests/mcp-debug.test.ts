@@ -177,6 +177,59 @@ test("MCP breakpoint removal deletes the store entry and repaints the gutter", (
   }
 });
 
+test("agent-attributed breakpoints flow into the sidebar's Breakpoints model; gutter toggles stay unattributed", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    session.setBreakpoint("/repo/agent.py", 9, { agent: true, condition: "x > 1" });
+    session.toggleBreakpoint("/repo/human.py", 3);
+
+    const model = (
+      session as unknown as {
+        model: { breakpoints: { path: string; line: number; agent?: boolean }[] };
+      }
+    ).model;
+    assert.deepEqual(
+      model.breakpoints.map((b) => ({ path: b.path, line: b.line, agent: b.agent })),
+      [
+        { path: "/repo/agent.py", line: 9, agent: true },
+        { path: "/repo/human.py", line: 3, agent: undefined },
+      ],
+    );
+  } finally {
+    breakpointStore.clear();
+    restore();
+  }
+});
+
+test("resolveDebugUiCore: debugSetBreakpoint stamps agent:true; the human gutter path never does", async () => {
+  const calls: unknown[] = [];
+  const session: DebugUiSession = {
+    active: true,
+    debugState: () => ({}),
+    evaluate: async () => "",
+    runAgentAction: async (_label, action) => action(),
+    setBreakpoint: (path, line, fields) => {
+      calls.push({ path, line, fields });
+    },
+    removeBreakpoint: () => {},
+    continue: async () => {},
+    stepOver: async () => {},
+    stepIn: async () => {},
+    stepOut: async () => {},
+  };
+  const deps = { root: "/repo", isTrusted: async () => true, session };
+
+  const result = await resolveDebugUiCore(
+    "debugSetBreakpoint",
+    { path: "a.py", line: 4, condition: "x > 1" },
+    deps,
+  );
+  assert.deepEqual(result, { ok: true, path: "/repo/a.py", line: 4 });
+  assert.deepEqual(calls, [{ path: "/repo/a.py", line: 4, fields: { agent: true, condition: "x > 1" } }]);
+});
+
 test("agent step emits an attributed console action", async () => {
   const restore = setupDom();
   try {

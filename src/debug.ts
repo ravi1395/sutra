@@ -15,6 +15,11 @@ export interface Breakpoint {
   condition?: string;
   hitCondition?: string;
   logMessage?: string;
+  // True when set via an MCP debug_set_breakpoint call (agent-attributed) rather
+  // than a human gutter click — drives the Breakpoints panel's "agent" chip.
+  // Additive-only; the P1 store contract (line/verified/condition/hitCondition/
+  // logMessage, serialized shape) is otherwise unchanged.
+  agent?: boolean;
 }
 export type BreakpointStore = Map<string, Breakpoint[]>; // file path → BPs
 
