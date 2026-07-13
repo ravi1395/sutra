@@ -509,6 +509,20 @@ struct DebugStepArgs {
     kind: String,
 }
 
+/// Wire payload debug_continue forwards to the frontend over request_ui_action.
+/// Carries no fields — the frontend dispatch must never gate this query on
+/// breakpoint path/line (locks the debug_continue/debug_step reachability fix
+/// in src/debug-session.ts's resolveDebugUiCore).
+fn debug_continue_ui_payload() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// Wire payload debug_step forwards to the frontend over request_ui_action.
+/// Carries only `kind` — never path/line, for the same reason as above.
+fn debug_step_ui_payload(args: &DebugStepArgs) -> serde_json::Value {
+    serde_json::json!({ "kind": args.kind })
+}
+
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
 /// session; all clones share the same `AppHandle` and active-root `Arc`.
 #[derive(Clone)]
@@ -1095,7 +1109,7 @@ impl SutraMcp {
     async fn debug_continue(&self) -> Result<CallToolResult, McpError> {
         self.active_root()?;
         let value = self
-            .request_ui_action("debugContinue", serde_json::Value::Null)
+            .request_ui_action("debugContinue", debug_continue_ui_payload())
             .await?;
         Ok(Self::ok_json(value))
     }
@@ -1110,7 +1124,7 @@ impl SutraMcp {
     ) -> Result<CallToolResult, McpError> {
         self.active_root()?;
         let value = self
-            .request_ui_action("debugStep", serde_json::json!({ "kind": args.kind }))
+            .request_ui_action("debugStep", debug_step_ui_payload(&args))
             .await?;
         Ok(Self::ok_json(value))
     }
@@ -1555,11 +1569,23 @@ mod tests {
     }
 
     #[test]
-    fn debug_frontend_route_uses_the_standard_trust_pointer() {
-        let main = include_str!("../../src/main.ts");
-        assert!(main.contains("isWorkspaceTrusted(root)"));
-        assert!(main.contains("This folder is not trusted. Trust it in Sutra"));
-        assert!(!main.contains("mcp_destructive"));
+    fn debug_continue_ui_payload_carries_no_fields() {
+        // debug_continue never carries path/line — a frontend dispatch that
+        // (re-)gates this query on breakpoint fields would statically refuse
+        // every call, exactly the debug_continue/debug_step reachability bug
+        // fixed in src/debug-session.ts's resolveDebugUiCore.
+        assert_eq!(debug_continue_ui_payload(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn debug_step_ui_payload_carries_only_kind_never_path_or_line() {
+        let args = DebugStepArgs {
+            kind: "over".to_string(),
+        };
+        let payload = debug_step_ui_payload(&args);
+        assert_eq!(payload, serde_json::json!({ "kind": "over" }));
+        assert!(payload.get("path").is_none());
+        assert!(payload.get("line").is_none());
     }
 
     #[test]

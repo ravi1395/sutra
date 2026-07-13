@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { breakpointStore } from "../src/debug";
 import {
@@ -123,10 +122,41 @@ test("resolveDebugUiCore: debugContinue/debugStep reach the live session with no
   assert.deepEqual(calls, ["continue", "stepOver", "stepIn", "stepOut"]);
 });
 
-test("main routes every debug request through the trust check before dispatch", () => {
-  const main = readFileSync("src/main.ts", "utf8");
-  assert.match(main, /if \(query\.startsWith\("debug"\)\)[\s\S]*?isWorkspaceTrusted\(root\)/);
-  assert.doesNotMatch(main, /mcp_destructive/);
+test("resolveDebugUiCore: an untrusted workspace refuses every debug_* query without ever touching the session", async () => {
+  const calls: string[] = [];
+  const refuse =
+    (name: string) =>
+    (...args: unknown[]) => {
+      calls.push(`${name}(${args.map((a) => JSON.stringify(a)).join(",")})`);
+      throw new Error(`session.${name} must not be called while the workspace is untrusted`);
+    };
+  const session: DebugUiSession = {
+    active: true,
+    debugState: refuse("debugState") as () => unknown,
+    evaluate: refuse("evaluate") as () => Promise<string>,
+    runAgentAction: refuse("runAgentAction") as <T>() => Promise<T>,
+    setBreakpoint: refuse("setBreakpoint") as () => void,
+    removeBreakpoint: refuse("removeBreakpoint") as () => void,
+    continue: refuse("continue") as () => Promise<void>,
+    stepOver: refuse("stepOver") as () => Promise<void>,
+    stepIn: refuse("stepIn") as () => Promise<void>,
+    stepOut: refuse("stepOut") as () => Promise<void>,
+  };
+  const deps = { root: "/repo", isTrusted: async () => false, session };
+
+  const queries: [string, unknown][] = [
+    ["debugState", null],
+    ["debugEvaluate", { expression: "1 + 1" }],
+    ["debugSetBreakpoint", { path: "a.py", line: 3 }],
+    ["debugRemoveBreakpoint", { path: "a.py", line: 3 }],
+    ["debugContinue", null],
+    ["debugStep", { kind: "over" }],
+  ];
+  for (const [query, params] of queries) {
+    const result = await resolveDebugUiCore(query, params, deps);
+    assert.deepEqual(result, { error: TRUST_REQUIRED_MESSAGE }, `${query} must be refused`);
+  }
+  assert.deepEqual(calls, [], "no debug_* query may reach the live session while the workspace is untrusted");
 });
 
 test("agent actions light the strip and prefix console output; human actions stay plain", async () => {
