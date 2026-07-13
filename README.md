@@ -160,6 +160,9 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   containing project (walking up for a `.git`, `package.json`, `Cargo.toml`,
   or `src-tauri/tauri.conf.json` marker) and selects the file as a tab.
 - `sutra .` — open the current directory (shorthand for a folder path).
+- The 2.3.2 installer generates a detached CLI shim (`nohup`, closed stdio).
+  Native `Ctrl-C`/terminal-close behavior still awaits live smoke; see CLI-2 in
+  `VERIFY-LEDGER.md`.
 - `sutra` with no path — always opens a new **untitled** window (no project
   root attached).
 - `sutra --new [path]` — explicit "open a new window" intent. The one-owner-

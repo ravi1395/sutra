@@ -44,7 +44,7 @@ export const RELEASES: Release[] = [
     version: "2.3.2",
     date: "2026-07-13",
     notes: [
-      "CLI installation now visibly explains administrator permission, offers Copy command / Close actions, and preserves path arguments correctly.",
+      "CLI installation now generates a terminal-detached shim; native Ctrl-C / terminal-close smoke remains pending.",
     ],
   },
   {
