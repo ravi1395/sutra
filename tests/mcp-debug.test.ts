@@ -159,6 +159,37 @@ test("resolveDebugUiCore: an untrusted workspace refuses every debug_* query wit
   assert.deepEqual(calls, [], "no debug_* query may reach the live session while the workspace is untrusted");
 });
 
+test("resolveDebugUiCore: a `../` traversal is refused at the dispatch core, not just the isolated helper", async () => {
+  const calls: unknown[] = [];
+  const session: DebugUiSession = {
+    active: true,
+    debugState: () => ({}),
+    evaluate: async () => "",
+    runAgentAction: async (_label, action) => action(),
+    setBreakpoint: (path, line, fields) => {
+      calls.push({ path, line, fields });
+    },
+    removeBreakpoint: (path, line) => {
+      calls.push({ path, line });
+    },
+    continue: async () => {},
+    stepOver: async () => {},
+    stepIn: async () => {},
+    stepOut: async () => {},
+  };
+  const deps = { root: "/repo", isTrusted: async () => true, session };
+
+  const setResult = await resolveDebugUiCore("debugSetBreakpoint", { path: "../outside.py", line: 3 }, deps);
+  assert.deepEqual(setResult, { error: "Breakpoint path must be inside the workspace" });
+  const removeResult = await resolveDebugUiCore(
+    "debugRemoveBreakpoint",
+    { path: "../outside.py", line: 3 },
+    deps,
+  );
+  assert.deepEqual(removeResult, { error: "Breakpoint path must be inside the workspace" });
+  assert.deepEqual(calls, [], "an escaping path must never reach setBreakpoint/removeBreakpoint on the session");
+});
+
 test("agent actions light the strip and prefix console output; human actions stay plain", async () => {
   const restore = setupDom();
   try {
