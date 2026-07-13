@@ -8,8 +8,27 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import { DebugSession, buildEvaluateArgs, type EditorBridge } from "../src/debug-session";
 import type { DebuggerSidebarSlot } from "../src/layout";
-import { breakpointStore, type AdapterSpec, type LaunchConfig, type TauriTransport } from "../src/debug";
+import {
+  breakpointStore,
+  loadBreakpointStore,
+  saveBreakpointStore,
+  upsertBreakpointFields,
+  type AdapterSpec,
+  type LaunchConfig,
+  type TauriTransport,
+} from "../src/debug";
 import { bpGlyphChar } from "../src/editor";
+
+// node:test runs without DOM localStorage; per-root breakpoint persistence
+// needs a shim (mirrors debug.test.ts — not relied upon across files).
+if (typeof (globalThis as { localStorage?: unknown }).localStorage === "undefined") {
+  const store = new Map<string, string>();
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+  };
+}
 
 // ---- minimal DOM shim: constructing a DebugSession builds a DebuggerSidebar, which
 // touches document.createElement/replaceChildren — mirrors tests/rollback-dialog.test.ts.
@@ -243,6 +262,103 @@ test("applyVerified preserves condition/hitCondition/logMessage in the repainted
     assert.equal(bpGlyphChar(marks[1]), "◇");
     // The persistent store keeps the fields too (merge, not replace).
     assert.equal(breakpointStore.get("/repo/a.py")![0].condition, "x == 3");
+  } finally {
+    breakpointStore.clear();
+    restore();
+  }
+});
+
+// R2-1: syncBreakpointsModel() must be the single choke point for the
+// Breakpoints panel — invoked after every store mutation, not only the ones
+// that happen to route through a DebugSession method (toggle/setBreakpoint/
+// removeBreakpoint already worked pre-fix). These three cover the missing
+// sites sol's round-2 evidence named: persisted-store load, applyVerified
+// relocation, and popover field edits.
+
+test("applyVerified relocating a breakpoint updates the Breakpoints panel row, not just the gutter", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    // Seeds the store AND the panel via the existing choke point (toggleBreakpoint
+    // already calls syncBreakpointsModel) — the row starts at line 5.
+    session.toggleBreakpoint("/repo/a.py", 5);
+    // The adapter relocates the breakpoint during setBreakpoints (e.g. it landed
+    // on a comment/blank line and got snapped to the next executable line).
+    (
+      session as unknown as {
+        applyVerified(path: string, bps: { verified?: boolean; line?: number }[]): void;
+      }
+    ).applyVerified("/repo/a.py", [{ verified: true, line: 9 }]);
+
+    const rows = (session as unknown as { model: { breakpoints: { path: string; line: number }[] } }).model
+      .breakpoints;
+    assert.equal(rows.length, 1);
+    assert.equal(
+      rows[0].line,
+      9,
+      "panel row still shows the pre-relocation line — pre-fix: applyVerified never re-synced the panel",
+    );
+  } finally {
+    breakpointStore.clear();
+    restore();
+  }
+});
+
+test("loading a persisted breakpoint store repopulates the Breakpoints panel model", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    const root = "/repo/panel-load";
+    breakpointStore.set("/repo/panel-load/a.py", [{ line: 4, condition: "n==1" }]);
+    saveBreakpointStore(root);
+    breakpointStore.clear();
+
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    // Mirrors main.ts's openWorkspace: loadBreakpointStore mutates the shared
+    // breakpointStore directly, bypassing every DebugSession method.
+    loadBreakpointStore(root);
+
+    const rows = (
+      session as unknown as {
+        model: { breakpoints: { path: string; line: number; condition?: string }[] };
+      }
+    ).model.breakpoints;
+    assert.equal(
+      rows.length,
+      1,
+      "panel is empty after a persisted-store load — pre-fix: only MCP mutation synced the panel",
+    );
+    assert.equal(rows[0].path, "/repo/panel-load/a.py");
+    assert.equal(rows[0].line, 4);
+    assert.equal(rows[0].condition, "n==1");
+  } finally {
+    breakpointStore.clear();
+    restore();
+  }
+});
+
+test("editing breakpoint fields via the popover updates the Breakpoints panel row, not just the gutter", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    session.toggleBreakpoint("/repo/a.py", 5); // seeds the store + panel via the existing choke point
+    // Mirrors main.ts's popover onChange handler: upsertBreakpointFields mutates
+    // breakpointStore directly, bypassing every DebugSession method.
+    upsertBreakpointFields("/repo/a.py", 5, { condition: "x > 1" });
+
+    const rows = (
+      session as unknown as {
+        model: { breakpoints: { path: string; line: number; condition?: string }[] };
+      }
+    ).model.breakpoints;
+    assert.equal(rows.length, 1);
+    assert.equal(
+      rows[0].condition,
+      "x > 1",
+      "panel row missing the popover-added condition — pre-fix: popover edits never synced the panel",
+    );
   } finally {
     breakpointStore.clear();
     restore();

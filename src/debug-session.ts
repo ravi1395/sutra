@@ -9,6 +9,7 @@ import {
   debugStop,
   breakpointStore,
   buildSetBreakpointsArgs,
+  setBreakpointStoreListener,
   type Breakpoint,
   type AdapterSpec,
   type LaunchConfig,
@@ -135,6 +136,11 @@ export class DebugSession implements HoverEvaluator {
     // There is exactly one DebugSession per window — self-register so lang.ts's
     // paused hover-evaluate can reach it without editor.ts/main.ts wiring a callback.
     setHoverEvaluator(this);
+    // Same singleton pattern: syncBreakpointsModel() is the Breakpoints panel's
+    // single choke point, but persisted-store load (main.ts's openWorkspace) and
+    // popover field edits mutate breakpointStore directly, bypassing every
+    // DebugSession method — this is how they still reach the panel.
+    setBreakpointStoreListener(() => this.syncBreakpointsModel());
   }
 
   /** Start a session for an already-resolved adapter spec and launch config. */
@@ -466,6 +472,9 @@ export class DebugSession implements HoverEvaluator {
       if (typeof d.line === "number") bps[i].line = d.line;
     });
     this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
+    // The adapter may have relocated the line (e.g. snapped off a comment) —
+    // the Breakpoints panel must reflect that, not just the gutter.
+    this.syncBreakpointsModel();
   }
 
   private exceptionFilters(client: SessionClient) {

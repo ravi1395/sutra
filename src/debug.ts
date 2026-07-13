@@ -286,6 +286,24 @@ export interface AdapterSpec {
 // persist across debug sessions (spec: gutter BPs survive stop/terminate).
 export const breakpointStore: BreakpointStore = new Map();
 
+// Single-slot listener notified after loadBreakpointStore/upsertBreakpointFields
+// mutate the store — the two mutation sites that happen outside every
+// DebugSession method (persisted-store load on workspace open, popover field
+// edits) and so can't call syncBreakpointsModel() themselves. Mirrors lang.ts's
+// setHoverEvaluator: there is exactly one DebugSession per window, so
+// last-registration-wins needs no listener-set teardown.
+let breakpointStoreListener: (() => void) | null = null;
+
+/** Register (or clear, with null) the sole listener for breakpointStore
+ * mutations made outside a DebugSession method. */
+export function setBreakpointStoreListener(listener: (() => void) | null): void {
+  breakpointStoreListener = listener;
+}
+
+function notifyBreakpointStoreChange(): void {
+  breakpointStoreListener?.();
+}
+
 // ---- per-root disk persistence (mirrors src/settings.ts's
 // `sutra.testAutoRun.<root>` idiom: one localStorage key per root, plain
 // try/catch around every access — never let storage failure crash the app). ----
@@ -363,9 +381,12 @@ export function loadBreakpointStore(root: string): void {
   const loaded = deserializeBreakpointStore(raw);
   if (!loaded) {
     if (raw) console.warn("sutra: stored breakpoints for this root were corrupt — starting fresh");
-    return;
+  } else {
+    for (const [path, bps] of loaded) breakpointStore.set(path, bps);
   }
-  for (const [path, bps] of loaded) breakpointStore.set(path, bps);
+  // Unconditional: a switch to a root with zero persisted breakpoints must
+  // still clear a stale panel left over from the previous root.
+  notifyBreakpointStoreChange();
 }
 
 /** Persist the module `breakpointStore` for `root`. Best-effort — a full or
@@ -400,6 +421,7 @@ export function upsertBreakpointFields(
     return null;
   }
   breakpointStore.set(path, bps);
+  notifyBreakpointStoreChange();
   return bps;
 }
 
