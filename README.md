@@ -228,7 +228,11 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   `debug_set_breakpoint`/`debug_remove_breakpoint`, `debug_continue`,
   `debug_step` — all gated on workspace trust (an untrusted folder refuses with
   zero side effects). Agent actions render violet-attributed in the console and
-  agent-set breakpoints carry an `agent` chip, so you always know who did what.
+  agent-set breakpoints carry an `agent` chip, so within a live session the
+  console and gutter show which breakpoints an agent set. That attribution is
+  in-memory only: it is not persisted and does not survive a restart
+  (breakpoint persistence keeps line/condition/hit-count/log-message, not the
+  agent flag).
 
 ### Terminal
 - Real PTYs via `portable-pty` (your `$SHELL`, defaults to zsh).
