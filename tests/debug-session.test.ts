@@ -9,6 +9,7 @@ import test from "node:test";
 import { DebugSession, buildEvaluateArgs, type EditorBridge } from "../src/debug-session";
 import type { DebuggerSidebarSlot } from "../src/layout";
 import { breakpointStore, type AdapterSpec, type LaunchConfig, type TauriTransport } from "../src/debug";
+import { bpGlyphChar } from "../src/editor";
 
 // ---- minimal DOM shim: constructing a DebugSession builds a DebuggerSidebar, which
 // touches document.createElement/replaceChildren — mirrors tests/rollback-dialog.test.ts.
@@ -196,6 +197,54 @@ test("child adapter death removes only that child and leaves the parent active",
     assert.match(consoleLines.join("\n"), /child session .* ended/i);
   } finally {
     consoleLines = [];
+    restore();
+  }
+});
+
+test("applyVerified preserves condition/hitCondition/logMessage in the repainted gutter marks", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    // Editor that records the setBreakpointMarks effect payloads applyVerified emits.
+    const painted: { value: unknown }[] = [];
+    class RecordingEditor implements EditorBridge {
+      applyDebugEffects(effect: { value: unknown }): void {
+        painted.push(effect);
+      }
+      async revealAt(): Promise<void> {}
+      focusedLineText(): string | null {
+        return null;
+      }
+    }
+    const session = new DebugSession({ editor: new RecordingEditor(), slot: new FakeSlot() });
+    breakpointStore.set("/repo/a.py", [
+      { line: 5, condition: "x == 3" },
+      { line: 9, logMessage: "hit {x}" },
+    ]);
+    (
+      session as unknown as {
+        applyVerified(path: string, bps: { verified?: boolean; line?: number }[]): void;
+      }
+    ).applyVerified("/repo/a.py", [{ verified: true, line: 5 }, { verified: true, line: 9 }]);
+
+    const marks = painted.at(-1)!.value as {
+      line: number;
+      verified: boolean;
+      condition?: string;
+      hitCondition?: string;
+      logMessage?: string;
+    }[];
+    // Verify flips ◌ → filled, but the field-driven glyph must survive the repaint:
+    // dropping condition/logMessage here degrades ◆/◇ to ● in the gutter.
+    assert.equal(marks[0].verified, true);
+    assert.equal(marks[0].condition, "x == 3");
+    assert.equal(bpGlyphChar(marks[0]), "◆");
+    assert.equal(marks[1].logMessage, "hit {x}");
+    assert.equal(bpGlyphChar(marks[1]), "◇");
+    // The persistent store keeps the fields too (merge, not replace).
+    assert.equal(breakpointStore.get("/repo/a.py")![0].condition, "x == 3");
+  } finally {
+    breakpointStore.clear();
     restore();
   }
 });

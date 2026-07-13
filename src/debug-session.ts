@@ -388,19 +388,20 @@ export class DebugSession implements HoverEvaluator {
     this.renderBreakpoints(path, bps);
   }
 
+  /** Full-fidelity gutter marks from store entries — every repaint must carry
+   * condition/hitCondition/logMessage or the ◆/◇ glyphs degrade to ●. */
+  private static marksFrom(bps: Breakpoint[]) {
+    return bps.map((b) => ({
+      line: b.line,
+      verified: b.verified ?? false,
+      condition: b.condition,
+      hitCondition: b.hitCondition,
+      logMessage: b.logMessage,
+    }));
+  }
+
   private renderBreakpoints(path: string, bps: Breakpoint[]): void {
-    this.deps.editor.applyDebugEffects(
-      setBreakpointMarks.of(
-        bps.map((b) => ({
-          line: b.line,
-          verified: b.verified ?? false,
-          condition: b.condition,
-          hitCondition: b.hitCondition,
-          logMessage: b.logMessage,
-        })),
-      ),
-      path,
-    );
+    this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
     for (const node of this.nodes()) {
       const { args } = buildSetBreakpointsArgs(path, bps, node.client.capabilities);
       node.client
@@ -415,7 +416,9 @@ export class DebugSession implements HoverEvaluator {
   /**
    * Reconcile gutter marks with the adapter's `setBreakpoints` response: flip the
    * verified dot (◌→●) and adopt any line the adapter relocated the breakpoint to.
-   * DAP returns breakpoints positionally matching the request order.
+   * DAP returns breakpoints positionally matching the request order. The repaint
+   * maps from the merged store entries so condition/hitCondition/logMessage are
+   * preserved — `verified` merges INTO the record, it never replaces it.
    */
   private applyVerified(path: string, dapBps: { verified?: boolean; line?: number }[]): void {
     const bps = breakpointStore.get(path);
@@ -425,10 +428,7 @@ export class DebugSession implements HoverEvaluator {
       bps[i].verified = !!d.verified;
       if (typeof d.line === "number") bps[i].line = d.line;
     });
-    this.deps.editor.applyDebugEffects(
-      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: !!b.verified }))),
-      path,
-    );
+    this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
   }
 
   private exceptionFilters(client: SessionClient) {
