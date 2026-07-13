@@ -152,17 +152,27 @@ const DEBUGPY_IMPORT_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// `try_wait` up to `timeout`, hard-killing the process if it hasn't exited by
 /// then. Any python3/python on PATH was previously treated as "debugpy
 /// installed"; this makes "no spawn on absent adapter" actually true.
+///
+/// Spawned as its own process-group leader (mirrors runner.rs's
+/// spawn_and_wait) and group-killed on timeout — killing only the direct
+/// child leaves a shell-wrapped interpreter's grandchildren running.
 fn has_debugpy_module(python: &Path, timeout: Duration) -> bool {
-    let mut child = match Command::new(python)
+    let mut command = Command::new(python);
+    command
         .args(["-c", "import debugpy"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => return false,
     };
+    let pid = child.id();
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -171,7 +181,7 @@ fn has_debugpy_module(python: &Path, timeout: Duration) -> bool {
                 std::thread::sleep(Duration::from_millis(20));
             }
             _ => {
-                let _ = child.kill();
+                crate::runner::kill_process_group(pid);
                 let _ = child.wait();
                 return false;
             }
@@ -205,9 +215,16 @@ fn resolve_adapter_path(
     match adapter {
         "codelldb" => find_in_dirs(path_dirs, "codelldb")
             .or_else(|| home.and_then(find_codelldb_extension_in)),
-        "debugpy" => find_in_dirs(path_dirs, "python3")
-            .or_else(|| find_in_dirs(path_dirs, "python"))
-            .filter(|python| has_debugpy_module(python, DEBUGPY_IMPORT_CHECK_TIMEOUT)),
+        // Try each candidate name in order; the first one that BOTH resolves
+        // on PATH AND passes the module probe wins. Pre-fix, `python3`
+        // `.or_else` `python` committed to whichever name existed first and
+        // only then filtered by the module check, so a python3 lacking
+        // debugpy stopped resolution even when a python with debugpy was
+        // also on PATH.
+        "debugpy" => ["python3", "python"].into_iter().find_map(|name| {
+            find_in_dirs(path_dirs, name)
+                .filter(|python| has_debugpy_module(python, DEBUGPY_IMPORT_CHECK_TIMEOUT))
+        }),
         "js-debug" => find_in_dirs(path_dirs, "dapDebugServer")
             .or_else(|| home.and_then(find_js_debug_extension_in)),
         _ => None,
@@ -524,6 +541,83 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(10),
             "debugpy resolution must be bounded, not hang on a wedged interpreter"
+        );
+    }
+
+    /// True while a process with `pid` still exists (`kill -0`, unix only —
+    /// mirrors `write_executable_stub`'s platform posture).
+    #[cfg(unix)]
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn registry_debugpy_check_kills_the_whole_process_group_not_just_the_direct_child() {
+        // Pre-fix, the timeout only killed the direct child (the `sh` running
+        // the stub) — a shell-wrapped interpreter that backgrounds a real
+        // subprocess (exactly what a wedged "python3" launcher might do) left
+        // that grandchild running forever. Group-killing must reap it too.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let bin = dir.path().join("python3");
+        write_executable_stub(
+            &bin,
+            &format!(
+                "#!/bin/sh\nsleep 60 &\necho $! > \"{}\"\nwait\n",
+                pidfile.display()
+            ),
+        );
+        let path_dirs = vec![dir.path().to_path_buf()];
+
+        assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), None);
+
+        // Bounded poll for the grandchild pid file — the shell writes it
+        // almost immediately after spawn, well before the probe's own
+        // DEBUGPY_IMPORT_CHECK_TIMEOUT (3s) elapses.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let grandchild_pid: u32 = loop {
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(pid) = s.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild pid file was never written"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        // Bounded poll for the grandchild to actually die (kill -9 is async).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_alive(grandchild_pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild survived the probe timeout — kill reached only the direct child"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn registry_falls_back_to_python_when_python3_lacks_debugpy() {
+        // Pre-fix, `find_in_dirs("python3").or_else(find "python")` committed to
+        // whichever name existed first and only THEN filtered by the module
+        // check — so a python3 without debugpy stopped resolution even when a
+        // python WITH debugpy was also on PATH.
+        let dir = tempfile::tempdir().unwrap();
+        let python3 = dir.path().join("python3");
+        write_executable_stub(&python3, "#!/bin/sh\nexit 1\n"); // debugpy missing
+        let python = dir.path().join("python");
+        write_executable_stub(&python, "#!/bin/sh\nexit 0\n"); // debugpy present
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(
+            resolve_adapter_path("debugpy", &path_dirs, None),
+            Some(python)
         );
     }
 

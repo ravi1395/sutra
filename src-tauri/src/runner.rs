@@ -444,8 +444,11 @@ fn read_bounded(rx: Option<mpsc::Receiver<Vec<u8>>>, timeout: Duration) -> Vec<u
         .unwrap_or_default()
 }
 
+// pub(crate): also used by debug.rs's has_debugpy_module to reap a
+// shell-wrapped interpreter's grandchildren on timeout, not just the direct
+// child — same hazard, same fix, one implementation.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     // Negative pid targets the whole process group (requires the child to
     // have been spawned as its own group leader via `process_group(0)`).
     let _ = std::process::Command::new("kill")
@@ -454,7 +457,7 @@ fn kill_process_group(pid: u32) {
 }
 
 #[cfg(windows)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     // `/T` kills the process tree rooted at pid.
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
