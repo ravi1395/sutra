@@ -141,6 +141,44 @@ fn find_js_debug_extension_in(home: &Path) -> Option<PathBuf> {
     find_extension_binary_in(home, "ms-vscode.js-debug-", &["dapDebugServer"])
 }
 
+/// Resolve-time-only bound on the `import debugpy` probe below — generous
+/// enough for a cold interpreter startup, but never lets a wedged or
+/// otherwise weird "interpreter" hang adapter resolution.
+const DEBUGPY_IMPORT_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Bounded check that `python`'s interpreter can `import debugpy`. Runs
+/// `<python> -c "import debugpy"` with stdin/stdout/stderr closed — an
+/// interactive or wedged interpreter can't block on I/O — and polls
+/// `try_wait` up to `timeout`, hard-killing the process if it hasn't exited by
+/// then. Any python3/python on PATH was previously treated as "debugpy
+/// installed"; this makes "no spawn on absent adapter" actually true.
+fn has_debugpy_module(python: &Path, timeout: Duration) -> bool {
+    let mut child = match Command::new(python)
+        .args(["-c", "import debugpy"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if start.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 /// Resolve `adapter`'s binary from an already-collected PATH directory list
 /// plus an optional HOME dir — pure and injectable so discovery is unit
 /// tested without touching real process env (`resolve_debug_adapter` below
@@ -150,7 +188,8 @@ fn find_js_debug_extension_in(home: &Path) -> Option<PathBuf> {
 ///   - `codelldb`: PATH `codelldb`, else VS Code ext dir
 ///     `vadimcn.vscode-lldb-*/adapter/codelldb` — socket transport,
 ///     `{port}`-templated args (unchanged).
-///   - `debugpy`: PATH `python3`, else PATH `python` — stdio transport
+///   - `debugpy`: PATH `python3`, else PATH `python`, filtered to interpreters
+///     that pass a bounded `import debugpy` check — stdio transport
 ///     (`python -m debugpy.adapter`); no extension-dir fallback, debugpy is
 ///     a pip package, not a VS Code extension.
 ///   - `js-debug`: PATH `dapDebugServer`, else VS Code ext dir
@@ -166,9 +205,9 @@ fn resolve_adapter_path(
     match adapter {
         "codelldb" => find_in_dirs(path_dirs, "codelldb")
             .or_else(|| home.and_then(find_codelldb_extension_in)),
-        "debugpy" => {
-            find_in_dirs(path_dirs, "python3").or_else(|| find_in_dirs(path_dirs, "python"))
-        }
+        "debugpy" => find_in_dirs(path_dirs, "python3")
+            .or_else(|| find_in_dirs(path_dirs, "python"))
+            .filter(|python| has_debugpy_module(python, DEBUGPY_IMPORT_CHECK_TIMEOUT)),
         "js-debug" => find_in_dirs(path_dirs, "dapDebugServer")
             .or_else(|| home.and_then(find_js_debug_extension_in)),
         _ => None,
@@ -438,13 +477,54 @@ mod tests {
         );
     }
 
+    /// Write `body` to `path` and mark it executable (unix only — the codebase
+    /// targets macOS + Linux). Underlies the debugpy import-check tests, which
+    /// need a real spawnable stub interpreter rather than an inert empty file.
+    #[cfg(unix)]
+    fn write_executable_stub(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn registry_resolves_debugpy_from_path_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("python3");
-        std::fs::write(&bin, "").unwrap();
+        write_executable_stub(&bin, "#!/bin/sh\nexit 0\n");
         let path_dirs = vec![dir.path().to_path_buf()];
         assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), Some(bin));
+    }
+
+    #[test]
+    fn registry_debugpy_present_but_module_missing_returns_none() {
+        // Pre-fix, any python3/python found on PATH was treated as "debugpy
+        // installed" with no module check, so the "no spawn on absent adapter"
+        // AC was false on a machine with a bare interpreter and no
+        // `pip install debugpy`. Stub always exits 1, simulating `import
+        // debugpy` raising ModuleNotFoundError regardless of args.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("python3");
+        write_executable_stub(&bin, "#!/bin/sh\nexit 1\n");
+        let path_dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), None);
+    }
+
+    #[test]
+    fn registry_debugpy_check_is_bounded_even_if_the_interpreter_hangs() {
+        // A "python3" that never exits (a wedged or otherwise weird
+        // interpreter) must not hang adapter resolution forever — the import
+        // check hard-kills the process once its bound elapses.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("python3");
+        write_executable_stub(&bin, "#!/bin/sh\nsleep 60\n");
+        let path_dirs = vec![dir.path().to_path_buf()];
+        let start = std::time::Instant::now();
+        assert_eq!(resolve_adapter_path("debugpy", &path_dirs, None), None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "debugpy resolution must be bounded, not hang on a wedged interpreter"
+        );
     }
 
     #[test]

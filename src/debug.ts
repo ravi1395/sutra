@@ -429,6 +429,7 @@ export function detectAdapter(
   signals: Set<string>,
   codelldbPath: string | null,
   jsDebugPath: string | null = null,
+  debugpyPath: string | null = null,
 ): AdapterSpec | null {
   if (signals.has("Cargo.toml") && codelldbPath) {
     return {
@@ -446,7 +447,12 @@ export function detectAdapter(
   if (signals.has("requirements.txt") || signals.has("pyproject.toml")) {
     return {
       type: "python",
-      transport: { kind: "stdio", command: "python", args: ["-m", "debugpy.adapter"] },
+      // Fall back to the bare "python" literal only when no resolved
+      // interpreter was supplied (e.g. a direct detectAdapter call outside
+      // chooseAdapterForRoot's resolve step) — the registry-resolved path is
+      // the interpreter `resolve_debug_adapter` actually verified has
+      // debugpy importable; a different "python" on PATH may not.
+      transport: { kind: "stdio", command: debugpyPath ?? "python", args: ["-m", "debugpy.adapter"] },
       fromWorkspace: false,
     };
   }
@@ -520,7 +526,8 @@ export async function chooseAdapterForRoot(
   }
   const codelldbPath = kind === "codelldb" ? path : null;
   const jsDebugPath = kind === "js-debug" ? path : null;
-  return { spec: detectAdapter(signals, codelldbPath, jsDebugPath) };
+  const debugpyPath = kind === "debugpy" ? path : null;
+  return { spec: detectAdapter(signals, codelldbPath, jsDebugPath, debugpyPath) };
 }
 
 /** Parent directory for slash-separated absolute paths used by the Tauri backend. */

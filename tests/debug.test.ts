@@ -211,8 +211,19 @@ test("chooseAdapterForRoot: requirements.txt root resolves debugpy and detectAda
   };
   const chosen = await chooseAdapterForRoot(new Set(["requirements.txt"]), resolver);
   assert.equal(chosen.spec?.type, "python");
+  // The resolved interpreter must be threaded into the launch command, not
+  // discarded in favor of a hardcoded "python" (a different interpreter than
+  // the one `resolve_debug_adapter` actually verified has debugpy installed).
+  assert.equal((chosen.spec?.transport as any).command, "/usr/bin/python3");
   assert.equal(chosen.notFoundMessage, undefined);
   assert.deepEqual(calls, ["debugpy"]);
+});
+
+test("detectAdapter: debugpy launch command uses the resolved interpreter, not a hardcoded literal", () => {
+  const spec = detectAdapter(new Set(["pyproject.toml"]), null, null, "/usr/bin/python3.11");
+  assert.equal(spec?.type, "python");
+  assert.equal((spec?.transport as any).command, "/usr/bin/python3.11");
+  assert.deepEqual((spec?.transport as any).args, ["-m", "debugpy.adapter"]);
 });
 
 test("chooseAdapterForRoot: unresolvable implied adapter returns one honest not-found message and no spec (nothing to spawn)", async () => {
