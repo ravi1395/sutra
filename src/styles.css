@@ -2801,6 +2801,10 @@ button:hover {
 .dbg-watch-add { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; }
 .dbg-console { font-family: var(--mono, monospace); white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 0; }
 .dbg-console-error { color: var(--danger, #e24b4a); }
+/* Eval results stand apart from plain adapter output. */
+.dbg-console-result { color: var(--modified, #4493f8); }
+/* Violet = agent-attributed (MCP) console lines — matches .agent-badge. */
+.dbg-console-agent { color: #a78bfa; }
 .dbg-console-input { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; font-family: var(--mono, monospace); }
 
 /* ── prompt composer (ported from feat/prompt-composer) ── */

@@ -70,10 +70,10 @@ test("console evaluate input: absent with no session, present once a session exi
   try {
     const sidebar = new DebuggerSidebar(noopCb);
 
-    sidebar.render({ ...emptyModel(), console: ["hello"], hasSession: false });
+    sidebar.render({ ...emptyModel(), console: [{ text: "hello", kind: "output" }], hasSession: false });
     assert.equal(findAllByClass(sidebar.el, "dbg-console-input").length, 0, "no dead chrome — input must not be in the DOM at all");
 
-    sidebar.render({ ...emptyModel(), console: ["hello"], hasSession: true });
+    sidebar.render({ ...emptyModel(), console: [{ text: "hello", kind: "output" }], hasSession: true });
     assert.equal(findAllByClass(sidebar.el, "dbg-console-input").length, 1);
   } finally {
     restore();
@@ -84,4 +84,30 @@ test("console evaluate input: absent with no session, present once a session exi
   assert.equal(shouldIgnoreEvaluateInput("   "), true);
   assert.equal(shouldIgnoreEvaluateInput("a\nb"), true);
   assert.equal(shouldIgnoreEvaluateInput("turn.files.len()"), false);
+});
+
+test("console entries render kind-specific classes — result/error/agent lines are visually distinct", () => {
+  const restore = setupDom();
+  try {
+    const sidebar = new DebuggerSidebar(noopCb);
+    sidebar.render({
+      ...emptyModel(),
+      console: [
+        { text: "> total", kind: "prompt" },
+        { text: "42", kind: "result" },
+        { text: "Error: nope", kind: "error" },
+        { text: "[agent] step over", kind: "agent" },
+      ],
+      hasSession: true,
+    });
+    // One div per line, each carrying its kind class (AC: eval result lines must
+    // not be indistinguishable from plain output; agent lines render violet).
+    assert.equal(findAllByClass(sidebar.el, "dbg-console-line").length, 4);
+    assert.equal(findAllByClass(sidebar.el, "dbg-console-result").length, 1);
+    assert.equal(findAllByClass(sidebar.el, "dbg-console-error").length, 1);
+    assert.equal(findAllByClass(sidebar.el, "dbg-console-agent").length, 1);
+    assert.equal(findAllByClass(sidebar.el, "dbg-console-result")[0].textContent, "42");
+  } finally {
+    restore();
+  }
 });

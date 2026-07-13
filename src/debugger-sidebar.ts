@@ -14,12 +14,21 @@ export interface SidebarCallbacks {
   onEvaluate: (expr: string) => Promise<void>;
 }
 
+/** Kind of a console line — drives per-line CSS so eval results, adapter errors,
+ * and agent-attributed (MCP) actions are visually distinct from plain output. */
+export type ConsoleKind = "output" | "prompt" | "result" | "error" | "agent";
+
+export interface ConsoleEntry {
+  text: string;
+  kind: ConsoleKind;
+}
+
 export interface SidebarModel {
   variables: { name: string; value: string; variablesReference: number }[];
   watch: { expr: string; value: string }[];
   callStack: { id: number; name: string; path: string; line: number }[];
   exceptionFilters: { filter: string; label: string; enabled: boolean }[];
-  console: string[];
+  console: ConsoleEntry[];
   // True while a DAP session is live — gates the console evaluate input row (hidden,
   // not disabled, when there's no session to send an evaluate request to).
   hasSession: boolean;
@@ -132,15 +141,16 @@ export class DebuggerSidebar {
     return ul;
   }
 
-  private consoleView(lines: string[], hasSession: boolean): HTMLElement {
+  private consoleView(lines: ConsoleEntry[], hasSession: boolean): HTMLElement {
     const pre = document.createElement("pre");
     pre.className = "dbg-console";
-    // Render each entry as its own line (not one joined blob) so error lines can
-    // carry a distinct class — evaluate() prefixes adapter failures with "Error: ".
+    // Render each entry as its own line (not one joined blob) carrying its kind
+    // class — eval results, adapter errors, and agent-attributed lines must be
+    // visually distinct from plain adapter output.
     for (const line of lines) {
       const entry = document.createElement("div");
-      entry.className = line.startsWith("Error: ") ? "dbg-console-line dbg-console-error" : "dbg-console-line";
-      entry.textContent = line;
+      entry.className = `dbg-console-line dbg-console-${line.kind}`;
+      entry.textContent = line.text;
       pre.append(entry);
     }
 

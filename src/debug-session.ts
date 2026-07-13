@@ -14,7 +14,7 @@ import {
   type LaunchConfig,
   type TauriTransport,
 } from "./debug";
-import { DebuggerSidebar, emptyModel, type SidebarModel } from "./debugger-sidebar";
+import { DebuggerSidebar, emptyModel, type ConsoleKind, type SidebarModel } from "./debugger-sidebar";
 import { setBreakpointMarks, setPausedLine, setInlineHints } from "./editor";
 import { matchIdentifiers } from "./debug-hints";
 import { setHoverEvaluator, type HoverEvaluator } from "./lang";
@@ -270,14 +270,14 @@ export class DebugSession implements HoverEvaluator {
   async evaluate(expr: string, context: "repl" | "hover"): Promise<string> {
     const client = this.pausedClient ?? this.client;
     if (!client) throw new Error("no active debug session");
-    if (context === "repl") this.appendConsole(`> ${expr}`);
+    if (context === "repl") this.appendConsole(`> ${expr}`, "prompt");
 
     const args = buildEvaluateArgs(expr, context, client.state, this.currentFrameId);
     try {
       const resp = await client.request("evaluate", args);
       const value = String((resp as { result?: unknown } | undefined)?.result ?? "");
       if (context === "repl") {
-        this.appendConsole(value);
+        this.appendConsole(value, "result");
         // Isolated from the eval outcome: a refresh failure (e.g. a transient
         // scopes/variables rejection) must never turn a successful evaluate into a
         // fabricated error or leave the console input un-cleared.
@@ -286,7 +286,7 @@ export class DebugSession implements HoverEvaluator {
       return value;
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      if (context === "repl") this.appendConsole(`Error: ${err.message}`);
+      if (context === "repl") this.appendConsole(`Error: ${err.message}`, "error");
       throw err;
     }
   }
@@ -556,9 +556,13 @@ export class DebugSession implements HoverEvaluator {
     this.emitState();
   }
 
-  private appendConsole(text: string): void {
-    const line = this.agentActionDepth > 0 ? `[agent] ${text}` : text;
-    this.model.console.push(line);
+  private appendConsole(text: string, kind: ConsoleKind = "output"): void {
+    // Agent attribution wins over the base kind: any line appended during an
+    // MCP-driven action renders with the violet agent class (the `[agent]`
+    // text prefix stays for string consumers via onConsole).
+    const agent = this.agentActionDepth > 0;
+    const line = agent ? `[agent] ${text}` : text;
+    this.model.console.push({ text: line, kind: agent ? "agent" : kind });
     this.deps.onConsole?.(line);
     this.sidebar.render(this.model);
   }

@@ -308,6 +308,38 @@ test("evaluate: repl context echoes the expression then appends the result, in o
   }
 });
 
+test("console model kinds: evaluate tags prompt/result, adapter failure tags error, agent actions tag agent", async () => {
+  const restore = setupDom();
+  try {
+    const session = new DebugSession({ editor: new FakeEditor(), slot: new FakeSlot() });
+    const model = (session as unknown as { model: { console: { text: string; kind: string }[] } }).model;
+
+    (session as unknown as { client: unknown }).client = new FakeClient("paused", async (command) => {
+      if (command === "evaluate") return { result: "3" };
+      throw new Error("scopes unavailable"); // post-eval refresh — isolated from the eval outcome
+    });
+    await session.evaluate("x", "repl");
+    assert.deepEqual(
+      model.console.map((e) => ({ text: e.text, kind: e.kind })),
+      [
+        { text: "> x", kind: "prompt" },
+        { text: "3", kind: "result" },
+      ],
+    );
+
+    await session.runAgentAction("step over", async () => {});
+    assert.deepEqual(model.console.at(-1), { text: "[agent] step over", kind: "agent" });
+
+    (session as unknown as { client: unknown }).client = new FakeClient("running", async () => {
+      throw new Error("not stopped");
+    });
+    await assert.rejects(session.evaluate("bogus", "repl"), /not stopped/);
+    assert.deepEqual(model.console.at(-1), { text: "Error: not stopped", kind: "error" });
+  } finally {
+    restore();
+  }
+});
+
 test("showNotice: shows the sidebar and appends exactly one console line without starting a session", () => {
   const restore = setupDom();
   try {
