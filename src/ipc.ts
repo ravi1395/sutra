@@ -32,9 +32,12 @@ export const spawnWindow = (path?: string) => invoke<void>("spawn_window", { pat
 
 // CLI shim install (macOS only backend; absent elsewhere — callers must
 // tolerate rejection). "absent"/"stale" surface a menu row; cliInstall()
-// either installs directly or returns an admin command for the UI to copy.
+// returns a typed outcome so the UI can visibly surface privilege fallback.
+export type CliInstallOutcome =
+  | { status: "installed" }
+  | { status: "requires_admin"; command: string };
 export const cliInstallState = () => invoke<"absent" | "current" | "stale">("cli_install_state");
-export const cliInstall = () => invoke<string>("cli_install");
+export const cliInstall = () => invoke<CliInstallOutcome>("cli_install");
 
 // --- Backend-owned shared app state (recents/trust/settings/ui-state) ---
 // Cross-process source of truth: every window and the native Dock menu reads

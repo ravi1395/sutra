@@ -55,6 +55,12 @@ Inline preview render (branch `feat/inline-preview`, commits `5ba5cf8..c0a70ea`)
 | 2026-07-11 | 2.3.0 | L-11 render_html+url → browser unaffected | IPC | — | BLOCKED(MCP render_html with url → opens localhost browser pane as before) |
 | 2026-07-11 | 2.3.0 | L-12 open_preview opens the REAL savable file with preview on (incl. split-pane, post-fix 7d56013) | IPC | — | BLOCKED(MCP open_preview on a real .md/.mmd/.html → actual file opens (has path, savable) with preview on; test with file already open in a non-focused split pane) |
 
+CLI installer 2.3.2. Typed outcome, safe privileged-command quoting, Copy/Close branching, and visible error paths are unit-proven. The row below requires the live macOS app and shell.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-13 | 2.3.2 | CLI-1: Install CLI visibly handles administrator fallback and installed shim forwards a path | UI/shell | First live click against the already-running dev app closed the menu but showed no native dialog; stale backend vs click targeting unresolved. | BLOCKED(restart current `npm run tauri dev`; click Install CLI command → native dialog shows full command + Copy command / Close; Copy writes exact command; run it in Terminal; `command -v sutra` succeeds and `sutra <fixture-path>` opens/focuses that path) |
+
 Debugger v2 Phase 1: conditional/hit-count/log breakpoints + gutter popover (branch `feat/debugger-v2`). Field serialization, capability gating, glyph selection, and persistence round-trip are all unit-proven (tests/debug.test.ts). Rows below need a real DAP adapter session (codelldb) and cannot be proven by unit tests — drive each in `npm run tauri dev` against a Rust fixture project with a loop.
 
 | Date | Version | Criterion | Surface | Evidence | Status |

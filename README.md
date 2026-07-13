@@ -169,15 +169,10 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   `sutra` (a new untitled window).
 - **Installing the `sutra` command (macOS).** The app can check whether the
   shim at `/usr/local/bin/sutra` is installed and current, and (re)install it
-  pointing at the running app bundle. This backend capability
-  (`cli_install_state` / `cli_install` Tauri commands) is in place, but a
-  Settings/menu affordance to trigger it from the UI is **not wired up yet**
-  — until then, install manually from a terminal:
-  ```sh
-  sudo mkdir -p /usr/local/bin
-  printf '#!/bin/sh\nexec "/Applications/Sutra.app/Contents/MacOS/Sutra" "$@"\n' | sudo tee /usr/local/bin/sutra >/dev/null
-  sudo chmod 755 /usr/local/bin/sutra
-  ```
+  pointing at the running app bundle. Open the workspace menu and choose
+  **Install CLI command** (or **Update CLI command**). If `/usr/local/bin`
+  requires administrator permission, Sutra shows the exact Terminal command
+  with **Copy command** and **Close** actions instead of failing silently.
 - **Dock menu** (macOS) — right-click the Dock icon for a menu of open
   windows/recents — is **planned, not yet shipped** (in-progress spike).
 - On Windows: no CLI shim or Dock menu (macOS-only); multi-process root

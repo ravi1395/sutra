@@ -41,6 +41,13 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.2",
+    date: "2026-07-13",
+    notes: [
+      "CLI installation now visibly explains administrator permission, offers Copy command / Close actions, and preserves path arguments correctly.",
+    ],
+  },
+  {
     version: "2.3.1",
     date: "2026-07-11",
     notes: [
