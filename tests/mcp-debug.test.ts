@@ -216,7 +216,7 @@ test("resolveDebugUiCore: empty/whitespace and non-POSIX-absolute paths are refu
   };
   const deps = { root: "/repo", isTrusted: async () => true, session };
 
-  for (const malformed of ["", "   ", "C:\\x", "\\\\srv\\share"]) {
+  for (const malformed of ["", "   ", "C:\\x", "\\\\srv\\share", "a\u0000.py", "\u0000"]) {
     const setResult = await resolveDebugUiCore("debugSetBreakpoint", { path: malformed, line: 3 }, deps);
     assert.deepEqual(
       setResult,

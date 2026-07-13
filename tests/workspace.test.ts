@@ -144,6 +144,10 @@ test("resolveWorkspacePath: MCP breakpoint paths join to the root, normalize, an
   // silently nested under the root instead of refused).
   assert.equal(resolveWorkspacePath("C:\\x", "/tmp/project"), null);
   assert.equal(resolveWorkspacePath("\\\\srv\\share", "/tmp/project"), null);
+  // An embedded NUL is impossible in a POSIX filename — pre-fix it passed
+  // containment, mutated the store, and persisted an unopenable path.
+  assert.equal(resolveWorkspacePath("a\u0000.py", "/tmp/project"), null);
+  assert.equal(resolveWorkspacePath("\u0000", "/tmp/project"), null);
   // Inside-root dot segments are allowed AND the returned path is normalized.
   assert.equal(resolveWorkspacePath("sub/../inside.py", "/tmp/project"), "/tmp/project/inside.py");
   assert.equal(resolveWorkspacePath("./a/./b.py", "/tmp/project"), "/tmp/project/a/b.py");

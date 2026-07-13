@@ -59,6 +59,9 @@ export function resolveWorkspacePath(raw: string, root: string): string | null {
   // silently treated as relative and nested under the root.
   if (raw.trim().length === 0) return null;
   if (raw.includes("\\") || /^[A-Za-z]:/.test(raw)) return null;
+  // A NUL is impossible in any POSIX filename; refusing here keeps an
+  // unopenable path out of the store and its persisted form.
+  if (raw.includes("\u0000")) return null;
   const joined = raw.startsWith("/") ? raw : `${normalizePath(root)}/${raw}`;
   const resolved = collapseDotSegments(normalizePath(joined));
   return pathBelongsToRoot(resolved, root) ? resolved : null;
