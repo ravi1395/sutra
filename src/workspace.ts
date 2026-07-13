@@ -52,6 +52,13 @@ export function pathBelongsToRoot(path: string, root: string): boolean {
  * when the path lands outside the workspace.
  */
 export function resolveWorkspacePath(raw: string, root: string): string | null {
+  // Malformed input is refused outright rather than partially handled.
+  // Platform posture is macOS+Linux (no Windows path support) — a Windows
+  // drive-letter or UNC form is not a valid workspace-relative or POSIX path
+  // here, so a backslash or a `C:`-style prefix refuses rather than being
+  // silently treated as relative and nested under the root.
+  if (raw.trim().length === 0) return null;
+  if (raw.includes("\\") || /^[A-Za-z]:/.test(raw)) return null;
   const joined = raw.startsWith("/") ? raw : `${normalizePath(root)}/${raw}`;
   const resolved = collapseDotSegments(normalizePath(joined));
   return pathBelongsToRoot(resolved, root) ? resolved : null;

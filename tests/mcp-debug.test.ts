@@ -190,6 +190,49 @@ test("resolveDebugUiCore: a `../` traversal is refused at the dispatch core, not
   assert.deepEqual(calls, [], "an escaping path must never reach setBreakpoint/removeBreakpoint on the session");
 });
 
+test("resolveDebugUiCore: empty/whitespace and non-POSIX-absolute paths are refused at the dispatch core", async () => {
+  // Platform posture is macOS+Linux only — a Windows drive-letter or UNC form
+  // is not a valid workspace-relative or POSIX path here, so it's refused
+  // outright rather than partially handled. Pre-fix: an empty path resolved
+  // to the workspace root (joined onto root + "/" + "" collapses back to
+  // root), and backslash forms were classified by `startsWith("/")` alone,
+  // so they were treated as relative and silently nested under the root.
+  const calls: unknown[] = [];
+  const session: DebugUiSession = {
+    active: true,
+    debugState: () => ({}),
+    evaluate: async () => "",
+    runAgentAction: async (_label, action) => action(),
+    setBreakpoint: (path, line, fields) => {
+      calls.push({ path, line, fields });
+    },
+    removeBreakpoint: (path, line) => {
+      calls.push({ path, line });
+    },
+    continue: async () => {},
+    stepOver: async () => {},
+    stepIn: async () => {},
+    stepOut: async () => {},
+  };
+  const deps = { root: "/repo", isTrusted: async () => true, session };
+
+  for (const malformed of ["", "   ", "C:\\x", "\\\\srv\\share"]) {
+    const setResult = await resolveDebugUiCore("debugSetBreakpoint", { path: malformed, line: 3 }, deps);
+    assert.deepEqual(
+      setResult,
+      { error: "Breakpoint path must be inside the workspace" },
+      `debugSetBreakpoint must refuse ${JSON.stringify(malformed)}`,
+    );
+    const removeResult = await resolveDebugUiCore("debugRemoveBreakpoint", { path: malformed, line: 3 }, deps);
+    assert.deepEqual(
+      removeResult,
+      { error: "Breakpoint path must be inside the workspace" },
+      `debugRemoveBreakpoint must refuse ${JSON.stringify(malformed)}`,
+    );
+  }
+  assert.deepEqual(calls, [], "a malformed path must never reach setBreakpoint/removeBreakpoint on the session");
+});
+
 test("agent actions light the strip and prefix console output; human actions stay plain", async () => {
   const restore = setupDom();
   try {

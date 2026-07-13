@@ -134,6 +134,16 @@ test("resolveWorkspacePath: MCP breakpoint paths join to the root, normalize, an
   // Absolute path outside the root → refused.
   assert.equal(resolveWorkspacePath("/etc/passwd", "/tmp/project"), null);
   assert.equal(resolveWorkspacePath("/tmp/project/../outside.py", "/tmp/project"), null);
+  // Empty/whitespace-only input → refused (pre-fix: "" joined onto root + "/"
+  // collapsed straight back to the root itself, not a refusal).
+  assert.equal(resolveWorkspacePath("", "/tmp/project"), null);
+  assert.equal(resolveWorkspacePath("   ", "/tmp/project"), null);
+  // Platform posture is macOS+Linux — Windows drive-letter/UNC forms are
+  // malformed input here, not a supported absolute path (pre-fix: classified
+  // by `startsWith("/")` alone, so these were treated as relative and
+  // silently nested under the root instead of refused).
+  assert.equal(resolveWorkspacePath("C:\\x", "/tmp/project"), null);
+  assert.equal(resolveWorkspacePath("\\\\srv\\share", "/tmp/project"), null);
   // Inside-root dot segments are allowed AND the returned path is normalized.
   assert.equal(resolveWorkspacePath("sub/../inside.py", "/tmp/project"), "/tmp/project/inside.py");
   assert.equal(resolveWorkspacePath("./a/./b.py", "/tmp/project"), "/tmp/project/a/b.py");
