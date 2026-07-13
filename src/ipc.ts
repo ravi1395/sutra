@@ -2,7 +2,7 @@
 // Rust boundary so the rest of the app stays transport-agnostic.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { wrapForDelivery } from "./delivery";
@@ -283,9 +283,11 @@ export interface FileListing {
 }
 export const listFiles = (root: string) => invoke<FileListing>("list_files", { root });
 
-// Clipboard wrappers over tauri-plugin-clipboard-manager.
+// Keep reads on the plugin's async path (required on Linux), but dispatch
+// writes through a platform-aware Rust command: synchronous on macOS so
+// AppKit pasteboard ownership stays on the main thread, async elsewhere.
 export const clipboardRead = (): Promise<string> => readText();
-export const clipboardWrite = (text: string): Promise<void> => writeText(text);
+export const clipboardWrite = (text: string): Promise<void> => invoke("clipboard_write", { text });
 
 // --- Self-update (tauri-plugin-updater + plugin-process) ---
 // Centralizes the updater/process plugin surface so updater.ts stays

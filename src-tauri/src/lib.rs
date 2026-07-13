@@ -34,6 +34,24 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
     Some(serde_json::json!({ "path": raw, "isDir": p.is_dir() }))
 }
 
+/// Synchronous on macOS: Tauri executes non-async commands on the main thread,
+/// which AppKit requires for safe NSPasteboard ownership changes.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn clipboard_write(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// Other desktop clipboard backends may block while waiting for ownership, so
+/// retain the plugin's worker-thread behavior outside macOS.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn clipboard_write(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
 /// Frontend New Window. `None` → fresh untitled child. A path with a live
 /// owner focuses that owner (one-owner invariant); else spawns a child.
 #[tauri::command]
@@ -333,6 +351,7 @@ pub fn run() {
             watcher::watch_start,
             watcher::watch_stop,
             take_launch_path,
+            clipboard_write,
             spawn_window,
             #[cfg(target_os = "macos")]
             cli_install::cli_install_state,
