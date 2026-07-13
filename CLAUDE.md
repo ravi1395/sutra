@@ -59,7 +59,10 @@ src/
   debug.ts             DapClient, BreakpointStore
   debug-session.ts     active debug session (step/continue/reset)
   debug-hints.ts       breakpoint + paused-line gutter decorations
-  debugger-sidebar.ts  debugger sidebar (variables, call stack)
+  debugger-sidebar.ts  debugger sidebar (variables, watch, call stack, breakpoints panel, console+REPL)
+  debug-strip.ts       floating session-only debug control strip (delegates to DebugSession)
+  debug-chip.ts        statusbar debug chip (mirrors diagnostics chip pattern)
+  breakpoint-popover.ts gutter right-click editor for condition/hit/logMessage
   updater.ts           auto-update: 6h poll, GitHub releases, relaunch
   shortcuts.ts         shortcut predicates  |  contextmenu.ts  popover
   split-drop.ts        drag types for editor splits  |  terminal-groups.ts  L/R groups

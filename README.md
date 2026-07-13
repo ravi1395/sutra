@@ -202,6 +202,34 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   **Reset Font Size** update editor and terminal font sizes live and persist in
   `localStorage`.
 
+### Debugger
+- **DAP debugging** with per-language adapters: CodeLLDB (Rust/C/C++),
+  debugpy (Python — `pip install debugpy`), js-debug (Node — VS Code js-debug
+  extension or `dapDebugServer` on PATH). The adapter is inferred from the
+  workspace (`Cargo.toml`, `requirements.txt`/`pyproject.toml`, `package.json`,
+  `go.mod`); a missing adapter reports an install hint in the debug console
+  instead of failing silently.
+- **Breakpoints**: click the gutter to toggle; right-click to edit a
+  **condition**, **hit count**, or **log message** (a logpoint — prints without
+  pausing, no source edits). Glyphs: `●` plain, `◆` conditional, `◇` logpoint.
+  Breakpoints persist per project across restarts. Fields an adapter doesn't
+  support are disabled in the editor popover and withheld from the adapter.
+- **While paused**: evaluate expressions in the debug console (REPL input) or
+  hover an identifier for its runtime value; sidebar shows variables, watch,
+  call stack, exception filters, and a cross-file **Breakpoints panel**.
+- **Session UI**: a floating control strip (continue / step over / into / out /
+  stop) appears only while a session is live, plus a statusbar chip showing
+  running / paused state (click jumps to the paused line). The same actions are
+  available as palette `>` commands and F-keys (see table).
+- **Multi-session**: adapters that spawn children via DAP `startDebugging`
+  (Python subprocesses, Node clusters) attach automatically; stopping the
+  parent tears children down.
+- **Agent debugging (MCP)**: `debug_state`, `debug_evaluate`,
+  `debug_set_breakpoint`/`debug_remove_breakpoint`, `debug_continue`,
+  `debug_step` — all gated on workspace trust (an untrusted folder refuses with
+  zero side effects). Agent actions render violet-attributed in the console and
+  agent-set breakpoints carry an `agent` chip, so you always know who did what.
+
 ### Terminal
 - Real PTYs via `portable-pty` (your `$SHELL`, defaults to zsh).
 - **Multiple terminals** (`+` in the terminal tab bar).
