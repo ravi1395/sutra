@@ -138,6 +138,7 @@ import {
   loadWorkspaceSession,
   pathBelongsToRoot,
   resolveOpenPath,
+  resolveWorkspacePath,
   pruneWorkspaceSession,
   saveWorkspaceSession,
   seedRecentsFromLocalStorage,
@@ -532,8 +533,10 @@ async function resolveDebugUi(query: string, params: unknown): Promise<unknown> 
   if (typeof p.path !== "string" || !Number.isInteger(p.line) || (p.line as number) < 1) {
     return { error: "Breakpoint path and positive line are required" };
   }
-  const path = p.path.startsWith("/") ? p.path : `${root.replace(/\/+$/, "")}/${p.path}`;
-  if (!pathBelongsToRoot(path, root)) return { error: "Breakpoint path must be inside the workspace" };
+  // Lexical containment with `.`/`..` collapsed — a `../outside.py` traversal must
+  // never persist/broadcast a breakpoint outside the workspace (security).
+  const path = resolveWorkspacePath(p.path, root);
+  if (!path) return { error: "Breakpoint path must be inside the workspace" };
   const line = p.line as number;
 
   if (query === "debugSetBreakpoint") {

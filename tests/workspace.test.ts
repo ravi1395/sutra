@@ -37,6 +37,7 @@ import {
   pathBelongsToRoot,
   parentDir,
   resolveOpenPath,
+  resolveWorkspacePath,
   pruneWorkspaceSession,
   serializeWorkspaceSession,
   sessionFromTabs,
@@ -111,6 +112,37 @@ test("pathBelongsToRoot rejects sibling path prefixes", () => {
   assert.equal(pathBelongsToRoot("/tmp/project/src/main.ts", "/tmp/project"), true);
   assert.equal(pathBelongsToRoot("/tmp/project-old/src/main.ts", "/tmp/project"), false);
   assert.equal(pathBelongsToRoot("/tmp/project/src/main.ts", "/"), true);
+});
+
+test("pathBelongsToRoot collapses dot segments — a lexical `..` escape is refused", () => {
+  // The MCP debug_set_breakpoint path is judged lexically (files may not exist yet),
+  // so `..` must be collapsed BEFORE the prefix check — `<root>/../outside.py` starts
+  // with `<root>/` as a raw string but lives outside the workspace.
+  assert.equal(pathBelongsToRoot("/tmp/project/../outside.py", "/tmp/project"), false);
+  assert.equal(pathBelongsToRoot("/tmp/project/../../etc/passwd", "/tmp/project"), false);
+  assert.equal(pathBelongsToRoot("/tmp/project/../project-evil/x.py", "/tmp/project"), false);
+  // Dot segments that stay inside the root remain allowed.
+  assert.equal(pathBelongsToRoot("/tmp/project/sub/../inside.py", "/tmp/project"), true);
+  assert.equal(pathBelongsToRoot("/tmp/project/./inside.py", "/tmp/project"), true);
+  assert.equal(pathBelongsToRoot("/tmp/project/sub/../../project/inside.py", "/tmp/project"), true);
+});
+
+test("resolveWorkspacePath: MCP breakpoint paths join to the root, normalize, and refuse escapes", () => {
+  // Relative traversal escape → refused (this is the debug_set_breakpoint payload shape).
+  assert.equal(resolveWorkspacePath("../outside.py", "/tmp/project"), null);
+  assert.equal(resolveWorkspacePath("sub/../../outside.py", "/tmp/project"), null);
+  // Absolute path outside the root → refused.
+  assert.equal(resolveWorkspacePath("/etc/passwd", "/tmp/project"), null);
+  assert.equal(resolveWorkspacePath("/tmp/project/../outside.py", "/tmp/project"), null);
+  // Inside-root dot segments are allowed AND the returned path is normalized.
+  assert.equal(resolveWorkspacePath("sub/../inside.py", "/tmp/project"), "/tmp/project/inside.py");
+  assert.equal(resolveWorkspacePath("./a/./b.py", "/tmp/project"), "/tmp/project/a/b.py");
+  assert.equal(resolveWorkspacePath("src/main.py", "/tmp/project"), "/tmp/project/src/main.py");
+  assert.equal(resolveWorkspacePath("/tmp/project/src/main.py", "/tmp/project"), "/tmp/project/src/main.py");
+  // main.ts's MCP breakpoint validation must route through this helper (not a raw
+  // string-prefix check) so the persisted/broadcast path is the normalized one.
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  assert.match(mainTs, /const path = resolveWorkspacePath\(p\.path, root\);/);
 });
 
 test("filterWorkspaceTabs keeps only files inside the opened root", () => {
