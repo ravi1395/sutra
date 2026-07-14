@@ -84,11 +84,13 @@ export function mountDebuggerSidebarSlot(container: HTMLElement): DebuggerSideba
     show(content) {
       slot.replaceChildren(content);
       slot.style.flex = `0 0 ${lastW}px`;
+      slot.classList.add("open");
       handle.classList.remove("hidden");
     },
     hide() {
       slot.replaceChildren();
       slot.style.flex = "0 0 0px";
+      slot.classList.remove("open");
       handle.classList.add("hidden");
     },
   };
