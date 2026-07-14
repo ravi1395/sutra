@@ -2790,7 +2790,8 @@ button:hover {
 .cm-inline-hint { color: #4ec9b0; font-style: italic; opacity: 0.8; }
 
 /* Debugger sidebar slot + panels */
-.debugger-sidebar-slot { transition: width 0.15s ease; border-left: 1px solid var(--border, #2a2a2a); }
+.debugger-sidebar-slot { transition: flex-basis 0.15s ease; border-left: 1px solid var(--border, #2a2a2a); min-height: 0; min-width: 0; }
+.debugger-sidebar-slot.dragging { transition: none; }
 .debugger-sidebar { display: flex; flex-direction: column; height: 100%; overflow: auto; font-size: 12px; }
 .dbg-panel { border-bottom: 1px solid var(--border, #2a2a2a); padding: 6px 8px; }
 .dbg-panel h3 { font-size: 11px; text-transform: uppercase; opacity: 0.7; margin: 0 0 4px; }

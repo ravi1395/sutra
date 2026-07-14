@@ -202,7 +202,7 @@ editor.onGotoDefinitionMulti = (locs) => {
 };
 
 // --- Debugger session ---
-const debugSlot = mountDebuggerSidebarSlot($("main"));
+const debugSlot = mountDebuggerSidebarSlot($("body"));
 let debugStrip: DebugStripHandle | undefined;
 const debugSession = new DebugSession({
   editor,

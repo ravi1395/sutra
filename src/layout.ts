@@ -53,22 +53,43 @@ export interface DebuggerSidebarSlot {
   hide: () => void;
 }
 
-// Mounts a right-sidebar slot in `container`. Hidden (width 0) until show() is
-// called with the session sidebar; collapses back on hide() at session end.
+// Mounts a right-sidebar slot in `container` (a row-flex ancestor), preceded by a
+// drag handle. Hidden (flex-basis 0) until show() is called with the session
+// sidebar; collapses back on hide() at session end.
 export function mountDebuggerSidebarSlot(container: HTMLElement): DebuggerSidebarSlot {
+  const handle = document.createElement("div");
+  handle.className = "resizer-v hidden";
   const slot = document.createElement("aside");
   slot.className = "debugger-sidebar-slot";
-  slot.style.width = "0";
+  slot.style.flex = "0 0 0px";
   slot.style.overflow = "hidden";
-  container.append(slot);
+  // Handle before slot so it sits on the slot's left edge.
+  container.append(handle, slot);
+
+  let lastW = 320;
+  // Sizing goes through ONE channel — flex-basis — because vResizer writes
+  // style.flex; mixing it with style.width breaks collapse after the first drag.
+  vResizer(handle, slot, {
+    min: 240,
+    max: 560,
+    fromEnd: true,
+    onResize: () => {
+      lastW = Math.round(slot.getBoundingClientRect().width);
+    },
+  });
+  handle.addEventListener("mousedown", () => slot.classList.add("dragging"));
+  document.addEventListener("mouseup", () => slot.classList.remove("dragging"));
+
   return {
     show(content) {
       slot.replaceChildren(content);
-      slot.style.width = "320px";
+      slot.style.flex = `0 0 ${lastW}px`;
+      handle.classList.remove("hidden");
     },
     hide() {
       slot.replaceChildren();
-      slot.style.width = "0";
+      slot.style.flex = "0 0 0px";
+      handle.classList.add("hidden");
     },
   };
 }
