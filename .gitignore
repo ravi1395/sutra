@@ -51,3 +51,9 @@ sutra.key.pub
 .claude/
 .gitignore
 CODEMAP.md
+src-tauri/graphify*
+src-tauri/.gitignore
+VERIFY-LEDGER.md
+HANDOFF.md
+src-tauri/HANDOFF.md
+
