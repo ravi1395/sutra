@@ -42,9 +42,10 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 export const RELEASES: Release[] = [
   {
     version: "2.3.2",
-    date: "2026-07-13",
+    date: "2026-07-14",
     notes: [
       "CLI installation now generates a terminal-detached shim; native Ctrl-C / terminal-close smoke remains pending.",
+      "Workspace indexing no longer blocks the UI on large folders — file tree, terminal, and shortcuts stay responsive during startup scans.",
     ],
   },
   {
