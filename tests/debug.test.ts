@@ -391,6 +391,15 @@ test("glyph selection: unverified breakpoint always shows the hollow dot regardl
   assert.equal(bpGlyphChar({}), "◌");
 });
 
+test("glyph selection: agent-attributed breakpoint shows the ✦ glyph, outranking cond/log but not unverified", () => {
+  assert.equal(bpGlyphChar({ verified: true, agent: true }), "✦");
+  // agent wins the single gutter glyph over cond/log (panel chips still carry those)
+  assert.equal(bpGlyphChar({ verified: true, agent: true, condition: "x > 1" }), "✦");
+  assert.equal(bpGlyphChar({ verified: true, agent: true, logMessage: "hit {x}" }), "✦");
+  // but an unverified agent breakpoint is still the hollow dot
+  assert.equal(bpGlyphChar({ verified: false, agent: true }), "◌");
+});
+
 test("logpoint no-pause model: a logMessage alongside a condition still renders as a logpoint, not conditional", () => {
   assert.equal(bpGlyphChar({ verified: true, condition: "x > 1", logMessage: "hit {x}" }), "◇");
 });

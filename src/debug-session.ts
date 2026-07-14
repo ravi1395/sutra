@@ -418,6 +418,7 @@ export class DebugSession implements HoverEvaluator {
       condition: b.condition,
       hitCondition: b.hitCondition,
       logMessage: b.logMessage,
+      agent: b.agent,
     }));
   }
 
