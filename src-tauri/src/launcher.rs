@@ -82,7 +82,11 @@ pub fn spawn_child(args: &[String]) {
 
 /// First argv entry that is not a flag and not the exe path.
 pub fn first_path_arg(argv: &[String]) -> Option<String> {
-    argv.iter().skip(1).find(|a| !a.starts_with('-')).cloned()
+    argv.iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .find_map(|a| std::fs::canonicalize(a).ok())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -119,10 +123,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
-    fn first_path_arg_skips_flags_and_exe() {
+    fn first_path_arg_canonicalizes_existing_paths_and_skips_invalid_args() {
+        let expected = std::fs::canonicalize(".")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
-            first_path_arg(&["sutra".into(), "--new".into(), "/p".into()]),
-            Some("/p".into())
+            first_path_arg(&[
+                "sutra".into(),
+                "--new".into(),
+                "/no/such/path/xyz".into(),
+                ".".into(),
+            ]),
+            Some(expected)
         );
         assert_eq!(first_path_arg(&["sutra".into()]), None);
     }

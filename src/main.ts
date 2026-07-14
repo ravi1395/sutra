@@ -932,6 +932,9 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    // Invalidate the previous root's symbols at the switch boundary; the
+    // backend builds off-thread and generation-gates late completions.
+    void langIndexBuild(dir).catch(() => {});
     loadBreakpointStore(dir); // per-root persisted breakpoints; gutter repaints via onActiveTabChanged
     const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
@@ -977,8 +980,6 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (currentRoot !== dir) return;
   gitIndexPath = resolvedGitIndexPath;
   void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
-  // Kick off the workspace symbol index build (gracefully degrades if backend absent).
-  void langIndexBuild(dir).catch(() => {});
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();

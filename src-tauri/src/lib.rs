@@ -19,10 +19,7 @@ struct ClaimedRoot(Mutex<Option<(String, String)>>);
 
 /// First argv entry after the exe that is not a flag and names an existing path.
 fn first_path_arg(argv: &[String]) -> Option<String> {
-    argv.iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
-        .cloned()
+    launcher::first_path_arg(argv)
 }
 
 /// Return and clear the cold-start launch path (CLI arg / OS file-open on launch).
@@ -397,6 +394,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::first_path_arg;
+    use std::path::Path;
 
     #[test]
     fn first_path_arg_skips_exe_flags_and_missing_paths() {
@@ -413,5 +411,14 @@ mod tests {
     #[test]
     fn first_path_arg_none_when_only_exe() {
         assert_eq!(first_path_arg(&["sutra".to_string()]), None);
+    }
+
+    #[test]
+    fn first_path_arg_canonicalizes_dot() {
+        let path = first_path_arg(&["sutra".to_string(), ".".to_string()])
+            .expect("current directory should be a valid launch path");
+
+        assert!(Path::new(&path).is_absolute());
+        assert_eq!(Path::new(&path), std::fs::canonicalize(".").unwrap());
     }
 }
