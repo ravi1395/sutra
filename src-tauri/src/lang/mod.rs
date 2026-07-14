@@ -114,8 +114,20 @@ pub fn lang_did_close(state: State<'_, LangState>, path: String) -> Result<(), S
 
 /// Build the workspace symbol index under `root`.
 #[tauri::command]
-pub fn lang_index_build(state: State<'_, LangState>, root: String) -> Result<IndexStats, String> {
-    state.0.lock().unwrap().index_build(&root)
+pub async fn lang_index_build(
+    state: State<'_, LangState>,
+    root: String,
+) -> Result<IndexStats, String> {
+    let generation = state.0.lock().unwrap().begin_index_build();
+    let index = tauri::async_runtime::spawn_blocking(move || {
+        let mut cache = parser_cache::ParserCache::default();
+        symbol_index::build(&root, &mut cache)
+    })
+    .await
+    .map_err(|e| format!("index task failed: {e}"))??;
+    let stats = index.stats();
+    state.0.lock().unwrap().finish_index_build(generation, index);
+    Ok(stats)
 }
 
 /// Re-index the given paths after filesystem changes.
@@ -195,6 +207,17 @@ def outside():
 "#
         .trim_start()
         .to_string()
+    }
+
+    fn build_fixture_index(symbol: &str) -> symbol_index::SymbolIndex {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("fixture.rs"),
+            format!("fn {symbol}() {{}}\n"),
+        )
+        .unwrap();
+        let mut cache = parser_cache::ParserCache::default();
+        symbol_index::build(root.path().to_str().unwrap(), &mut cache).unwrap()
     }
 
     #[test]
@@ -566,5 +589,49 @@ function renderWidget(props: Props): Props {
 
         assert_eq!(hover.kind, "function");
         assert_eq!(hover.signature, "function Button()");
+    }
+
+    #[test]
+    fn workspace_index_skips_graphify_output() {
+        let root = tempfile::tempdir().unwrap();
+        let generated = root.path().join("graphify-out/cache/ast");
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(root.path().join("visible.rs"), "fn visible() {}\n").unwrap();
+        std::fs::write(generated.join("hidden.rs"), "fn hidden() {}\n").unwrap();
+
+        let mut cache = parser_cache::ParserCache::default();
+        let mut index = symbol_index::build(root.path().to_str().unwrap(), &mut cache).unwrap();
+
+        assert_eq!(index.stats().indexed_files, 1);
+        assert_eq!(index.by_exact_name("visible").len(), 1);
+        assert!(index.by_exact_name("hidden").is_empty());
+
+        symbol_index::index_file(&generated.join("hidden.rs"), &mut cache, &mut index).unwrap();
+        assert!(index.by_exact_name("hidden").is_empty());
+    }
+
+    #[test]
+    fn stale_workspace_index_cannot_replace_latest() {
+        let mut engine = LangEngine::default();
+        let older = engine.begin_index_build();
+        let latest = engine.begin_index_build();
+
+        assert!(!engine.finish_index_build(older, build_fixture_index("older")));
+        assert!(engine.finish_index_build(latest, build_fixture_index("latest")));
+
+        assert!(engine.workspace_symbols("older", 10).is_empty());
+        assert_eq!(engine.workspace_symbols("latest", 10).len(), 1);
+    }
+
+    #[test]
+    fn begin_index_build_clears_prior_workspace_symbols() {
+        let mut engine = LangEngine::default();
+        let initial = engine.begin_index_build();
+        assert!(engine.finish_index_build(initial, build_fixture_index("older")));
+        assert_eq!(engine.workspace_symbols("older", 10).len(), 1);
+
+        engine.begin_index_build();
+
+        assert!(engine.workspace_symbols("older", 10).is_empty());
     }
 }

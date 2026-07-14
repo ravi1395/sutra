@@ -1,7 +1,7 @@
 use super::features::{completion, hover, navigation, symbols};
 use super::parser_cache::ParserCache;
 use super::symbol_index::{self, SymbolIndex};
-use super::{CompletionItem, DocumentSymbol, Hover, IndexStats, Location, Pos, Symbol};
+use super::{CompletionItem, DocumentSymbol, Hover, Location, Pos, Symbol};
 use std::path::Path;
 
 /// Owns the per-document parse cache and the workspace symbol index, and
@@ -11,6 +11,7 @@ use std::path::Path;
 pub struct LangEngine {
     cache: ParserCache,
     index: SymbolIndex,
+    index_generation: u64,
 }
 
 impl LangEngine {
@@ -29,17 +30,20 @@ impl LangEngine {
         self.cache.remove(path);
     }
 
-    /// Build the workspace symbol index from scratch under `root` (off-thread).
-    pub fn index_build(&mut self, root: &str) -> Result<IndexStats, String> {
-        let root = root.to_string();
-        let handle = std::thread::spawn(move || {
-            let mut cache = ParserCache::default();
-            symbol_index::build(&root, &mut cache)
-        });
-        self.index = handle
-            .join()
-            .map_err(|_| "index thread panicked".to_string())??;
-        Ok(self.index.stats())
+    /// Invalidate prior-root symbols before an off-thread workspace build.
+    pub fn begin_index_build(&mut self) -> u64 {
+        self.index_generation = self.index_generation.wrapping_add(1);
+        self.index = SymbolIndex::default();
+        self.index_generation
+    }
+
+    /// Publish only the latest completed workspace build.
+    pub fn finish_index_build(&mut self, generation: u64, index: SymbolIndex) -> bool {
+        if self.index_generation != generation {
+            return false;
+        }
+        self.index = index;
+        true
     }
 
     /// Re-index the given paths after filesystem changes.

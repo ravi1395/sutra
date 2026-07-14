@@ -1,7 +1,8 @@
 // Workspace switcher anchored on the #ws-wordmark button and the openPopover
 // primitive used by the app menu. The wordmark label shows the current folder name.
 import { icon } from "./icons";
-import { cliInstall, cliInstallState } from "./ipc";
+import { ask, message } from "@tauri-apps/plugin-dialog";
+import { clipboardWrite, cliInstall, cliInstallState, type CliInstallOutcome } from "./ipc";
 import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
 
@@ -58,6 +59,73 @@ export interface WorkspaceBarHandle {
     build: (el: HTMLElement, close: () => void) => void,
     className?: string,
   ) => void;
+}
+
+interface CliInstallDialogOptions {
+  title?: string;
+  kind?: "info" | "warning" | "error";
+  okLabel?: string;
+  cancelLabel?: string;
+}
+
+export interface CliInstallUiDeps {
+  install(): Promise<CliInstallOutcome>;
+  confirm(message: string, options: CliInstallDialogOptions): Promise<boolean>;
+  copy(text: string): Promise<void>;
+  notify(message: string, options: CliInstallDialogOptions): Promise<unknown>;
+}
+
+const cliInstallUiDeps: CliInstallUiDeps = {
+  install: cliInstall,
+  confirm: ask,
+  copy: clipboardWrite,
+  notify: message,
+};
+
+export async function runCliInstall(deps: CliInstallUiDeps = cliInstallUiDeps): Promise<void> {
+  let outcome: CliInstallOutcome;
+  try {
+    outcome = await deps.install();
+  } catch (reason) {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    await deps.notify(`Could not install the Sutra CLI: ${detail}`, {
+      title: "Install Sutra CLI",
+      kind: "error",
+    });
+    return;
+  }
+
+  if (outcome.status === "installed") {
+    await deps.notify("Sutra CLI installed. Run `sutra [path]` from a new terminal.", {
+      title: "Install Sutra CLI",
+      kind: "info",
+    });
+    return;
+  }
+
+  const shouldCopy = await deps.confirm(
+    `Administrator permission is required. Copy this command, then paste it into Terminal:\n\n${outcome.command}`,
+    {
+      title: "Install Sutra CLI",
+      kind: "warning",
+      okLabel: "Copy command",
+      cancelLabel: "Close",
+    },
+  );
+  if (!shouldCopy) return;
+
+  try {
+    await deps.copy(outcome.command);
+    await deps.notify("Command copied. Paste it into Terminal to install the Sutra CLI.", {
+      title: "Install Sutra CLI",
+      kind: "info",
+    });
+  } catch {
+    await deps.notify(`Could not copy the command. Copy it manually:\n\n${outcome.command}`, {
+      title: "Install Sutra CLI",
+      kind: "error",
+    });
+  }
 }
 
 // Best-effort ~ collapse for display; the renderer has no HOME env, so match the
@@ -191,10 +259,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
       mkRow(MENU_LABELS.newWindow, "⇧⌘N", () => actions.newWindow());
       if (cliState !== "current") {
         mkRow(cliState === "stale" ? MENU_LABELS.updateCli : MENU_LABELS.installCli, "", () => {
-          void (async () => {
-            const r = await cliInstall().catch((cmd: string) => cmd);
-            if (r !== "installed") await navigator.clipboard?.writeText(r); // copy admin cmd
-          })();
+          void runCliInstall();
         });
       }
     }, "menu-card");

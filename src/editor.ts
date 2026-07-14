@@ -215,8 +215,16 @@ const lensField = StateField.define<DecorationSet>({
 
 // --- Debugger decorations (mirror the diff gutter / lens pattern above) ---
 
+export interface BreakpointMark {
+  line: number;
+  verified: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+}
+
 /** Rebuild the breakpoint gutter from the full set of marks (one effect, no paired dispatch). */
-export const setBreakpointMarks = StateEffect.define<readonly { line: number; verified: boolean }[]>();
+export const setBreakpointMarks = StateEffect.define<readonly BreakpointMark[]>();
 /** Highlight the paused line (1-based), or clear with null. */
 export const setPausedLine = StateEffect.define<number | null>();
 /** Render inline value hints on the given 1-based line, or clear with null. */
@@ -230,14 +238,62 @@ export function setBreakpointToggleHandler(fn: (path: string, line: number, view
   onBreakpointToggle = fn;
 }
 
+// Module-level callback for the gutter right-click — main.ts owns the popover
+// and the persistent store, mirroring onBreakpointToggle above.
+let onBreakpointContextMenu:
+  | ((path: string, line: number, x: number, y: number, containerEl: HTMLElement) => void)
+  | undefined;
+/** Wire the breakpoint right-click handler (main.ts owns the popover + store). */
+export function setBreakpointContextMenuHandler(
+  fn: (path: string, line: number, x: number, y: number, containerEl: HTMLElement) => void,
+) {
+  onBreakpointContextMenu = fn;
+}
+
+/**
+ * Gutter mousedown → breakpoint toggle decision (exported for tests). Only the
+ * primary button toggles; right/middle clicks return unhandled so the
+ * contextmenu handler opens the popover on a still-present breakpoint instead
+ * of one this mousedown just removed. Returns whether the event was handled.
+ */
+export function breakpointGutterMouseDown(
+  button: number,
+  lineNo: number,
+  path: string | null | undefined,
+  toggle: (path: string, line: number) => void,
+): boolean {
+  if (button !== 0) return false;
+  if (path) toggle(path, lineNo);
+  return true;
+}
+
+/**
+ * Which glyph a breakpoint draws: unverified always shows the hollow dot —
+ * the adapter hasn't confirmed the location yet, so field-type is moot.
+ * Once verified: a log message makes it a logpoint (◇, DAP never emits
+ * `stopped` for these — enforced adapter-side, not here) even if a condition
+ * is also set; else a condition/hit-count makes it conditional (◆); else plain (●).
+ */
+export function bpGlyphChar(bp: {
+  verified?: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+}): string {
+  if (!bp.verified) return "◌";
+  if (bp.logMessage) return "◇";
+  if (bp.condition || bp.hitCondition) return "◆";
+  return "●";
+}
+
 class BpMarker extends GutterMarker {
-  constructor(private verified: boolean) {
+  constructor(private bp: BreakpointMark) {
     super();
   }
   toDOM(): Node {
     const el = document.createElement("span");
-    el.textContent = this.verified ? "●" : "◌";
-    el.className = this.verified ? "cm-bp cm-bp-verified" : "cm-bp cm-bp-unverified";
+    el.textContent = bpGlyphChar(this.bp);
+    el.className = this.bp.verified ? "cm-bp cm-bp-verified" : "cm-bp cm-bp-unverified";
     return el;
   }
 }
@@ -253,7 +309,7 @@ const bpField = StateField.define<RangeSet<GutterMarker>>({
         for (const m of [...e.value].sort((a, b) => a.line - b.line)) {
           if (m.line < 1 || m.line > doc.lines) continue;
           const from = doc.line(m.line).from;
-          builder.add(from, from, new BpMarker(m.verified));
+          builder.add(from, from, new BpMarker(m));
         }
         value = builder.finish();
       }
@@ -590,10 +646,19 @@ export class Pane {
         class: "cm-bp-gutter",
         markers: (view) => view.state.field(bpField),
         domEventHandlers: {
-          mousedown: (view, line) => {
+          mousedown: (view, line, event) => {
             const lineNo = view.state.doc.lineAt(line.from).number;
             const path = this.active?.path;
-            if (path) onBreakpointToggle?.(path, lineNo, view);
+            return breakpointGutterMouseDown((event as MouseEvent).button, lineNo, path, (p, l) =>
+              onBreakpointToggle?.(p, l, view),
+            );
+          },
+          contextmenu: (view, line, event) => {
+            const mouse = event as MouseEvent;
+            mouse.preventDefault();
+            const lineNo = view.state.doc.lineAt(line.from).number;
+            const path = this.active?.path;
+            if (path) onBreakpointContextMenu?.(path, lineNo, mouse.clientX, mouse.clientY, this.el);
             return true;
           },
         },

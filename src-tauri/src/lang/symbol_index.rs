@@ -74,7 +74,10 @@ impl SymbolIndex {
 
 pub fn build(root: &str, cache: &mut ParserCache) -> Result<SymbolIndex, String> {
     let mut index = SymbolIndex::default();
-    for entry in WalkBuilder::new(root).build() {
+    for entry in WalkBuilder::new(root)
+        .filter_entry(|entry| entry.file_name() != "graphify-out")
+        .build()
+    {
         let Ok(entry) = entry else { continue };
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
             continue;
@@ -90,6 +93,13 @@ pub fn index_file(
     index: &mut SymbolIndex,
 ) -> Result<(), String> {
     let path_string = path.to_string_lossy().to_string();
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "graphify-out")
+    {
+        index.remove(&path_string);
+        return Ok(());
+    }
     if !path.exists() {
         index.remove(&path_string);
         return Ok(());

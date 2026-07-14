@@ -19,10 +19,7 @@ struct ClaimedRoot(Mutex<Option<(String, String)>>);
 
 /// First argv entry after the exe that is not a flag and names an existing path.
 fn first_path_arg(argv: &[String]) -> Option<String> {
-    argv.iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-') && std::path::Path::new(a).exists())
-        .cloned()
+    launcher::first_path_arg(argv)
 }
 
 /// Return and clear the cold-start launch path (CLI arg / OS file-open on launch).
@@ -32,6 +29,24 @@ fn take_launch_path(state: tauri::State<LaunchPath>) -> Option<serde_json::Value
     let raw = state.0.lock().ok()?.take()?;
     let p = std::path::Path::new(&raw);
     Some(serde_json::json!({ "path": raw, "isDir": p.is_dir() }))
+}
+
+/// Synchronous on macOS: Tauri executes non-async commands on the main thread,
+/// which AppKit requires for safe NSPasteboard ownership changes.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn clipboard_write(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// Other desktop clipboard backends may block while waiting for ownership, so
+/// retain the plugin's worker-thread behavior outside macOS.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn clipboard_write(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
 /// Frontend New Window. `None` → fresh untitled child. A path with a live
@@ -333,6 +348,7 @@ pub fn run() {
             watcher::watch_start,
             watcher::watch_stop,
             take_launch_path,
+            clipboard_write,
             spawn_window,
             #[cfg(target_os = "macos")]
             cli_install::cli_install_state,
@@ -378,6 +394,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::first_path_arg;
+    use std::path::Path;
 
     #[test]
     fn first_path_arg_skips_exe_flags_and_missing_paths() {
@@ -394,5 +411,14 @@ mod tests {
     #[test]
     fn first_path_arg_none_when_only_exe() {
         assert_eq!(first_path_arg(&["sutra".to_string()]), None);
+    }
+
+    #[test]
+    fn first_path_arg_canonicalizes_dot() {
+        let path = first_path_arg(&["sutra".to_string(), ".".to_string()])
+            .expect("current directory should be a valid launch path");
+
+        assert!(Path::new(&path).is_absolute());
+        assert_eq!(Path::new(&path), std::fs::canonicalize(".").unwrap());
     }
 }

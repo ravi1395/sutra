@@ -19,5 +19,5 @@ test("cliInstallState and cliInstall wrap the matching Tauri commands", () => {
   assert.match(ipcTs, /export const cliInstallState = \(\) =>/);
   assert.match(ipcTs, /invoke<"absent" \| "current" \| "stale">\("cli_install_state"\)/);
   assert.match(ipcTs, /export const cliInstall = \(\) =>/);
-  assert.match(ipcTs, /invoke<string>\("cli_install"\)/);
+  assert.match(ipcTs, /invoke<CliInstallOutcome>\("cli_install"\)/);
 });

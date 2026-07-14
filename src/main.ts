@@ -23,9 +23,21 @@ import { resolveUiQuery } from "./annotation-core";
 import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
-import { setBreakpointToggleHandler, setBreakpointMarks } from "./editor";
-import { DebugSession } from "./debug-session";
-import { detectAdapter, isTrusted, markTrusted, resolveLaunchConfig, breakpointStore } from "./debug";
+import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
+import { DebugSession, resolveDebugUiCore } from "./debug-session";
+import { mountDebugStrip, filterDebugPaletteCommands, type DebugStripHandle } from "./debug-strip";
+import { mountDebugChip, debugChipEl } from "./debug-chip";
+import {
+  chooseAdapterForRoot,
+  isTrusted,
+  markTrusted,
+  resolveLaunchConfig,
+  breakpointStore,
+  loadBreakpointStore,
+  saveBreakpointStore,
+  upsertBreakpointFields,
+} from "./debug";
+import { showBreakpointPopover } from "./breakpoint-popover";
 import {
   agentTrackingPoll,
   agentBaseContent,
@@ -191,9 +203,11 @@ editor.onGotoDefinitionMulti = (locs) => {
 
 // --- Debugger session ---
 const debugSlot = mountDebuggerSidebarSlot($("main"));
+let debugStrip: DebugStripHandle | undefined;
 const debugSession = new DebugSession({
   editor,
   slot: debugSlot,
+  onAgentActive: (on) => debugStrip?.setAgentActive(on),
   // Only adapters using runInTerminal (debugpy/node, post-v1) hit this; codelldb
   // launches directly. Returning the terminal id is a best-effort pid stand-in.
   runInTerminal: async (args) => {
@@ -202,8 +216,53 @@ const debugSession = new DebugSession({
     return typeof id === "number" ? id : 0;
   },
 });
+// Floating session-only control strip (mockup variant A) over the editor pane; absent
+// from the DOM until a session starts, torn down on stop/adapter-death.
+debugStrip = mountDebugStrip($("panes"), debugSession);
 // Gutter clicks toggle the persistent breakpoint store + push to the live session.
-setBreakpointToggleHandler((path, line) => debugSession.toggleBreakpoint(path, line));
+setBreakpointToggleHandler((path, line) => {
+  debugSession.toggleBreakpoint(path, line);
+  if (currentRoot) saveBreakpointStore(currentRoot);
+});
+
+// Gutter right-click opens the condition/hit-count/log-message popover; every
+// keystroke commits straight into the persistent store + repaints the gutter.
+setBreakpointContextMenuHandler((path, line, x, y, containerEl) => {
+  const existing = (breakpointStore.get(path) ?? []).find((b) => b.line === line);
+  showBreakpointPopover({
+    x,
+    y,
+    containerEl,
+    path,
+    line,
+    initial: {
+      condition: existing?.condition,
+      hitCondition: existing?.hitCondition,
+      logMessage: existing?.logMessage,
+    },
+    // Live session → real adapter capabilities gate the popover fields; no
+    // session → undefined = all enabled (unknown capabilities never block
+    // authoring; unsupported fields are still withheld at send).
+    capabilities: debugSession.adapterCapabilities,
+    onChange: (fields) => {
+      const bps = upsertBreakpointFields(path, line, fields);
+      if (!bps) return; // empty popover on a line with no breakpoint yet — nothing to create
+      if (currentRoot) saveBreakpointStore(currentRoot);
+      editor.applyDebugEffects(
+        setBreakpointMarks.of(
+          bps.map((b) => ({
+            line: b.line,
+            verified: b.verified ?? false,
+            condition: b.condition,
+            hitCondition: b.hitCondition,
+            logMessage: b.logMessage,
+          })),
+        ),
+        path,
+      );
+    },
+  });
+});
 
 // Resolve the project's debug adapter and launch a session from the palette.
 async function startDebugging(): Promise<void> {
@@ -211,15 +270,21 @@ async function startDebugging(): Promise<void> {
   const root = currentRoot;
   const entries = await listDir(root).catch(() => []);
   const signals = new Set(entries.map((e) => e.name));
-  const codelldbPath = signals.has("Cargo.toml")
-    ? await resolveDebugAdapter(root, "codelldb").catch(() => null)
-    : null;
-  const spec = detectAdapter(signals, codelldbPath);
+  const { spec, notFoundAdapter, notFoundMessage } = await chooseAdapterForRoot(signals, (adapter) =>
+    resolveDebugAdapter(root, adapter).catch(() => null),
+  );
   if (!spec) {
-    const msg = signals.has("Cargo.toml") && !codelldbPath
-      ? "codelldb not found — install the CodeLLDB VS Code extension"
-      : "No debug adapter detected for this project.";
-    await message(msg, { title: "Sutra", kind: "warning" });
+    if (notFoundMessage && notFoundAdapter !== "codelldb") {
+      // debugpy/js-debug: honest resolve failure surfaced in the visible debug
+      // sidebar console — no dialog, no spawn attempt, session never starts.
+      debugSession.showNotice(notFoundMessage);
+    } else {
+      // codelldb not-found (or no signal matched anything): pre-3b UX, byte-identical.
+      await message(notFoundMessage ?? "No debug adapter detected for this project.", {
+        title: "Sutra",
+        kind: "warning",
+      });
+    }
     return;
   }
   if (!isTrusted(spec, root)) {
@@ -410,12 +475,24 @@ window.addEventListener("message", (e) => {
   }
 });
 
+const TRUST_REQUIRED = "This folder is not trusted. Trust it in Sutra before creating or running automations.";
+
 // Subscribe to MCP UI-state requests and reply through the typed IPC command.
-// Automation actions (create/list/run) are async and route to resolveAutomationUi;
-// the read-only queries resolve synchronously via resolveUiQuery.
+// Automation and debug actions are async; read-only editor queries resolve synchronously.
 void onUiRequest((r) => {
-  if (r.query === "createAutomation" || r.query === "listAutomations" || r.query === "runAutomation") {
-    void resolveAutomationUi(r.query, r.params).then(
+  const query = r.query as string;
+  if (query.startsWith("debug")) {
+    void resolveDebugUi(query, r.params).then(
+      (payload) => void mcpUiReply(r.id, payload),
+      (e) => void mcpUiReply(r.id, { error: String(e) }),
+    );
+    return;
+  }
+  if (query === "createAutomation" || query === "listAutomations" || query === "runAutomation") {
+    void resolveAutomationUi(
+      query as "createAutomation" | "listAutomations" | "runAutomation",
+      r.params,
+    ).then(
       (payload) => void mcpUiReply(r.id, payload),
       (e) => void mcpUiReply(r.id, { error: String(e) }),
     );
@@ -428,6 +505,26 @@ void onUiRequest((r) => {
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
+
+/** Resolve a trust-gated MCP debugger request in the one live DebugSession.
+ * Trust-check + query dispatch itself lives in resolveDebugUiCore (main.ts
+ * has top-level DOM/Tauri side effects and isn't importable under
+ * node:test, so that logic is extracted where it's executable-testable
+ * against a session spy) — this wrapper only supplies the live deps and
+ * persists the breakpoint store on a successful write. */
+async function resolveDebugUi(query: string, params: unknown): Promise<unknown> {
+  const root = currentRoot;
+  const result = await resolveDebugUiCore(query, params, {
+    root,
+    isTrusted: () => (root ? isWorkspaceTrusted(root) : Promise.resolve(false)),
+    session: debugSession,
+  });
+  const isBreakpointWrite = query === "debugSetBreakpoint" || query === "debugRemoveBreakpoint";
+  if (root && isBreakpointWrite && (result as { ok?: boolean } | null)?.ok) {
+    saveBreakpointStore(root);
+  }
+  return result;
+}
 
 // Handle MCP automation actions from an AI agent/skill: create/list/run automations
 // against the current workspace, reusing the same validation + persistence + bar
@@ -447,7 +544,7 @@ async function resolveAutomationUi(
   // Create/run persist or execute a shell command; a prompt-injected agent must not
   // reach that in an untrusted folder. Listing (read-only) above stays allowed.
   if (!(await isWorkspaceTrusted(root))) {
-    return { error: "This folder is not trusted. Trust it in Sutra before creating or running automations." };
+    return { error: TRUST_REQUIRED };
   }
 
   if (query === "createAutomation") {
@@ -544,7 +641,15 @@ editor.onActiveTabChanged = (tab) => {
   if (tab?.path) {
     const bps = breakpointStore.get(tab.path) ?? [];
     editor.applyDebugEffects(
-      setBreakpointMarks.of(bps.map((b) => ({ line: b.line, verified: b.verified ?? false }))),
+      setBreakpointMarks.of(
+        bps.map((b) => ({
+          line: b.line,
+          verified: b.verified ?? false,
+          condition: b.condition,
+          hitCondition: b.hitCondition,
+          logMessage: b.logMessage,
+        })),
+      ),
       tab.path,
     );
   }
@@ -827,6 +932,10 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    // Invalidate the previous root's symbols at the switch boundary; the
+    // backend builds off-thread and generation-gates late completions.
+    void langIndexBuild(dir).catch(() => {});
+    loadBreakpointStore(dir); // per-root persisted breakpoints; gutter repaints via onActiveTabChanged
     const turnsHydrated = hydrateTurnsForWorkspace(dir);
     void watchStop().catch(() => {});
     void mcpWriteAgentConfig(dir).then((warnings) => {
@@ -871,8 +980,6 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (currentRoot !== dir) return;
   gitIndexPath = resolvedGitIndexPath;
   void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
-  // Kick off the workspace symbol index build (gracefully degrades if backend absent).
-  void langIndexBuild(dir).catch(() => {});
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
@@ -2051,7 +2158,10 @@ function renderWhisperBar(): void {
   // Called every 1.5 s by the agent poll — skip the DOM teardown/rebuild unless
   // something visible actually changed. diag chip + aggregate strip are singleton
   // nodes mutated in place elsewhere, so their live textContent is the source of truth.
-  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
+  // debug chip is absent (not just empty) with no session, so its active flag is part
+  // of the signature too — an active→inactive flip with identical leftover text must
+  // still trigger the rebuild that drops it from the DOM.
+  const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${debugSession.active}:${debugChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
   if (sig === lastWhisperSig) return;
   lastWhisperSig = sig;
 
@@ -2077,8 +2187,10 @@ function renderWhisperBar(): void {
   const right = document.createElement("div");
   right.className = "whisper-right";
   if (lnText) right.textContent = lnText;
-  // Harness statusbar cluster: diagnostics chip + multi-session aggregate strip.
-  whisperBar.append(left, diagChipEl(), aggregateStripEl(), right);
+  // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
+  // hidden, with no session), multi-session aggregate strip.
+  const dbgChip = debugSession.active ? [debugChipEl()] : [];
+  whisperBar.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -2566,7 +2678,9 @@ function recentPaletteCommands(): Command[] {
 }
 
 palette = mountPalette({
-  commands: () => paletteCommands,
+  // Session-only debug verbs (continue/step*/pause/stop — the strip's mirrored actions,
+  // Q5 single-home rule) list only while a session is live; debug-start always does.
+  commands: () => filterDebugPaletteCommands(paletteCommands, debugSession.active),
   workspaces: () => recentPaletteCommands(),
   files: () => listFiles(currentRoot ?? ""),
   symbols: (query, limit) => langWorkspaceSymbols(query, limit),
@@ -2643,6 +2757,13 @@ editor.onDocChanged = () => {
   const activePath = editor.active?.path;
   if (activePath) notifyDocChanged(activePath);
 };
+
+// Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
+// by the same state notification the strip uses. Wired here (not beside the strip near
+// debugSession's construction) because onStateChange calls back immediately on
+// subscribe, and renderWhisperBar touches whisperBar/editor/agentStatus — all defined
+// by this point in boot, none of them earlier.
+mountDebugChip(debugSession, () => renderWhisperBar());
 
 // ---- boot ----
 editor.renderAllTabs();

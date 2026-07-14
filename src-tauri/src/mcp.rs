@@ -470,6 +470,59 @@ struct RunAutomationArgs {
     id: Option<String>,
 }
 
+/// Args for debug_evaluate.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DebugEvaluateArgs {
+    /// Expression evaluated in the paused debug frame when available.
+    expression: String,
+}
+
+/// Args for debug_set_breakpoint.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct DebugBreakpointArgs {
+    /// Workspace file path, absolute or relative to the active root.
+    path: String,
+    /// One-based source line.
+    line: u32,
+    /// Optional conditional breakpoint expression.
+    condition: Option<String>,
+    /// Optional adapter-specific hit count expression.
+    hit_condition: Option<String>,
+    /// Optional logpoint message with `{expression}` interpolation.
+    log_message: Option<String>,
+}
+
+/// Args for debug_remove_breakpoint.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DebugBreakpointPathArgs {
+    /// Workspace file path, absolute or relative to the active root.
+    path: String,
+    /// One-based source line.
+    line: u32,
+}
+
+/// Args for debug_step.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DebugStepArgs {
+    /// Step kind: "over", "in", or "out".
+    kind: String,
+}
+
+/// Wire payload debug_continue forwards to the frontend over request_ui_action.
+/// Carries no fields — the frontend dispatch must never gate this query on
+/// breakpoint path/line (locks the debug_continue/debug_step reachability fix
+/// in src/debug-session.ts's resolveDebugUiCore).
+fn debug_continue_ui_payload() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// Wire payload debug_step forwards to the frontend over request_ui_action.
+/// Carries only `kind` — never path/line, for the same reason as above.
+fn debug_step_ui_payload(args: &DebugStepArgs) -> serde_json::Value {
+    serde_json::json!({ "kind": args.kind })
+}
+
 /// The MCP tool server. Clonable so the streamable-http factory can mint one per
 /// session; all clones share the same `AppHandle` and active-root `Arc`.
 #[derive(Clone)]
@@ -594,7 +647,10 @@ impl SutraMcp {
                 if let Ok(mut pending) = self.pending.lock() {
                     pending.remove(&id);
                 }
-                Err(McpError::internal_error("ui action request timed out", None))
+                Err(McpError::internal_error(
+                    "ui action request timed out",
+                    None,
+                ))
             }
         }
     }
@@ -699,7 +755,9 @@ impl SutraMcp {
         Ok(Self::ok_preview("diagram", None))
     }
 
-    #[tool(description = "Open an existing workspace .html, .md, or .mmd file in Sutra's preview pane.")]
+    #[tool(
+        description = "Open an existing workspace .html, .md, or .mmd file in Sutra's preview pane."
+    )]
     fn open_preview(
         &self,
         Parameters(args): Parameters<OpenPreviewArgs>,
@@ -950,7 +1008,9 @@ impl SutraMcp {
         Ok(Self::ok_json(value))
     }
 
-    #[tool(description = "List the current workspace's saved automations (id, name, command, kind).")]
+    #[tool(
+        description = "List the current workspace's saved automations (id, name, command, kind)."
+    )]
     async fn list_automations(&self) -> Result<CallToolResult, McpError> {
         self.active_root()?;
         let value = self
@@ -969,6 +1029,103 @@ impl SutraMcp {
         self.active_root()?;
         let params = serde_json::json!({ "name": args.name, "id": args.id });
         let value = self.request_ui_action("runAutomation", params).await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Read the active debugger session, paused frame, call stack, and variables. \
+                       The frontend refuses this request when the workspace is not trusted."
+    )]
+    async fn debug_state(&self) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action("debugState", serde_json::Value::Null)
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Evaluate an expression in the active debugger's paused frame. \
+                       The frontend refuses this request when the workspace is not trusted."
+    )]
+    async fn debug_evaluate(
+        &self,
+        Parameters(args): Parameters<DebugEvaluateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action(
+                "debugEvaluate",
+                serde_json::json!({ "expression": args.expression }),
+            )
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Set an agent-attributed debugger breakpoint and sync it with the live adapter. \
+                       The frontend refuses this request when the workspace is not trusted."
+    )]
+    async fn debug_set_breakpoint(
+        &self,
+        Parameters(args): Parameters<DebugBreakpointArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action(
+                "debugSetBreakpoint",
+                serde_json::json!({
+                    "path": args.path,
+                    "line": args.line,
+                    "condition": args.condition,
+                    "hitCondition": args.hit_condition,
+                    "logMessage": args.log_message,
+                }),
+            )
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Remove an agent-attributed debugger breakpoint and sync it with the live adapter. \
+                       The frontend refuses this request when the workspace is not trusted."
+    )]
+    async fn debug_remove_breakpoint(
+        &self,
+        Parameters(args): Parameters<DebugBreakpointPathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action(
+                "debugRemoveBreakpoint",
+                serde_json::json!({ "path": args.path, "line": args.line }),
+            )
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(description = "Continue the active debugger session. \
+                       The frontend refuses this request when the workspace is not trusted.")]
+    async fn debug_continue(&self) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action("debugContinue", debug_continue_ui_payload())
+            .await?;
+        Ok(Self::ok_json(value))
+    }
+
+    #[tool(
+        description = "Step the active debugger session over, into, or out of the current frame. \
+                       The frontend refuses this request when the workspace is not trusted."
+    )]
+    async fn debug_step(
+        &self,
+        Parameters(args): Parameters<DebugStepArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.active_root()?;
+        let value = self
+            .request_ui_action("debugStep", debug_step_ui_payload(&args))
+            .await?;
         Ok(Self::ok_json(value))
     }
 }
@@ -1330,11 +1487,17 @@ mod tests {
         assert!(host_origin_ok(Some("[::1]:5123"), None));
         assert!(host_origin_ok(None, None));
         // Loopback Host + loopback Origin → allowed.
-        assert!(host_origin_ok(Some("127.0.0.1:1"), Some("http://127.0.0.1:1")));
+        assert!(host_origin_ok(
+            Some("127.0.0.1:1"),
+            Some("http://127.0.0.1:1")
+        ));
         // Foreign Host (DNS-rebinding attempt) → rejected even with a token elsewhere.
         assert!(!host_origin_ok(Some("evil.com:5123"), None));
         // Loopback Host but foreign Origin (cross-origin browser fetch) → rejected.
-        assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("http://evil.com")));
+        assert!(!host_origin_ok(
+            Some("127.0.0.1:1"),
+            Some("http://evil.com")
+        ));
         // A "null" / opaque Origin is not loopback → rejected.
         assert!(!host_origin_ok(Some("127.0.0.1:1"), Some("null")));
         // Prefix-match bypass hosts MUST be rejected (exact-host matching).
@@ -1348,5 +1511,87 @@ mod tests {
         // Case-insensitive + 127.0.0.0/8 loopback are accepted.
         assert!(host_origin_ok(Some("LOCALHOST:5123"), None));
         assert!(host_origin_ok(Some("127.9.9.9:5123"), None));
+    }
+
+    #[test]
+    fn debug_tools_are_exposed_in_the_mcp_router() {
+        let names: std::collections::HashSet<_> = SutraMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        for name in [
+            "debug_state",
+            "debug_evaluate",
+            "debug_set_breakpoint",
+            "debug_remove_breakpoint",
+            "debug_continue",
+            "debug_step",
+        ] {
+            assert!(names.contains(name), "missing MCP tool {name}");
+        }
+    }
+
+    #[test]
+    fn debug_state_schema_is_read_only_and_argumentless() {
+        let tool = SutraMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "debug_state")
+            .expect("debug_state schema");
+        let schema = serde_json::to_value(tool.input_schema).unwrap();
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn debug_evaluate_schema_requires_expression() {
+        let tool = SutraMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "debug_evaluate")
+            .expect("debug_evaluate schema");
+        let schema = serde_json::to_value(tool.input_schema).unwrap();
+        assert_eq!(schema["required"], serde_json::json!(["expression"]));
+    }
+
+    #[test]
+    fn debug_breakpoint_schemas_require_path_and_line() {
+        for name in ["debug_set_breakpoint", "debug_remove_breakpoint"] {
+            let tool = SutraMcp::tool_router()
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .expect("breakpoint schema");
+            let schema = serde_json::to_value(tool.input_schema).unwrap();
+            assert_eq!(schema["required"], serde_json::json!(["path", "line"]));
+        }
+    }
+
+    #[test]
+    fn debug_continue_ui_payload_carries_no_fields() {
+        // debug_continue never carries path/line — a frontend dispatch that
+        // (re-)gates this query on breakpoint fields would statically refuse
+        // every call, exactly the debug_continue/debug_step reachability bug
+        // fixed in src/debug-session.ts's resolveDebugUiCore.
+        assert_eq!(debug_continue_ui_payload(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn debug_step_ui_payload_carries_only_kind_never_path_or_line() {
+        let args = DebugStepArgs {
+            kind: "over".to_string(),
+        };
+        let payload = debug_step_ui_payload(&args);
+        assert_eq!(payload, serde_json::json!({ "kind": "over" }));
+        assert!(payload.get("path").is_none());
+        assert!(payload.get("line").is_none());
+    }
+
+    #[test]
+    fn debug_frontend_has_explicit_no_session_result() {
+        let session = include_str!("../../src/debug-session.ts");
+        assert!(session.contains("No active debug session"));
+        assert!(session.contains("debugState"));
     }
 }

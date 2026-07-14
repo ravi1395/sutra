@@ -12,11 +12,59 @@ function normalizePath(path: string): string {
   return normalized === "" ? "/" : normalized;
 }
 
+/**
+ * Collapse `.`/`..`/empty segments purely — string-only, no fs resolution, so
+ * non-existent paths (an MCP breakpoint in a file not yet created) are still
+ * judged. On an absolute path a `..` at the root clamps at `/` (POSIX realpath
+ * behavior); on a relative path unresolvable leading `..` segments are kept so
+ * a containment prefix check can never accept them.
+ */
+function collapseDotSegments(path: string): string {
+  const absolute = path.startsWith("/");
+  const out: string[] = [];
+  for (const seg of path.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+      else if (!absolute) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return absolute ? `/${out.join("/")}` : out.join("/");
+}
+
 export function pathBelongsToRoot(path: string, root: string): boolean {
-  const normalizedPath = normalizePath(path);
-  const normalizedRoot = normalizePath(root);
+  // Dot segments are collapsed BEFORE the prefix check: `<root>/../outside.py`
+  // starts with `<root>/` as a raw string but lives outside the workspace —
+  // without this, MCP debug_set_breakpoint could persist a breakpoint outside
+  // the root (security: lexical containment must survive `.`/`..`).
+  const normalizedPath = collapseDotSegments(normalizePath(path));
+  const normalizedRoot = collapseDotSegments(normalizePath(root));
   if (normalizedRoot === "/") return normalizedPath.startsWith("/");
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+/**
+ * Resolve an externally supplied (MCP) workspace path: a relative path joins to
+ * the root, `.`/`..` segments collapse purely (no fs calls), and anything that
+ * escapes the root is refused. Returns the normalized absolute path, or null
+ * when the path lands outside the workspace.
+ */
+export function resolveWorkspacePath(raw: string, root: string): string | null {
+  // Malformed input is refused outright rather than partially handled.
+  // Platform posture is macOS+Linux (no Windows path support) — a Windows
+  // drive-letter or UNC form is not a valid workspace-relative or POSIX path
+  // here, so a backslash or a `C:`-style prefix refuses rather than being
+  // silently treated as relative and nested under the root.
+  if (raw.trim().length === 0) return null;
+  if (raw.includes("\\") || /^[A-Za-z]:/.test(raw)) return null;
+  // A NUL is impossible in any POSIX filename; refusing here keeps an
+  // unopenable path out of the store and its persisted form.
+  if (raw.includes("\u0000")) return null;
+  const joined = raw.startsWith("/") ? raw : `${normalizePath(root)}/${raw}`;
+  const resolved = collapseDotSegments(normalizePath(joined));
+  return pathBelongsToRoot(resolved, root) ? resolved : null;
 }
 
 /** Parent directory of a path, tolerant of both separators. */

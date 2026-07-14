@@ -160,6 +160,9 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   containing project (walking up for a `.git`, `package.json`, `Cargo.toml`,
   or `src-tauri/tauri.conf.json` marker) and selects the file as a tab.
 - `sutra .` — open the current directory (shorthand for a folder path).
+- The 2.3.2 installer generates a detached CLI shim (`nohup`, closed stdio).
+  Native `Ctrl-C`/terminal-close behavior still awaits live smoke; see CLI-2 in
+  `VERIFY-LEDGER.md`.
 - `sutra` with no path — always opens a new **untitled** window (no project
   root attached).
 - `sutra --new [path]` — explicit "open a new window" intent. The one-owner-
@@ -169,15 +172,10 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
   `sutra` (a new untitled window).
 - **Installing the `sutra` command (macOS).** The app can check whether the
   shim at `/usr/local/bin/sutra` is installed and current, and (re)install it
-  pointing at the running app bundle. This backend capability
-  (`cli_install_state` / `cli_install` Tauri commands) is in place, but a
-  Settings/menu affordance to trigger it from the UI is **not wired up yet**
-  — until then, install manually from a terminal:
-  ```sh
-  sudo mkdir -p /usr/local/bin
-  printf '#!/bin/sh\nexec "/Applications/Sutra.app/Contents/MacOS/Sutra" "$@"\n' | sudo tee /usr/local/bin/sutra >/dev/null
-  sudo chmod 755 /usr/local/bin/sutra
-  ```
+  pointing at the running app bundle. Open the workspace menu and choose
+  **Install CLI command** (or **Update CLI command**). If `/usr/local/bin`
+  requires administrator permission, Sutra shows the exact Terminal command
+  with **Copy command** and **Close** actions instead of failing silently.
 - **Dock menu** (macOS) — right-click the Dock icon for a menu of open
   windows/recents — is **planned, not yet shipped** (in-progress spike).
 - On Windows: no CLI shim or Dock menu (macOS-only); multi-process root
@@ -201,6 +199,38 @@ Spline Sans Mono code) are vendored locally — no runtime font network request.
 - Command palette actions **Increase Font Size**, **Decrease Font Size**, and
   **Reset Font Size** update editor and terminal font sizes live and persist in
   `localStorage`.
+
+### Debugger
+- **DAP debugging** with per-language adapters: CodeLLDB (Rust/C/C++),
+  debugpy (Python — `pip install debugpy`), js-debug (Node — VS Code js-debug
+  extension or `dapDebugServer` on PATH). The adapter is inferred from the
+  workspace (`Cargo.toml`, `requirements.txt`/`pyproject.toml`, `package.json`,
+  `go.mod`); a missing adapter reports an install hint in the debug console
+  instead of failing silently.
+- **Breakpoints**: click the gutter to toggle; right-click to edit a
+  **condition**, **hit count**, or **log message** (a logpoint — prints without
+  pausing, no source edits). Glyphs: `●` plain, `◆` conditional, `◇` logpoint.
+  Breakpoints persist per project across restarts. Fields an adapter doesn't
+  support are disabled in the editor popover and withheld from the adapter.
+- **While paused**: evaluate expressions in the debug console (REPL input) or
+  hover an identifier for its runtime value; sidebar shows variables, watch,
+  call stack, exception filters, and a cross-file **Breakpoints panel**.
+- **Session UI**: a floating control strip (continue / step over / into / out /
+  stop) appears only while a session is live, plus a statusbar chip showing
+  running / paused state (click jumps to the paused line). The same actions are
+  available as palette `>` commands and F-keys (see table).
+- **Multi-session**: adapters that spawn children via DAP `startDebugging`
+  (Python subprocesses, Node clusters) attach automatically; stopping the
+  parent tears children down.
+- **Agent debugging (MCP)**: `debug_state`, `debug_evaluate`,
+  `debug_set_breakpoint`/`debug_remove_breakpoint`, `debug_continue`,
+  `debug_step` — all gated on workspace trust (an untrusted folder refuses with
+  zero side effects). Agent actions render violet-attributed in the console and
+  agent-set breakpoints carry an `agent` chip, so within a live session the
+  console and gutter show which breakpoints an agent set. That attribution is
+  in-memory only: it is not persisted and does not survive a restart
+  (breakpoint persistence keeps line/condition/hit-count/log-message, not the
+  agent flag).
 
 ### Terminal
 - Real PTYs via `portable-pty` (your `$SHELL`, defaults to zsh).

@@ -2,7 +2,7 @@
 // Rust boundary so the rest of the app stays transport-agnostic.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { wrapForDelivery } from "./delivery";
@@ -32,9 +32,12 @@ export const spawnWindow = (path?: string) => invoke<void>("spawn_window", { pat
 
 // CLI shim install (macOS only backend; absent elsewhere — callers must
 // tolerate rejection). "absent"/"stale" surface a menu row; cliInstall()
-// either installs directly or returns an admin command for the UI to copy.
+// returns a typed outcome so the UI can visibly surface privilege fallback.
+export type CliInstallOutcome =
+  | { status: "installed" }
+  | { status: "requires_admin"; command: string };
 export const cliInstallState = () => invoke<"absent" | "current" | "stale">("cli_install_state");
-export const cliInstall = () => invoke<string>("cli_install");
+export const cliInstall = () => invoke<CliInstallOutcome>("cli_install");
 
 // --- Backend-owned shared app state (recents/trust/settings/ui-state) ---
 // Cross-process source of truth: every window and the native Dock menu reads
@@ -283,9 +286,11 @@ export interface FileListing {
 }
 export const listFiles = (root: string) => invoke<FileListing>("list_files", { root });
 
-// Clipboard wrappers over tauri-plugin-clipboard-manager.
+// Keep reads on the plugin's async path (required on Linux), but dispatch
+// writes through a platform-aware Rust command: synchronous on macOS so
+// AppKit pasteboard ownership stays on the main thread, async elsewhere.
 export const clipboardRead = (): Promise<string> => readText();
-export const clipboardWrite = (text: string): Promise<void> => writeText(text);
+export const clipboardWrite = (text: string): Promise<void> => invoke("clipboard_write", { text });
 
 // --- Self-update (tauri-plugin-updater + plugin-process) ---
 // Centralizes the updater/process plugin surface so updater.ts stays
@@ -314,7 +319,7 @@ export const debugStart = (sessionId: string, transport: Transport, cwd: string 
 export const debugSend = (sessionId: string, message: string) =>
   invoke<void>("debug_send", { sessionId, message });
 export const debugStop = (sessionId: string) => invoke<void>("debug_stop", { sessionId });
-export const resolveDebugAdapter = (root: string, adapter: "codelldb") =>
+export const resolveDebugAdapter = (root: string, adapter: "codelldb" | "debugpy" | "js-debug") =>
   invoke<string | null>("resolve_debug_adapter", { root, adapter });
 
 export interface DapEventPayload {

@@ -118,15 +118,102 @@ export function langCompletionSource(getPath: () => string | null): CompletionSo
 }
 
 // ---------------------------------------------------------------------------
+// Paused-session hover-evaluate bridge (Phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural surface debug-session.ts's DebugSession satisfies. Kept minimal here
+ * (not a direct import of DebugSession) so lang.ts doesn't depend on debug-session.ts
+ * — which itself depends on editor.ts, which depends on lang.ts; importing the
+ * concrete class would create that cycle. DebugSession self-registers via
+ * setHoverEvaluator once constructed (there is exactly one per window).
+ */
+export interface HoverEvaluator {
+  canHoverEvaluate: boolean;
+  evaluate(expr: string, context: "repl" | "hover"): Promise<string>;
+}
+
+let hoverEvaluator: HoverEvaluator | null = null;
+/** Wire (or clear, with null) the live session's hover-evaluate bridge. */
+export function setHoverEvaluator(session: HoverEvaluator | null): void {
+  hoverEvaluator = session;
+}
+
+/** Identifier token containing `offset` on its own line, or null if none. Same token
+ * shape as debug-hints.ts's matchIdentifiers, so hover-evaluate targets what the
+ * inline paused-line hints already recognize. */
+export function wordAt(doc: Text, offset: number): { from: number; to: number; text: string } | null {
+  const line = doc.lineAt(offset);
+  const col = offset - line.from;
+  const re = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line.text))) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (col >= start && col <= end) return { from: line.from + start, to: line.from + end, text: m[0] };
+  }
+  return null;
+}
+
+export interface DebugHoverResult {
+  from: number;
+  to: number;
+  word: string;
+  value: string;
+}
+
+/**
+ * Resolve a paused-session hover-evaluate value at `pos`, or null to fall back to the
+ * normal language hover — no session, adapter lacks `supportsEvaluateForHovers`, no
+ * identifier under the cursor, or the adapter's evaluate rejects (silent fallback per
+ * spec: hover-eval failure never shows an error toast).
+ */
+export async function debugHoverValue(
+  session: HoverEvaluator | null,
+  doc: Text,
+  pos: number,
+): Promise<DebugHoverResult | null> {
+  if (!session?.canHoverEvaluate) return null;
+  const word = wordAt(doc, pos);
+  if (!word) return null;
+  try {
+    const value = await session.evaluate(word.text, "hover");
+    return { from: word.from, to: word.to, word: word.text, value };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Hover tooltip
 // ---------------------------------------------------------------------------
 
-/** Build a CM6 hoverTooltip extension backed by the lang_hover IPC command. */
+/** Build a CM6 hoverTooltip extension backed by the lang_hover IPC command. Paused
+ * sessions with supportsEvaluateForHovers route through debugHoverValue first — no
+ * session or unsupported adapter falls through unchanged to the language hover below. */
 export function langHoverTooltipExt(getPath: () => string | null) {
   // Returns a hoverTooltip extension that renders signature + kind + doc.
   return hoverTooltip(async (view: EditorView, pos: number) => {
     const path = getPath();
     if (!path) return null;
+
+    const debugHover = await debugHoverValue(hoverEvaluator, view.state.doc, pos);
+    if (debugHover) {
+      const { from, to, word, value } = debugHover;
+      return {
+        pos: from,
+        end: to,
+        create() {
+          const dom = document.createElement("div");
+          dom.className = "lang-hover lang-hover-debug";
+          const sig = document.createElement("pre");
+          sig.className = "lang-hover-sig";
+          sig.textContent = `${word} = ${value}`;
+          dom.append(sig);
+          return { dom };
+        },
+      };
+    }
 
     const ipcPos = offsetToPos(view.state.doc, pos);
     let hover;

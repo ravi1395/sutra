@@ -31,15 +31,25 @@ pub fn upsert(list: Vec<Recent>, path: &str, name: &str, now: u64) -> Vec<Recent
 
 fn recents_path() -> PathBuf { state_dir().join("recents.json") }
 
+fn sanitize_recents(list: Vec<Recent>) -> Vec<Recent> {
+    list.into_iter()
+        .filter(|recent| Path::new(&recent.path).is_absolute())
+        .collect()
+}
+
 #[tauri::command]
 pub fn recents_list() -> Vec<Recent> {
-    read_json(&recents_path())
+    sanitize_recents(read_json(&recents_path())
         .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 #[tauri::command]
 pub fn recents_push(path: String, name: String) -> Result<(), String> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|e| format!("cannot resolve recent workspace: {e}"))?
+        .to_string_lossy()
+        .into_owned();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
     let next = upsert(recents_list(), &path, &name, now);
@@ -90,6 +100,19 @@ mod tests {
         assert_eq!(v.len(), 8, "capped at 8");
         assert_eq!(v[0].path, "/p3", "re-touched moves to front");
         assert_eq!(v.iter().filter(|r| r.path == "/p3").count(), 1, "no dup");
+    }
+
+    #[test]
+    fn sanitize_recents_drops_relative_paths() {
+        let recents = vec![
+            Recent { path: ".".into(), name: ".".into(), opened_at: 2 },
+            Recent { path: "/tmp/project".into(), name: "project".into(), opened_at: 1 },
+        ];
+
+        let sanitized = sanitize_recents(recents);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].path, "/tmp/project");
     }
     #[test]
     fn atomic_write_then_read() {
