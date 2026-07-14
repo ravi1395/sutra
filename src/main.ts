@@ -23,7 +23,7 @@ import { resolveUiQuery } from "./annotation-core";
 import { redactAnnotationForExternal } from "./annotation-context";
 import { AnnotationsPanel } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
-import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks } from "./editor";
+import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks, toMark } from "./editor";
 import { DebugSession, resolveDebugUiCore } from "./debug-session";
 import { mountDebugStrip, filterDebugPaletteCommands, type DebugStripHandle } from "./debug-strip";
 import { mountDebugChip, debugChipEl } from "./debug-chip";
@@ -249,16 +249,7 @@ setBreakpointContextMenuHandler((path, line, x, y, containerEl) => {
       if (!bps) return; // empty popover on a line with no breakpoint yet — nothing to create
       if (currentRoot) saveBreakpointStore(currentRoot);
       editor.applyDebugEffects(
-        setBreakpointMarks.of(
-          bps.map((b) => ({
-            line: b.line,
-            verified: b.verified ?? false,
-            condition: b.condition,
-            hitCondition: b.hitCondition,
-            logMessage: b.logMessage,
-            agent: b.agent,
-          })),
-        ),
+        setBreakpointMarks.of(bps.map(toMark)),
         path,
       );
     },
@@ -642,16 +633,7 @@ editor.onActiveTabChanged = (tab) => {
   if (tab?.path) {
     const bps = breakpointStore.get(tab.path) ?? [];
     editor.applyDebugEffects(
-      setBreakpointMarks.of(
-        bps.map((b) => ({
-          line: b.line,
-          verified: b.verified ?? false,
-          condition: b.condition,
-          hitCondition: b.hitCondition,
-          logMessage: b.logMessage,
-          agent: b.agent,
-        })),
-      ),
+      setBreakpointMarks.of(bps.map(toMark)),
       tab.path,
     );
   }

@@ -224,6 +224,28 @@ export interface BreakpointMark {
   agent?: boolean; // agent-attributed (MCP) — violet glyph, mirrors the panel chip
 }
 
+/** Single source of truth for Breakpoint → BreakpointMark. Every gutter repaint
+ * goes through here so adding a Breakpoint field never silently drops at one of
+ * the several call sites (each previously rebuilt its own literal). Structural
+ * param (not an imported Breakpoint) keeps editor.ts free of a debug.ts import. */
+export function toMark(b: {
+  line: number;
+  verified?: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+  agent?: boolean;
+}): BreakpointMark {
+  return {
+    line: b.line,
+    verified: b.verified ?? false,
+    condition: b.condition,
+    hitCondition: b.hitCondition,
+    logMessage: b.logMessage,
+    agent: b.agent,
+  };
+}
+
 /** Rebuild the breakpoint gutter from the full set of marks (one effect, no paired dispatch). */
 export const setBreakpointMarks = StateEffect.define<readonly BreakpointMark[]>();
 /** Highlight the paused line (1-based), or clear with null. */

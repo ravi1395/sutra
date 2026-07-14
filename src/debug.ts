@@ -20,6 +20,10 @@ export interface Breakpoint {
   // Additive-only; the P1 store contract (line/verified/condition/hitCondition/
   // logMessage, serialized shape) is otherwise unchanged.
   agent?: boolean;
+  // Adapter-assigned breakpoint id from the setBreakpoints response. Transient
+  // (never persisted — see toStored); used to correlate a later DAP `breakpoint`
+  // event (verified flips true once the module binds) back to this store entry.
+  id?: number;
 }
 export type BreakpointStore = Map<string, Breakpoint[]>; // file path → BPs
 

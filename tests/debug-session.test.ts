@@ -297,6 +297,43 @@ test("applyVerified preserves condition/hitCondition/logMessage in the repainted
   }
 });
 
+test("breakpoint event flips a stale-hollow gutter dot once debugpy binds (verified true, matched by id)", () => {
+  const restore = setupDom();
+  breakpointStore.clear();
+  try {
+    const painted: { value: unknown }[] = [];
+    class RecordingEditor implements EditorBridge {
+      applyDebugEffects(effect: { value: unknown }): void {
+        painted.push(effect);
+      }
+      async revealAt(): Promise<void> {}
+      focusedLineText(): string | null {
+        return null;
+      }
+    }
+    const session = new DebugSession({ editor: new RecordingEditor(), slot: new FakeSlot() });
+    // Simulate the post-setBreakpoints state: id recorded, still unverified (◌).
+    breakpointStore.set("/repo/a.py", [{ line: 5, id: 7, verified: false }]);
+    const fire = (body: unknown) =>
+      (session as unknown as { onBreakpointEvent(b: unknown): void }).onBreakpointEvent(body);
+
+    // Unknown id and `removed` must be no-ops (no repaint, no verify flip).
+    fire({ reason: "changed", breakpoint: { id: 99, verified: true } });
+    fire({ reason: "removed", breakpoint: { id: 7, verified: true } });
+    assert.equal(painted.length, 0, "unknown id / removed must not repaint");
+    assert.equal(breakpointStore.get("/repo/a.py")![0].verified, false);
+
+    // The matching bind event flips verified and repaints the gutter.
+    fire({ reason: "changed", breakpoint: { id: 7, verified: true, line: 5 } });
+    const marks = painted.at(-1)!.value as { line: number; verified: boolean }[];
+    assert.equal(marks[0].verified, true, "gutter mark now verified (◌ → ●)");
+    assert.equal(breakpointStore.get("/repo/a.py")![0].verified, true, "store verified flipped");
+  } finally {
+    breakpointStore.clear();
+    restore();
+  }
+});
+
 // R2-1: syncBreakpointsModel() must be the single choke point for the
 // Breakpoints panel — invoked after every store mutation, not only the ones
 // that happen to route through a DebugSession method (toggle/setBreakpoint/
