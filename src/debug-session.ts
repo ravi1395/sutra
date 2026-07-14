@@ -16,7 +16,7 @@ import {
   type TauriTransport,
 } from "./debug";
 import { DebuggerSidebar, emptyModel, type ConsoleKind, type SidebarModel } from "./debugger-sidebar";
-import { setBreakpointMarks, setPausedLine, setInlineHints } from "./editor";
+import { setBreakpointMarks, setPausedLine, setInlineHints, toMark } from "./editor";
 import { matchIdentifiers } from "./debug-hints";
 import { setHoverEvaluator, type HoverEvaluator } from "./lang";
 import type { DebuggerSidebarSlot } from "./layout";
@@ -412,13 +412,7 @@ export class DebugSession implements HoverEvaluator {
   /** Full-fidelity gutter marks from store entries — every repaint must carry
    * condition/hitCondition/logMessage or the ◆/◇ glyphs degrade to ●. */
   private static marksFrom(bps: Breakpoint[]) {
-    return bps.map((b) => ({
-      line: b.line,
-      verified: b.verified ?? false,
-      condition: b.condition,
-      hitCondition: b.hitCondition,
-      logMessage: b.logMessage,
-    }));
+    return bps.map(toMark);
   }
 
   /** Rebuild the Breakpoints panel model from the cross-file breakpointStore
@@ -463,18 +457,45 @@ export class DebugSession implements HoverEvaluator {
    * maps from the merged store entries so condition/hitCondition/logMessage are
    * preserved — `verified` merges INTO the record, it never replaces it.
    */
-  private applyVerified(path: string, dapBps: { verified?: boolean; line?: number }[]): void {
+  private applyVerified(path: string, dapBps: { verified?: boolean; line?: number; id?: number }[]): void {
     const bps = breakpointStore.get(path);
     if (!bps) return;
     dapBps.forEach((d, i) => {
       if (!bps[i]) return;
       bps[i].verified = !!d.verified;
       if (typeof d.line === "number") bps[i].line = d.line;
+      if (typeof d.id === "number") bps[i].id = d.id; // correlate later `breakpoint` events
     });
     this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
     // The adapter may have relocated the line (e.g. snapped off a comment) —
     // the Breakpoints panel must reflect that, not just the gutter.
     this.syncBreakpointsModel();
+  }
+
+  /**
+   * A DAP `breakpoint` event fires when the adapter binds/moves a breakpoint
+   * AFTER the setBreakpoints response — debugpy flips `verified` true once the
+   * module loads, so without this the gutter dot stays stale-hollow (◌) even
+   * though the breakpoint is live. Correlate by the adapter id recorded in
+   * applyVerified; update verified/line and repaint just that file. `removed`
+   * carries no meaningful verified state — skip it (store removal stays user/MCP
+   * driven). Unknown ids (adapter-created breakpoints we never set) are ignored.
+   */
+  private onBreakpointEvent(body: {
+    reason?: string;
+    breakpoint?: { id?: number; verified?: boolean; line?: number };
+  }): void {
+    const bp = body?.breakpoint;
+    if (!bp || typeof bp.id !== "number" || body.reason === "removed") return;
+    for (const [path, bps] of breakpointStore) {
+      const match = bps.find((b) => b.id === bp.id);
+      if (!match) continue;
+      if (typeof bp.verified === "boolean") match.verified = bp.verified;
+      if (typeof bp.line === "number") match.line = bp.line;
+      this.deps.editor.applyDebugEffects(setBreakpointMarks.of(DebugSession.marksFrom(bps)), path);
+      this.syncBreakpointsModel();
+      return;
+    }
   }
 
   private exceptionFilters(client: SessionClient) {
@@ -659,6 +680,7 @@ export class DebugSession implements HoverEvaluator {
       if (this.pausedClient === client) this.clearPaused();
     });
     client.on("output", (body) => this.appendConsole(body?.output ?? ""));
+    client.on("breakpoint", (body) => this.onBreakpointEvent(body));
     for (const ev of ["terminated", "exited", "__transportClosed"]) {
       client.on(ev, () => {
         if (node.parent) void this.handleChildDeath(node);

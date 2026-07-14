@@ -49,5 +49,10 @@ sutra.key.pub
 .sutra/turns/
 .sutra/turn-signal.jsonl
 .claude/
-.gitignore
+./.gitignore
 CODEMAP.md
+src-tauri/graphify-out*
+HANDOFF.md
+src-tauri/HANDOFF.md
+src-tauri/gen/
+src-tauri/target/

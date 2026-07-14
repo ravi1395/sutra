@@ -2786,6 +2786,8 @@ button:hover {
 .cm-bp-gutter { width: 14px; cursor: pointer; }
 .cm-bp-verified { color: #e51400; }
 .cm-bp-unverified { color: rgba(229, 20, 0, 0.4); }
+/* Agent-attributed (MCP) breakpoint: violet overrides the red, paired with the ✦ glyph. */
+.cm-bp-agent { color: #a78bfa; }
 .cm-paused-line { background: rgba(255, 221, 0, 0.18); }
 .cm-inline-hint { color: #4ec9b0; font-style: italic; opacity: 0.8; }
 
@@ -2798,6 +2800,13 @@ button:hover {
 .dbg-panel h3 { font-size: 11px; text-transform: uppercase; opacity: 0.7; margin: 0 0 4px; }
 .dbg-list { list-style: none; margin: 0; padding: 0; }
 .dbg-list li { padding: 2px 0; }
+/* Breakpoint-row chips: were declared in the panel but never styled — bare text until now. */
+.dbg-chip { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; text-transform: uppercase; letter-spacing: 0.3px; vertical-align: middle; background: var(--bg-1, #2a2a2a); color: var(--fg-dim, #aaa); }
+.dbg-chip-cond { color: var(--modified, #4493f8); }
+.dbg-chip-hit { color: #4ec9b0; }
+.dbg-chip-log { color: #d7ba7d; }
+/* Violet + filled = agent-attributed, matches .dbg-console-agent / .agent-badge. */
+.dbg-chip-agent { color: #a78bfa; background: rgba(167, 139, 250, 0.16); }
 .dbg-list li.expandable, .dbg-frame { cursor: pointer; }
 .dbg-watch-rm { float: right; background: none; border: none; cursor: pointer; opacity: 0.6; }
 .dbg-watch-add { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; }

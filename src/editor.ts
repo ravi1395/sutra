@@ -221,6 +221,29 @@ export interface BreakpointMark {
   condition?: string;
   hitCondition?: string;
   logMessage?: string;
+  agent?: boolean; // agent-attributed (MCP) — violet glyph, mirrors the panel chip
+}
+
+/** Single source of truth for Breakpoint → BreakpointMark. Every gutter repaint
+ * goes through here so adding a Breakpoint field never silently drops at one of
+ * the several call sites (each previously rebuilt its own literal). Structural
+ * param (not an imported Breakpoint) keeps editor.ts free of a debug.ts import. */
+export function toMark(b: {
+  line: number;
+  verified?: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+  agent?: boolean;
+}): BreakpointMark {
+  return {
+    line: b.line,
+    verified: b.verified ?? false,
+    condition: b.condition,
+    hitCondition: b.hitCondition,
+    logMessage: b.logMessage,
+    agent: b.agent,
+  };
 }
 
 /** Rebuild the breakpoint gutter from the full set of marks (one effect, no paired dispatch). */
@@ -279,8 +302,10 @@ export function bpGlyphChar(bp: {
   condition?: string;
   hitCondition?: string;
   logMessage?: string;
+  agent?: boolean;
 }): string {
   if (!bp.verified) return "◌";
+  if (bp.agent) return "✦"; // agent-attributed wins the single gutter glyph; panel chips still carry cond/log
   if (bp.logMessage) return "◇";
   if (bp.condition || bp.hitCondition) return "◆";
   return "●";
@@ -294,6 +319,7 @@ class BpMarker extends GutterMarker {
     const el = document.createElement("span");
     el.textContent = bpGlyphChar(this.bp);
     el.className = this.bp.verified ? "cm-bp cm-bp-verified" : "cm-bp cm-bp-unverified";
+    if (this.bp.agent) el.classList.add("cm-bp-agent"); // violet override; colorblind-safe pairing with the ✦ glyph
     return el;
   }
 }
