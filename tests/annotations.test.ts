@@ -576,6 +576,48 @@ test("markPulled marks rows ✓, header shows pulled status, and an edit clears 
   }
 });
 
+test("mid-edit re-render (agent pull) preserves the uncommitted draft text", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    const [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "half-typed thought";
+    editor.fire("input");
+
+    // Agent pulls while the user is typing → render() rebuilds the textarea.
+    ctx.panel.markPulled([1]);
+
+    const [rebuilt] = findByClassName(ctx.list, "ann-fb-edit");
+    assert.equal(rebuilt.value, "half-typed thought"); // draft survived the rebuild
+    rebuilt.fire("keydown", { key: "Enter", shiftKey: false });
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "half-typed thought");
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("route change cancels an in-progress edit instead of leaving a phantom editor", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 1);
+
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "routeChanged", route: "http://app.test/other" },
+    });
+    // Back to the annotated route: the edit was dropped, not resurrected.
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "routeChanged", route: "http://app.test/settings" },
+    });
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-fb").length, 1);
+  } finally {
+    ctx.restore();
+  }
+});
+
 test("untrusted workspace renders the not-shared banner instead of pull status", () => {
   const ctx = setupWithPick();
   try {

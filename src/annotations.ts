@@ -29,6 +29,10 @@ export class AnnotationsPanel {
   private disposeTheme: (() => void) | null = null;
   /** Annotation number currently being edited inline in the rail, if any. */
   private editingN: number | null = null;
+  /** Uncommitted textarea text for the in-progress edit. render() rebuilds the
+   * textarea (agent pulls, the 30s status tick, and picks all re-render), so the
+   * draft must survive outside the DOM node or mid-edit typing would be lost. */
+  private editingDraft: string | null = null;
   /** Session-only pull tracking: n → timestamp of the last MCP fetch that included it.
    * Lives outside the Annotation model on purpose — the store persists whole
    * annotations, and "read by agent" must never survive a restart (the next
@@ -101,6 +105,7 @@ export class AnnotationsPanel {
     this.state = [];
     this.route = "";
     this.editingN = null;
+    this.editingDraft = null;
     this.sentAt.clear();
     this.lastPulledAt = null;
     this.render();
@@ -217,12 +222,12 @@ export class AnnotationsPanel {
   private handleMessage(m: any) {
     switch (m.type) {
       case "ready":
-        this.route = m.route;
-        this.postToAgent({ type: "reanchor", selectors: this.currentRouteAnnotations().map((a) => a.selector) });
-        this.render();
-        break;
       case "routeChanged":
         this.route = m.route;
+        // A route switch orphans any in-progress edit (its annotation is no
+        // longer rendered); drop it so Escape isn't absorbed by a phantom edit.
+        this.editingN = null;
+        this.editingDraft = null;
         this.postToAgent({ type: "reanchor", selectors: this.currentRouteAnnotations().map((a) => a.selector) });
         this.render();
         break;
@@ -248,6 +253,7 @@ export class AnnotationsPanel {
    * popup uses (setFeedback → save → render). No-op dispatch when unchanged. */
   private commitEdit(n: number, text: string) {
     this.editingN = null;
+    this.editingDraft = null;
     const current = this.state.find((a) => a.n === n);
     if (current && current.feedback !== text) this.dispatch({ type: "setFeedback", n, text });
     else this.render();
@@ -255,6 +261,7 @@ export class AnnotationsPanel {
 
   private cancelEdit() {
     this.editingN = null;
+    this.editingDraft = null;
     this.render();
   }
 
@@ -361,9 +368,10 @@ export class AnnotationsPanel {
       if (this.editingN === a.n) {
         const ta = document.createElement("textarea");
         ta.className = "ann-fb-edit";
-        ta.value = a.feedback;
+        ta.value = this.editingDraft ?? a.feedback;
         ta.setAttribute("aria-label", `Edit note for annotation ${a.n}`);
         ta.addEventListener("click", (e) => e.stopPropagation());
+        ta.addEventListener("input", () => { this.editingDraft = ta.value; });
         ta.addEventListener("keydown", (e) => {
           if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.commitEdit(a.n, ta.value); }
           else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.cancelEdit(); }
@@ -380,6 +388,7 @@ export class AnnotationsPanel {
         span.addEventListener("click", (e) => {
           e.stopPropagation(); // row click scrolls to the pin — editing must not
           this.editingN = a.n;
+          this.editingDraft = null;
           this.render();
         });
         fb = span;
