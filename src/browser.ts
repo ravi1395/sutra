@@ -14,6 +14,7 @@ export class BrowserPane {
   private history: string[] = [];
   private historyIdx = -1;
   private pendingSrc = "";
+  private defaultPlaceholder = "";
   onProxied?: (origin: string) => void;
 
   constructor(area: HTMLElement, frame: HTMLIFrameElement, urlInput: HTMLInputElement, btnBack: HTMLButtonElement, btnReload: HTMLButtonElement, btnMaximize: HTMLButtonElement) {
@@ -23,6 +24,7 @@ export class BrowserPane {
     this.btnBack = btnBack;
     this.btnReload = btnReload;
     this.btnMaximize = btnMaximize;
+    this.defaultPlaceholder = urlInput.placeholder;
 
     // URL input submit → open(url).
     this.urlInput.onkeydown = (e) => {
@@ -30,6 +32,7 @@ export class BrowserPane {
         e.preventDefault();
         void this.open(this.urlInput.value).catch((err) => {
           console.error("browser open failed:", err);
+          this.showError(String(err));
         });
       }
     };
@@ -76,6 +79,28 @@ export class BrowserPane {
       this.history.push(url);
       this.historyIdx = this.history.length - 1;
     }
+  }
+
+  // Surface a load failure in the URL bar without losing the typed URL; the
+  // original value/placeholder come back on the next focus. Repeated errors
+  // before that focus reuse the first captured value (no listener stacking).
+  private errorRestore: (() => void) | null = null;
+  showError(message: string): void {
+    if (!this.errorRestore) {
+      const prev = this.urlInput.value;
+      const restore = () => {
+        this.urlInput.placeholder = this.defaultPlaceholder;
+        this.urlInput.classList.remove("browser-url-error");
+        this.urlInput.value = prev;
+        this.urlInput.removeEventListener("focus", restore);
+        this.errorRestore = null;
+      };
+      this.errorRestore = restore;
+      this.urlInput.addEventListener("focus", restore);
+    }
+    this.urlInput.value = "";
+    this.urlInput.placeholder = `⚠ ${message}`;
+    this.urlInput.classList.add("browser-url-error");
   }
 
   // Reload the current iframe, or re-set src if cross-origin throws.

@@ -155,6 +155,58 @@ pub fn resolve_in_root(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
+/// Where a navigate_browser argument routes: workspace file → preview server,
+/// anything else → the browser pane's loopback dev proxy.
+pub enum NavTarget {
+    PreviewFile(PathBuf),
+    ProxyUrl(String),
+}
+
+/// Classify a navigate_browser argument. `file://` URLs must resolve inside the
+/// root (the dev proxy can never load them, so outside-root is a hard error);
+/// bare paths that resolve to an existing workspace file are served as files;
+/// everything else falls through to the proxy URL path.
+pub fn classify_nav_target(root: &Path, raw: &str) -> Result<NavTarget, String> {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("file://") {
+        // Accept both authority forms: file:///path and file://localhost/path.
+        let path = match rest.strip_prefix("localhost/") {
+            Some(p) => format!("/{p}"),
+            None => rest.to_string(),
+        };
+        let file = resolve_in_root(root, &percent_decode_path(&path))?;
+        return Ok(NavTarget::PreviewFile(file));
+    }
+    if trimmed.contains("://") {
+        return Ok(NavTarget::ProxyUrl(trimmed.to_string()));
+    }
+    if let Ok(file) = resolve_in_root(root, trimmed) {
+        if file.is_file() {
+            return Ok(NavTarget::PreviewFile(file));
+        }
+    }
+    Ok(NavTarget::ProxyUrl(trimmed.to_string()))
+}
+
+/// Decode %XX escapes in a file-URL path (spaces etc.); invalid escapes pass through.
+fn percent_decode_path(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Directory for ephemeral agent-rendered HTML, under the workspace root so the
 /// preview server can serve it.
 pub fn preview_dir(root: &Path) -> PathBuf {
@@ -860,20 +912,53 @@ impl SutraMcp {
     }
 
     #[tool(
-        description = "Open a URL in Sutra's browser pane (routed through the dev proxy for localhost \
-                       apps). Use to preview a running dev server or any http(s) page in-app."
+        description = "Open a URL or workspace .html file in Sutra's browser pane. http(s) URLs \
+                       route through the dev proxy (loopback/localhost targets only — external \
+                       hosts are refused); a file:// URL or workspace-relative .html path is \
+                       served by the local preview server with the annotation agent injected."
     )]
     fn navigate_browser(
         &self,
         Parameters(args): Parameters<NavigateBrowserArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.active_root()?;
-        self.emit_drive(DriveCmd {
-            action: "navigateBrowser",
-            url: Some(args.url),
-            ..Default::default()
-        });
-        Ok(Self::ok_drive())
+        let root = self.active_root()?;
+        let target = classify_nav_target(&root, &args.url)
+            .map_err(|e| McpError::invalid_request(e, None))?;
+        match target {
+            NavTarget::PreviewFile(file) => {
+                let ext = file
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext != "html" && ext != "htm" {
+                    return Err(McpError::invalid_request(
+                        "only .html/.htm files load in the browser pane; use open_preview for .md/.mmd or open_file for source",
+                        None,
+                    ));
+                }
+                let url = self
+                    .app
+                    .state::<PreviewServerState>()
+                    .url_for(&root, &file, self.app.state::<LocalAuthToken>().value())
+                    .map_err(|e| McpError::internal_error(e, None))?;
+                self.emit_preview(PreviewOpen {
+                    kind: "html",
+                    url: Some(url.clone()),
+                    source: None,
+                    path: None,
+                });
+                Ok(Self::ok_preview("html", Some(url)))
+            }
+            NavTarget::ProxyUrl(url) => {
+                self.emit_drive(DriveCmd {
+                    action: "navigateBrowser",
+                    url: Some(url),
+                    ..Default::default()
+                });
+                Ok(Self::ok_drive())
+            }
+        }
     }
 
     #[tool(description = "Get the workspace git status: branch, ahead/behind, and changed files.")]
@@ -1404,6 +1489,75 @@ mod tests {
         std::fs::write(outside.path().join("secret"), "x").unwrap();
         let p = outside.path().join("secret");
         assert!(resolve_in_root(dir.path(), p.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn nav_target_http_url_goes_to_proxy() {
+        let dir = tempdir().unwrap();
+        let got = classify_nav_target(dir.path(), "http://localhost:3000/app").unwrap();
+        assert!(matches!(got, NavTarget::ProxyUrl(u) if u == "http://localhost:3000/app"));
+    }
+
+    #[test]
+    fn nav_target_bare_host_goes_to_proxy() {
+        let dir = tempdir().unwrap();
+        let got = classify_nav_target(dir.path(), "localhost:3000").unwrap();
+        assert!(matches!(got, NavTarget::ProxyUrl(u) if u == "localhost:3000"));
+    }
+
+    #[test]
+    fn nav_target_file_url_inside_root_previews() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("page.html");
+        std::fs::write(&file, "<p>x</p>").unwrap();
+        let arg = format!("file://{}", file.display());
+        let got = classify_nav_target(dir.path(), &arg).unwrap();
+        assert!(matches!(got, NavTarget::PreviewFile(p) if p.ends_with("page.html")));
+    }
+
+    #[test]
+    fn nav_target_file_url_outside_root_rejected() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("page.html");
+        std::fs::write(&file, "<p>x</p>").unwrap();
+        let arg = format!("file://{}", file.display());
+        assert!(classify_nav_target(dir.path(), &arg).is_err());
+    }
+
+    #[test]
+    fn nav_target_bare_workspace_path_previews() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.html"), "<p>x</p>").unwrap();
+        let got = classify_nav_target(dir.path(), "a.html").unwrap();
+        assert!(matches!(got, NavTarget::PreviewFile(p) if p.ends_with("a.html")));
+    }
+
+    #[test]
+    fn nav_target_file_url_localhost_authority_previews() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("page.html");
+        std::fs::write(&file, "<p>x</p>").unwrap();
+        let arg = format!("file://localhost{}", file.display());
+        let got = classify_nav_target(dir.path(), &arg).unwrap();
+        assert!(matches!(got, NavTarget::PreviewFile(p) if p.ends_with("page.html")));
+    }
+
+    #[test]
+    fn nav_target_file_url_percent_encoded_previews() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("my page.html");
+        std::fs::write(&file, "<p>x</p>").unwrap();
+        let arg = format!("file://{}", file.display()).replace(' ', "%20");
+        let got = classify_nav_target(dir.path(), &arg).unwrap();
+        assert!(matches!(got, NavTarget::PreviewFile(p) if p.ends_with("my page.html")));
+    }
+
+    #[test]
+    fn nav_target_missing_bare_path_falls_back_to_proxy() {
+        let dir = tempdir().unwrap();
+        let got = classify_nav_target(dir.path(), "nonexistent.html").unwrap();
+        assert!(matches!(got, NavTarget::ProxyUrl(_)));
     }
 
     #[test]

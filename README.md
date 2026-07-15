@@ -526,7 +526,7 @@ read tools (keyed by request id), so concurrent prompts resolve independently.
 | `reveal_in_tree` | `path` | Expands the file tree to the path and highlights it. |
 | `show_diff` | `path` | Opens the file and jumps to its first changed git hunk. |
 | `open_terminal` | `cwd?` | Opens a new integrated terminal, optionally at a directory. |
-| `navigate_browser` | `url` | Opens a URL in the browser pane (routed through the dev proxy for localhost apps). Scheme optional, defaults to `http://`. |
+| `navigate_browser` | `url` | Opens a URL or workspace `.html` file in the browser pane. http(s) URLs route through the dev proxy (loopback targets only); a `file://` URL or workspace-relative `.html` path is served by the local preview server with the annotation agent injected. Scheme optional, defaults to `http://`. |
 
 ### Read tools (P3)
 

@@ -427,7 +427,10 @@ void onDrive((d) => {
       if (d.url) {
         setBrowser(true);
         browser.show();
-        void browser.open(d.url).catch((e) => console.error("agent navigate failed", e));
+        void browser.open(d.url).catch((e) => {
+          console.error("agent navigate failed", e);
+          browser.showError(String(e));
+        });
       }
       break;
   }

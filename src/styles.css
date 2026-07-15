@@ -2484,6 +2484,12 @@ button:hover {
 .browser-url-input::placeholder {
   color: var(--fg-faint);
 }
+.browser-url-input.browser-url-error {
+  border-color: var(--deleted);
+}
+.browser-url-input.browser-url-error::placeholder {
+  color: var(--deleted);
+}
 .browser-frame {
   flex: 1;
   border: 0;
