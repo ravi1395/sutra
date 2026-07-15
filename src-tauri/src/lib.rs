@@ -326,6 +326,7 @@ pub fn run() {
             turns::turn_rollback,
             turns::turn_test_record,
             turns::turn_disk_hashes,
+            turns::turn_file_content,
             turns::hook_install,
             turns::hook_status,
             turns::list_worktree_roots,

@@ -447,6 +447,7 @@ export interface TurnFileEntry { path: string; beforeHash?: string | null; after
 export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
 export interface TurnPollResult { openTurn?: Turn | null; closed: Turn[] }
 export interface RollbackResult { restored: string[]; failed: { path: string; error: string }[] }
+export interface TurnFileContent { before: string | null; after: string | null; snapshotted: boolean }
 export interface WorktreeRoot { path: string; branch: string }
 export interface HookStatus { claude: boolean; codex: boolean }
 
@@ -484,6 +485,10 @@ export async function turnTestRecord(root: string, turnId: number, status: TestS
 /** Current on-disk xxh3 hashes for `paths` under `root`; null = absent/unreadable. */
 export async function turnDiskHashes(root: string, paths: string[]): Promise<[string, string | null][]> {
   return invoke<[string, string | null][]>("turn_disk_hashes", { root, paths });
+}
+/** Read-only before/after snapshot content for one file in one turn (turn-diff view). */
+export async function turnFileContent(root: string, turnId: number, path: string): Promise<TurnFileContent> {
+  return invoke<TurnFileContent>("turn_file_content", { root, turnId, path });
 }
 export async function hookInstall(root: string, agent: "claude" | "codex"): Promise<boolean> {
   return invoke<boolean>("hook_install", { root, agent });
