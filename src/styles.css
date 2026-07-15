@@ -1,5 +1,5 @@
-/* Ink + washi token system. Legacy --bg/--accent aliases keep every unconverted
-   rule rendering while the new token layer drives the thread redesign. */
+/* Ink + washi token system. Every rule consumes semantic tokens defined once
+   here (:root = ink) and overridden in .theme-washi; no legacy aliases. */
 @font-face { font-family: "Instrument Sans"; src: url("/src/assets/fonts/InstrumentSans-Variable.woff2") format("woff2"); font-weight: 400 600; font-display: swap; }
 @font-face { font-family: "Fraunces"; src: url("/src/assets/fonts/Fraunces-Italic-Variable.woff2") format("woff2"); font-weight: 400 500; font-style: italic; font-display: swap; }
 @font-face {
@@ -22,10 +22,21 @@
   --ui: "Instrument Sans", system-ui, sans-serif;
   --voice: "Fraunces", Georgia, serif;
   --mono: "Spline Sans Mono", ui-monospace, Menlo, monospace;
-  /* legacy aliases — keep every unconverted rule working */
-  --bg: var(--bg-1); --bg-alt: var(--bg-2); --bg-bar: var(--bg-2);
-  --border: var(--line); --accent: var(--em); --accent-hi: var(--em-dim);
-  --line-soft: var(--line);
+  /* text color for controls filled with --em/--em-dim (accent-filled buttons/badges) */
+  --on-em: var(--bg-1);
+  /* full-viewport backdrop behind modals/palette/drawers */
+  --scrim: rgba(0, 0, 0, 0.45);
+  /* elevation shadow color for panels/modals that opt into a themed (non-literal) shadow */
+  --shadow: rgba(0, 0, 0, 0.45);
+  /* floating panel surfaces (annotation list, etc.) */
+  --panel-bg: var(--bg-3);
+  /* ANSI-16 terminal palette (consumed by terminal.ts buildTermTheme, Phase 2) */
+  --ansi-black: #3a3a34; --ansi-red: #e5484d; --ansi-green: #4ade93;
+  --ansi-yellow: #e3b341; --ansi-blue: #4493f8; --ansi-magenta: #a78bfa;
+  --ansi-cyan: #4ec9b0; --ansi-white: #d4d4d4;
+  --ansi-bright-black: #6b7280; --ansi-bright-red: #ff6b6b; --ansi-bright-green: #6fe7ab;
+  --ansi-bright-yellow: #f0cc6c; --ansi-bright-blue: #6cb6ff; --ansi-bright-magenta: #c4a7fa;
+  --ansi-bright-cyan: #7ee2cc; --ansi-bright-white: #ffffff;
   font-family: var(--ui); font-size: 13px;
 }
 .theme-washi {
@@ -35,7 +46,22 @@
   --em: #0f8a5f; --em-dim: #0c6b4a; --em-wash: rgba(15,138,95,0.10); --em-wash-row: rgba(15,138,95,0.08);
   --syn-kw: #0f8a5f; --syn-type: #3b6aa0; --syn-str: #b07b2e; --syn-comment: var(--fg-faint);
   --bg-drawer: #efebe0; --bg-whisper: #f1ede3;
+  --on-em: var(--bg-1);
+  --scrim: rgba(31, 35, 31, 0.3);
+  --shadow: rgba(31, 35, 31, 0.22);
+  --panel-bg: var(--bg-3);
+  /* ANSI-16 tuned darker/saturated for legibility on a light background */
+  --ansi-black: #33322c; --ansi-red: #b3261e; --ansi-green: #0f8a5f;
+  --ansi-yellow: #8a6a1f; --ansi-blue: #2b5fad; --ansi-magenta: #7c4fd1;
+  --ansi-cyan: #0f7a72; --ansi-white: #5b5b52;
+  --ansi-bright-black: #7a7a6e; --ansi-bright-red: #d1453d; --ansi-bright-green: #17a374;
+  --ansi-bright-yellow: #a8842f; --ansi-bright-blue: #3f74c9; --ansi-bright-magenta: #9568df;
+  --ansi-bright-cyan: #148f85; --ansi-bright-white: #2a2a24;
 }
+
+/* fixed: box-shadow colors below stay literal rgba(0,0,0,X) black across both themes by convention —
+   ambient elevation shadows read as dark regardless of surface theme (standard UI practice); the two
+   new motion surfaces (palette, tag-manager modal) opt into the themed var(--shadow) instead. */
 
 * {
   box-sizing: border-box;
@@ -46,7 +72,7 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg-1);
   color: var(--fg);
 }
 
@@ -309,7 +335,7 @@ button {
   cursor: pointer;
 }
 button:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 
 /* menu bar */
@@ -418,7 +444,7 @@ button:hover {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--fg-dim, #8a8f98);
+  color: var(--fg-dim);
 }
 .gitbar-section:not(:first-child) {
   margin-top: 4px;
@@ -433,7 +459,7 @@ button:hover {
   white-space: nowrap;
 }
 .gitbar-worktree:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 .gitbar-worktree.current {
   background: var(--em-wash);
@@ -587,7 +613,7 @@ button:hover {
   align-items: center;
   justify-content: center;
   background: var(--em);
-  color: #0c0d0e;
+  color: var(--on-em);
   flex: 0 0 auto;
 }
 .auto-run:hover {
@@ -620,7 +646,7 @@ button:hover {
   cursor: pointer;
 }
 .auto-dd-row:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 .auto-dd-row.cur {
   background: var(--em-wash);
@@ -687,6 +713,7 @@ button:hover {
   background: var(--bg-2);
   border-top: 1px solid var(--em-dim);
   border-bottom: 1px solid var(--line);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .auto-drawer-row {
   display: flex;
@@ -763,7 +790,7 @@ button:hover {
 }
 .auto-drawer-acts .save {
   background: var(--em);
-  color: #0c0d0e;
+  color: var(--on-em);
   border: 1px solid var(--em-dim);
   font-weight: 600;
 }
@@ -912,7 +939,7 @@ button:hover {
 }
 .po-sep {
   height: 1px;
-  background: var(--line-soft);
+  background: var(--line);
   margin: 6px 8px;
 }
 
@@ -1040,7 +1067,7 @@ button:hover {
   overflow: hidden;
   position: relative;
   background: var(--bg-drawer);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 #terminal-area.terminal-collapsed {
   flex: 0 0 30px;
@@ -1060,7 +1087,7 @@ button:hover {
   background: transparent;
 }
 .resizer-v:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 .resizer-h {
   flex: 0 0 4px;
@@ -1068,7 +1095,7 @@ button:hover {
   background: transparent;
 }
 .resizer-h:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 .hidden {
   display: none !important;
@@ -1180,6 +1207,8 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* fixed: file-type icon colors are per-language brand/convention colors (VS Code-style), intentionally
+   fixed across themes — not part of the ink/washi surface palette (decisions log #5) */
 .tree-icon.type-folder {
   color: #d7ba2a;
 }
@@ -1221,7 +1250,7 @@ button:hover {
 }
 .tree-edit-input {
   padding: 2px 4px;
-  background: var(--bg);
+  background: var(--bg-1);
   border: 1px solid var(--em);
   border-radius: 2px;
   font-size: 12.5px;
@@ -1230,7 +1259,7 @@ button:hover {
 }
 
 .tree-create-error {
-  color: var(--danger, #e24b4a);
+  color: var(--deleted);
   font-size: 11px;
   padding: 1px 0 4px;
 }
@@ -1249,7 +1278,7 @@ button:hover {
   align-items: stretch;
   gap: 18px;
   background: var(--bg-2);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
   overflow-x: auto;
   padding: 0 14px;
 }
@@ -1390,7 +1419,7 @@ button:hover {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #fff;
+  background: var(--bg-1);
 }
 /* markdown render styling lives inside .preview-host (Phase 5 injects content) */
 .pane-splitter {
@@ -1399,9 +1428,12 @@ button:hover {
   background: transparent;
 }
 .pane-splitter:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 
+/* fixed: diff gutter semantics (blue=modified/yellow=added/red=deleted) are a documented CLAUDE.md
+   invariant, fixed in both themes (decisions log #4) — --added/--modified/--deleted are intentionally
+   NOT overridden in .theme-washi */
 /* ---- diff gutter colors ---- */
 .cm-diff-gutter {
   width: 4px;
@@ -1636,6 +1668,8 @@ button:hover {
   padding: 10px;
 }
 
+/* fixed: merge-conflict red (rgba(215,78,66,*)) is an intentional fixed-severity accent, independent
+   of ink/washi surface tokens — matches the diff/deleted-red invariant (decisions log #4) */
 /* merge conflict controls */
 .conflict-banner {
   display: flex;
@@ -1709,7 +1743,7 @@ button:hover {
   flex-basis: 50%;
 }
 .term-group-right {
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--line);
 }
 .term-group.hidden {
   display: none;
@@ -1799,7 +1833,7 @@ button:hover {
   display: none;
 }
 .term-tab[data-side="right"] {
-  border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--border));
+  border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--line));
 }
 /* Maximized terminal: hide editor and resizer, let terminal fill #main */
 #main.terminal-maximized #editor-area  { display: none; }
@@ -1808,7 +1842,7 @@ button:hover {
 .term-maximize {
   border: none;
   border-radius: 0;
-  background: var(--bg-bar);
+  background: var(--bg-2);
   padding: 0 8px;
   cursor: pointer;
   color: var(--fg-faint);
@@ -2071,7 +2105,7 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   background: var(--bg-3);
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
 }
 .search-file-header:hover {
   color: var(--em);
@@ -2124,11 +2158,12 @@ button:hover {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(8, 10, 9, 0.55);
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 80px;
+  transition: opacity 120ms ease-out;
 }
 .palette-container {
   width: min(430px, calc(100vw - 28px));
@@ -2136,8 +2171,9 @@ button:hover {
   border: 1px solid var(--line-menu);
   border-radius: var(--r-md);
   overflow: hidden;
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
   box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.45),
+    0 24px 70px var(--shadow),
     inset 0 1px 0 color-mix(in srgb, var(--em) 12%, transparent);
 }
 .palette-input {
@@ -2264,15 +2300,17 @@ button:hover {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: opacity 140ms ease-out;
 }
 .prompt-box {
   background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
   padding: 16px;
   min-width: 280px;
   display: flex;
@@ -2300,7 +2338,7 @@ button:hover {
   border: 1px solid var(--line);
   cursor: pointer;
   background: var(--em);
-  color: #fff;
+  color: var(--on-em);
   font-family: inherit;
 }
 .prompt-btn.secondary {
@@ -2389,7 +2427,7 @@ button:hover {
   flex-direction: column;
   min-width: 0;
   background: var(--bg-1);
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--line);
 }
 #browser-area.hidden {
   display: none;
@@ -2400,8 +2438,8 @@ button:hover {
   align-items: center;
   gap: 6px;
   padding: 0 8px;
-  background: var(--bg-bar);
-  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
 }
 .browser-btn {
   flex: 0 0 32px;
@@ -2424,7 +2462,7 @@ button:hover {
 }
 .browser-btn.active {
   background: var(--em);
-  color: var(--bg);
+  color: var(--on-em);
   border-color: var(--em);
 }
 .browser-url-input {
@@ -2579,7 +2617,7 @@ button:hover {
   border-radius: var(--r-sm);
   font-size: 12px;
 }
-.task-acceptance-blocker { color: var(--warn, #d99a36); }
+.task-acceptance-blocker { color: var(--added); }
 .task-acceptance-ready { color: var(--fg-dim); flex: 1; }
 .task-acceptance-receipt { color: var(--fg-dim); font-family: var(--mono); }
 .task-acceptance-gate.is-accepted { border-color: var(--em-dim); }
@@ -2595,11 +2633,12 @@ button:hover {
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  transition: opacity 140ms ease-out;
 }
 .settings-modal {
   width: 560px;
@@ -2612,6 +2651,7 @@ button:hover {
   flex-direction: column;
   overflow: hidden;
   font-family: var(--ui);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .settings-header {
   display: flex;
@@ -2719,6 +2759,7 @@ button:hover {
   transition: left 0.12s;
 }
 .settings-toggle.on { background: var(--em-dim); }
+/* fixed: toggle knob stays white by convention (iOS-style switch); --em-dim is dark-saturated-enough in both themes for contrast */
 .settings-toggle.on::after { left: 16px; background: #fff; }
 .settings-note { font-size: 11px; color: var(--fg-dim); margin-top: 4px; }
 .settings-shortcuts { display: flex; flex-direction: column; gap: 6px; }
@@ -2765,7 +2806,7 @@ button:hover {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--em);
 }
 
 /* ── About panel (reuses .settings-* modal grammar) ── */
@@ -2782,6 +2823,9 @@ button:hover {
 .about-links { display: flex; gap: 8px; margin-top: 12px; }
 .about-links .settings-reset { margin-top: 0; }
 
+/* fixed: debugger affordance colors (breakpoint red, agent-violet, paused-line yellow, inline-hint
+   teal, chip tan) are fixed semantic signal colors — VS Code-debugger convention, intentionally NOT
+   tied to the ink/washi surface palette so severity/kind reads identically in both themes */
 /* Debugger: breakpoint gutter, paused line, inline value hints */
 .cm-bp-gutter { width: 14px; cursor: pointer; }
 .cm-bp-verified { color: #e51400; }
@@ -2793,16 +2837,17 @@ button:hover {
 
 /* Debugger sidebar slot + panels */
 .debugger-sidebar-slot { transition: flex-basis 0.15s ease; min-height: 0; min-width: 0; }
-.debugger-sidebar-slot.open { border-left: 1px solid var(--border, #2a2a2a); }
+.debugger-sidebar-slot.open { border-left: 1px solid var(--line); }
 .debugger-sidebar-slot.dragging { transition: none; }
 .debugger-sidebar { display: flex; flex-direction: column; height: 100%; overflow: auto; font-size: 12px; }
-.dbg-panel { border-bottom: 1px solid var(--border, #2a2a2a); padding: 6px 8px; }
+.dbg-panel { border-bottom: 1px solid var(--line); padding: 6px 8px; }
 .dbg-panel h3 { font-size: 11px; text-transform: uppercase; opacity: 0.7; margin: 0 0 4px; }
 .dbg-list { list-style: none; margin: 0; padding: 0; }
 .dbg-list li { padding: 2px 0; }
-/* Breakpoint-row chips: were declared in the panel but never styled — bare text until now. */
-.dbg-chip { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; text-transform: uppercase; letter-spacing: 0.3px; vertical-align: middle; background: var(--bg-1, #2a2a2a); color: var(--fg-dim, #aaa); }
-.dbg-chip-cond { color: var(--modified, #4493f8); }
+/* Breakpoint-row chips: were declared in the panel but never styled — bare text until now.
+   fixed: chip colors reuse the same fixed debugger-signal palette noted above. */
+.dbg-chip { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; text-transform: uppercase; letter-spacing: 0.3px; vertical-align: middle; background: var(--bg-1); color: var(--fg-dim); }
+.dbg-chip-cond { color: var(--modified); }
 .dbg-chip-hit { color: #4ec9b0; }
 .dbg-chip-log { color: #d7ba7d; }
 /* Violet + filled = agent-attributed, matches .dbg-console-agent / .agent-badge. */
@@ -2811,9 +2856,9 @@ button:hover {
 .dbg-watch-rm { float: right; background: none; border: none; cursor: pointer; opacity: 0.6; }
 .dbg-watch-add { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; }
 .dbg-console { font-family: var(--mono, monospace); white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 0; }
-.dbg-console-error { color: var(--danger, #e24b4a); }
+.dbg-console-error { color: var(--deleted); }
 /* Eval results stand apart from plain adapter output. */
-.dbg-console-result { color: var(--modified, #4493f8); }
+.dbg-console-result { color: var(--modified); }
 /* Violet = agent-attributed (MCP) console lines — matches .agent-badge. */
 .dbg-console-agent { color: #a78bfa; }
 .dbg-console-input { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; font-family: var(--mono, monospace); }
@@ -2888,7 +2933,7 @@ button:hover {
   font-size: 11px;
   padding: 1px 6px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -2918,7 +2963,7 @@ button:hover {
   font-size: 11px;
   padding: 3px 10px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -3082,7 +3127,7 @@ button:hover {
   color: var(--fg);
 }
 .cmp-suggest-item:hover,
-.cmp-suggest-item.active { background: var(--em-dim); color: var(--bg); }
+.cmp-suggest-item.active { background: var(--em-dim); color: var(--on-em); }
 .cmp-chip-rail {
   display: flex;
   flex-wrap: wrap;
@@ -3155,7 +3200,7 @@ button:hover {
   font-size: 11.5px;
   padding: 3px 10px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -3265,7 +3310,7 @@ button:hover {
 .cmp-status {
   padding: 4px 8px;
   font-size: 11px;
-  color: #f87171;
+  color: var(--deleted);
   background: var(--bg-1);
   border-top: 1px solid var(--line);
   flex: 0 0 auto;
@@ -3274,18 +3319,20 @@ button:hover {
 /* ── Tag Manager modal ───────────────────────────────────────────────────────── */
 .tm-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: var(--scrim);
   z-index: 9000;
   display: flex; align-items: center; justify-content: center;
+  transition: opacity 140ms ease-out;
 }
 .tm-modal {
-  background: var(--bg);
+  background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   width: 480px; max-width: 95vw;
   max-height: 80vh;
   display: flex; flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 32px var(--shadow);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .tm-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -3342,7 +3389,7 @@ button:hover {
 .tm-status { font-size: 11px; color: var(--fg-dim); flex: 1; }
 .tm-save {
   font-size: 12px; padding: 4px 14px;
-  background: var(--em-dim); color: var(--bg);
+  background: var(--em-dim); color: var(--on-em);
   border: none; border-radius: var(--r-sm);
   cursor: pointer; font-weight: 600;
 }
@@ -3394,11 +3441,12 @@ button:hover {
 .tm-tpl-order { width: 100%; }
 
 /* ---- annotation side list ---- */
-.annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg, #1e1e1e); }
+.annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg); }
 .annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; cursor: pointer; }
 .annotation-row:hover { background: var(--em-wash-row); }
 .annotation-row.stale { opacity: 0.5; }
 .ann-armed { padding: 5px 8px; font-size: 11px; color: var(--em); background: var(--em-wash); }
+/* fixed: marker badge — saturated red + white number is a fixed marker-number chip, mirrors the conflict/diff-red invariant, legible on both themes */
 .ann-num { background: #e11; color: #fff; border-radius: 50%; width: 18px; height: 18px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
 .ann-hint { padding: 6px 8px; font-size: 11px; color: var(--em); border-bottom: 1px solid var(--em-dim); display: flex; align-items: center; gap: 5px; }
 .ann-hint::before { content: "→"; opacity: 0.7; }
@@ -3574,13 +3622,13 @@ button:hover {
 .rollback-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  transition: opacity 140ms ease-out;
 }
-.theme-washi .rollback-overlay { background: rgba(31, 35, 31, 0.3); }
 .rollback-file-row {
   display: flex;
   align-items: center;
@@ -3602,6 +3650,7 @@ button:hover {
   flex-direction: column;
   overflow: hidden;
   font-family: var(--ui);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .rollback-title {
   padding: 10px 14px;
@@ -3690,4 +3739,24 @@ body.app-hidden *,
 body.app-hidden *::before,
 body.app-hidden *::after {
   animation-play-state: paused !important;
+}
+
+/* Reduced motion: zero every transition added for palette/drawer/modal-scrim open-close polish.
+   Splitter/resizer selectors (.resizer-v, .resizer-h, .pane-splitter, #hresizer, #browser-resizer,
+   #diff-resizer) intentionally carry NO transition at all (60fps drag invariant) so they are absent
+   from this list on purpose, not by omission. */
+@media (prefers-reduced-motion: reduce) {
+  .palette-overlay,
+  .palette-container,
+  .prompt-overlay,
+  .prompt-box,
+  .settings-overlay,
+  .settings-modal,
+  .tm-overlay,
+  .tm-modal,
+  .rollback-overlay,
+  .rollback-dialog,
+  .auto-drawer {
+    transition: none;
+  }
 }
