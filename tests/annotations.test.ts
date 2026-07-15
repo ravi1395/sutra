@@ -54,6 +54,12 @@ class FakeElement {
 
 type Sent = { message: unknown; origin: string };
 
+/** Drops "theme" pushes (see pushTheme tests below) so routing assertions stay focused on
+ *  the arm/disarm/openEditor traffic they were written to check. */
+function withoutTheme(sent: Sent[]): Sent[] {
+  return sent.filter((s) => (s.message as { type?: string }).type !== "theme");
+}
+
 function frame() {
   const sent: Sent[] = [];
   const contentWindow = {
@@ -112,11 +118,14 @@ test("setTarget disarms old iframe and routes later toggles to new iframe", () =
     ctx.panel.setTarget(second as unknown as HTMLIFrameElement, "http://new.test");
     ctx.toggle.click();
 
-    assert.deepEqual(ctx.first.sent, [
+    // Theme pushes (setTarget + arm re-push) also flow over this channel now; filtered out
+    // here since this test is specifically about arm/disarm routing across a retarget —
+    // theme-push behavior itself is covered by the "pushTheme" tests below.
+    assert.deepEqual(withoutTheme(ctx.first.sent), [
       { message: { type: "arm" }, origin: "http://old.test" },
       { message: { type: "disarm" }, origin: "http://old.test" },
     ]);
-    assert.deepEqual(second.sent, [
+    assert.deepEqual(withoutTheme(second.sent), [
       { message: { type: "arm" }, origin: "http://new.test" },
     ]);
     assert.equal(ctx.toggle.classList.contains("active"), true);
@@ -258,6 +267,68 @@ test("setRoot on a corrupt annotations file surfaces warnings and quarantines it
     // saveAnnotations only ever writes annotations.json/.gitignore, never
     // `.bak`, so a subsequent save structurally cannot destroy the backup.
     assert.equal(Object.keys(writes).filter((p) => p.endsWith(".bak")).length, 1);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Phase 4 (theme bridge): the in-iframe agent has no CSS-var/theme-washi access of its own
+// (cross-origin proxied iframe), so the host resolves colors via cssVar() and pushes them
+// over the existing validated postMessage channel as a {type:"theme"} message. These tests
+// cover the host side (resolve + post, re-push on retarget/arm); the agent's receive+restyle
+// path is a standalone IIFE with top-level side effects and isn't importable under node:test,
+// so it's covered by the manual E2E row instead (see VERIFY-LEDGER.md).
+function stubCssVarTokens(tokens: Record<string, string>): { restore: () => void } {
+  const prev = globalThis.getComputedStyle;
+  (globalThis as unknown as { getComputedStyle: unknown }).getComputedStyle = (_el: unknown) => ({
+    getPropertyValue: (name: string) => tokens[name] ?? "",
+  });
+  return { restore: () => { globalThis.getComputedStyle = prev; } };
+}
+
+const WASHI_TOKENS: Record<string, string> = {
+  "--bg-3": "#fbf9f4", "--fg": "#1f231f", "--em": "#0f8a5f", "--em-dim": "#0c6b4a",
+};
+
+test("pushTheme resolves washi tokens via cssVar and posts a theme message over the proxyOrigin channel", () => {
+  const ctx = setup();
+  const dom = stubCssVarTokens(WASHI_TOKENS);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    // setTarget's own re-push is the only message so far — assert it directly (also
+    // proves theme is (re)pushed on setTarget, not just on arm).
+    assert.equal(ctx.first.sent.length, 1);
+    assert.deepEqual(ctx.first.sent[0], {
+      message: { type: "theme", colors: { bg: "#fbf9f4", fg: "#1f231f", em: "#0f8a5f", emDim: "#0c6b4a" } },
+      origin: "http://app.test", // targetOrigin === proxyOrigin, same channel as arm/openEditor
+    });
+  } finally {
+    dom.restore();
+    ctx.restore();
+  }
+});
+
+test("arming re-pushes theme before the arm message, so a freshly-targeted agent gets current colors", () => {
+  const ctx = setup();
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const baseline = ctx.first.sent.length; // the setTarget theme push
+    ctx.toggle.click(); // arms
+    const pushed = ctx.first.sent.slice(baseline);
+    assert.equal(pushed.length, 2);
+    assert.equal((pushed[0].message as { type: string }).type, "theme");
+    assert.equal(pushed[0].origin, "http://app.test");
+    assert.deepEqual(pushed[1], { message: { type: "arm" }, origin: "http://app.test" });
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("pushTheme no-ops when the panel has no targeted iframe/origin (never throws, never posts)", () => {
+  const ctx = setup();
+  try {
+    ctx.panel.pushTheme(); // never targeted via setTarget in this test
+    assert.equal(ctx.first.sent.length, 0);
   } finally {
     ctx.restore();
   }

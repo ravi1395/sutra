@@ -40,6 +40,11 @@ export function routeKey(targetOrigin: string, loc: LocationShape, opts: RouteOp
   return opts.hashRouting ? `${base}${loc.hash}` : base;
 }
 
+/** Resolved theme colors pushed host→agent over the existing postMessage channel
+ *  (see annotations.ts pushTheme / annotation-agent.ts case "theme"); the agent has
+ *  no CSS-var access of its own since it runs in a cross-origin proxied iframe. */
+export interface AnnotationTheme { bg: string; fg: string; em: string; emDim: string }
+
 export interface Hints { testid?: string; role?: string; aria?: string; text?: string }
 export interface Annotation {
   n: number; selector: string; tag: string; html: string;

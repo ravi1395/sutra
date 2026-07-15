@@ -1,9 +1,10 @@
 // Parent-side canonical owner of annotation state. Bridges the in-iframe agent
 // (validated postMessage) and the side list. DOM-bound; verified manually.
-import { reduce, isTrustedMessage, type Annotation, type AnnAction } from "./annotation-core";
+import { reduce, isTrustedMessage, type Annotation, type AnnAction, type AnnotationTheme } from "./annotation-core";
 import { annotationId, buildAnnotationContextPack } from "./annotation-context";
 import { annotationsForRoute, backupCorruptAnnotationsFile, loadAnnotations, saveAnnotations, type AnnotationPersistence } from "./annotation-store";
 import type { Task } from "./tasks";
+import { cssVar, onThemeChange } from "./theme-tokens";
 
 export class AnnotationsPanel {
   private state: Annotation[] = [];
@@ -16,6 +17,8 @@ export class AnnotationsPanel {
   private onDetach: ((task: Task, annotation: Annotation, reason?: string) => Promise<void>) | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
   private onDeliver: ((task: Task, prompt: string) => Promise<void>) | null = null;
+  private lastTheme: AnnotationTheme | null = null;
+  private disposeTheme: (() => void) | null = null;
   /** Surfaces recoverable load warnings (corrupt/partial annotations file) to the shell. */
   onWarnings: ((warnings: string[]) => void) | null = null;
   /** Resolves once the in-flight setRoot() hydration completes. Inbound browser
@@ -35,6 +38,35 @@ export class AnnotationsPanel {
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.armed) { e.preventDefault(); this.toggle(); }
     }, true);
+    // Mirrors PreviewController/terminal.ts's onThemeChange self-subscription: live-retheme
+    // any already-open textarea/pins in the agent when ink/washi toggles.
+    this.disposeTheme = onThemeChange(() => this.pushTheme());
+  }
+
+  /** Stop reacting to ink/washi toggles. No current caller — exposed for a future explicit
+   *  teardown path and for tests to assert the subscription is disposable. */
+  dispose(): void {
+    this.disposeTheme?.();
+    this.disposeTheme = null;
+  }
+
+  /** Last resolved theme colors, if pushTheme() has run at least once — exposed for tests
+   *  and any future consumer that wants the current values without re-resolving. */
+  get currentTheme(): AnnotationTheme | null {
+    return this.lastTheme;
+  }
+
+  /** Resolve current theme tokens from the host document and push them to the agent over
+   *  the existing validated postMessage channel (see postToAgent). No-ops when untargeted. */
+  pushTheme(): void {
+    const colors: AnnotationTheme = {
+      bg: cssVar("--bg-3", "#161a17"),
+      fg: cssVar("--fg", "#e8eae4"),
+      em: cssVar("--em", "#4ade93"),
+      emDim: cssVar("--em-dim", "#1f8a63"),
+    };
+    this.lastTheme = colors;
+    this.postToAgent({ type: "theme", colors });
   }
 
   async setRoot(root: string | null): Promise<void> {
@@ -85,6 +117,9 @@ export class AnnotationsPanel {
     this.proxyOrigin = origin;
     this.armed = false;
     this.toggleBtn.classList.toggle("active", false);
+    // Best-effort: a freshly-injected agent may not have its listener attached yet, but
+    // arm (below) re-pushes reliably before the agent ever needs to render themed UI.
+    this.pushTheme();
     this.render();
   }
 
@@ -95,6 +130,9 @@ export class AnnotationsPanel {
   private toggle() {
     this.armed = !this.armed;
     this.toggleBtn.classList.toggle("active", this.armed);
+    // Re-push on arm so a fresh agent (new page load since the last theme push) always
+    // has current colors before openEditor()/pin rendering can need them.
+    if (this.armed) this.pushTheme();
     this.postToAgent({ type: this.armed ? "arm" : "disarm" });
     this.render();
   }

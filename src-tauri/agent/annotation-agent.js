@@ -41,6 +41,20 @@
   var PROXY_TOKEN = window.__SUTRA_PROXY_TOKEN__;
   var armed = false;
   var pins = /* @__PURE__ */ new Map();
+  var theme = {
+    bg: "rgb(22, 24, 26)",
+    fg: "rgb(232, 234, 228)",
+    em: "rgb(74, 222, 147)",
+    emDim: "rgb(31, 138, 99)"
+  };
+  var openTextarea = null;
+  function restyleOpenTextarea() {
+    if (!openTextarea) return;
+    openTextarea.style.background = theme.bg;
+    openTextarea.style.color = theme.fg;
+    openTextarea.style.caretColor = theme.em;
+    openTextarea.style.borderColor = theme.emDim;
+  }
   function post(msg) {
     window.parent.postMessage(msg, PARENT_ORIGIN);
   }
@@ -138,19 +152,20 @@
       height: "64px",
       padding: "8px 10px",
       boxSizing: "border-box",
-      background: "#16181a",
-      color: "#e8eae4",
-      caretColor: "#4ade93",
-      border: "1px solid #1f8a63",
+      background: theme.bg,
+      color: theme.fg,
+      caretColor: theme.em,
+      border: `1px solid ${theme.emDim}`,
       borderRadius: "6px",
       outline: "none",
       resize: "none",
       font: "12px/1.4 ui-sans-serif, system-ui, sans-serif",
       boxShadow: "0 4px 16px rgba(0,0,0,0.4)"
+      // fixed: overlay glow, theme-independent
     });
     ta.placeholder = "design feedback\u2026 (Enter to save \xB7 Esc to cancel)";
     ta.addEventListener("focus", () => {
-      ta.style.borderColor = "#4ade93";
+      ta.style.borderColor = theme.em;
       ta.style.boxShadow = "0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(74,222,147,0.25)";
     });
     ta.addEventListener("input", () => post({ type: "feedbackChanged", n, text: ta.value }));
@@ -165,8 +180,12 @@
         ta.blur();
       }
     });
-    ta.addEventListener("blur", () => ta.remove());
+    ta.addEventListener("blur", () => {
+      ta.remove();
+      if (openTextarea === ta) openTextarea = null;
+    });
     document.body.appendChild(ta);
+    openTextarea = ta;
     ta.focus();
   }
   var hovered = null;
@@ -237,8 +256,13 @@
         const entry = pins.get(m.n);
         if (entry) {
           entry.pin.style.transform = m.on ? "scale(1.4)" : "";
-          entry.el.style.outline = m.on ? "2px solid #4ade93" : "";
+          entry.el.style.outline = m.on ? `2px solid ${theme.em}` : "";
         }
+        break;
+      }
+      case "theme": {
+        theme = m.colors;
+        restyleOpenTextarea();
         break;
       }
       case "scrollToPin": {
