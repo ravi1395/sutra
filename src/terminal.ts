@@ -1,12 +1,13 @@
 // Terminal subsystem: xterm.js front-ends bound to portable-pty sessions in Rust.
 // Multiple terminals; toggling the panel only hides the DOM — PTYs keep running,
 // so reopening resumes the live session.
-import { Terminal, type ITheme } from "@xterm/xterm";
+import { Terminal, type ITheme, type ILink, type ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { ptySpawn, ptyWrite, ptyResize, ptyKill, ptyIsBusy, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin } from "./ipc";
+import { homeDir } from "@tauri-apps/api/path";
+import { ptySpawn, ptyWrite, ptyResize, ptyKill, ptyIsBusy, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin, fileMtime } from "./ipc";
 import { isIntegratedAgentCommand } from "./agent-tracking";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
 import { beginSplitPointerDrag } from "./split-drop";
@@ -33,6 +34,7 @@ interface Term {
   agentAttached: boolean;
   cmdHistory: string[]; // Recent commands for autocomplete
   currentInput: string; // Current line being typed
+  cwd: string | null; // Spawn-time cwd (session.cwd) — used to resolve relative file links
 }
 
 /** Build the live xterm theme from ink/washi CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
@@ -68,6 +70,195 @@ export function buildTermTheme(): ITheme {
 export function retheme(sessions: ReadonlyArray<{ term: Pick<Terminal, "options"> }>): void {
   const theme = buildTermTheme();
   for (const s of sessions) s.term.options.theme = theme;
+}
+
+/** Classify a URL's host for cmd+click routing: loopback hosts open in Sutra's embedded
+ *  browser pane, everything else goes to the OS default browser. */
+export function classifyLink(uri: string): "localhost" | "external" {
+  try {
+    const host = new URL(uri).hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") {
+      return "localhost";
+    }
+  } catch {
+    // Unparsable — fall through to external so we never silently misroute.
+  }
+  return "external";
+}
+
+interface PathMatch {
+  path: string;
+  line?: number;
+  index: number;
+  length: number;
+}
+
+// Path-ish token: optional prefix (~/, ~, ../, ./, /) + a body of word/dot/slash/hyphen chars,
+// plus an optional :line[:col] suffix (col is captured only to be dropped — openFile has no
+// column support). Bare words with no separator, extension, or :line are filtered out below so
+// stray identifiers in shell output don't turn into link spam.
+const PATH_TOKEN_SRC = String.raw`(~\/|~|\.\.\/|\.\/|\/)?(\w[\w./-]*)(?::(\d+)(?::\d+)?)?`;
+
+function findPathMatches(lineText: string, cap = 20): PathMatch[] {
+  const re = new RegExp(PATH_TOKEN_SRC, "g");
+  const out: PathMatch[] = [];
+  let m: RegExpExecArray | null;
+  while (out.length < cap && (m = re.exec(lineText))) {
+    const path = (m[1] ?? "") + m[2];
+    const hasLine = m[3] !== undefined;
+    const pathIsh = path.includes("/") || /\.[A-Za-z0-9]+$/.test(path) || hasLine;
+    if (pathIsh) {
+      out.push({ path, line: hasLine ? Number(m[3]) : undefined, index: m.index, length: m[0].length });
+    }
+  }
+  return out;
+}
+
+/** Extract path-ish tokens (with optional :line[:col], col dropped) from one terminal line of text. */
+export function extractPathCandidates(lineText: string): Array<{ path: string; line?: number }> {
+  return findPathMatches(lineText).map(({ path, line }) => (line === undefined ? { path } : { path, line }));
+}
+
+export type MtimeProbe = (path: string) => Promise<number>;
+
+function joinPosix(base: string, rel: string): string {
+  const b = base.endsWith("/") ? base.slice(0, -1) : base;
+  const r = rel.startsWith("/") ? rel.slice(1) : rel;
+  return `${b}/${r}`;
+}
+
+/** Resolve a path-ish token to a validated absolute path, trying (in order) the literal token,
+ *  home-expansion, the spawning terminal's cwd, then the workspace root — first mtime hit wins.
+ *  `probe` and `home` are injected so tests can stub filesystem existence. */
+export async function resolveLinkPath(
+  path: string,
+  ctx: { cwd: string | null; workspaceRoot: string | null; home: string | null },
+  probe: MtimeProbe,
+): Promise<string | null> {
+  const attempts: string[] = [path]; // absolute as-is (also the literal form for non-absolute tokens)
+  if (path === "~" || path.startsWith("~/")) {
+    if (ctx.home) attempts.push(path === "~" ? ctx.home : joinPosix(ctx.home, path.slice(2)));
+  }
+  if (!path.startsWith("/")) {
+    if (ctx.cwd) attempts.push(joinPosix(ctx.cwd, path));
+    if (ctx.workspaceRoot) attempts.push(joinPosix(ctx.workspaceRoot, path));
+  }
+  for (const attempt of attempts) {
+    try {
+      await probe(attempt);
+      return attempt;
+    } catch {
+      // Not this one — try the next candidate location.
+    }
+  }
+  return null;
+}
+
+let cachedHomeDir: Promise<string | null> | null = null;
+/** Cached best-effort home dir via Tauri's core path resolver (the renderer has no HOME env). */
+function getHomeDir(): Promise<string | null> {
+  if (!cachedHomeDir) cachedHomeDir = homeDir().catch(() => null);
+  return cachedHomeDir;
+}
+
+/** Collect the full logical (wrapped) line containing buffer row `y0` (0-based): walk back to
+ *  the row that starts the wrap chain, then forward through every continuation row. Adapted from
+ *  @xterm/addon-web-links's windowing strategy (MIT) without its space heuristic — path tokens,
+ *  like URLs, never legitimately contain unescaped spaces, so a straight wrap-chain walk is
+ *  precise here without needing that shortcut. */
+function getWindowedLine(term: Terminal, y0: number): { text: string; startRow: number } | null {
+  const buf = term.buffer.active;
+  if (!buf.getLine(y0)) return null;
+  let startRow = y0;
+  while (startRow > 0 && buf.getLine(startRow)?.isWrapped) startRow--;
+  const parts: string[] = [];
+  let row = startRow;
+  let guard = 0;
+  do {
+    const line = buf.getLine(row);
+    if (!line) break;
+    parts.push(line.translateToString(true));
+    row++;
+    guard++;
+  } while (guard < 200 && buf.getLine(row)?.isWrapped);
+  return { text: parts.join(""), startRow };
+}
+
+/** Port of @xterm/addon-web-links's `_mapStrIdx` (MIT): advance `count` string characters from
+ *  (lineIndex, columnIndex), returning the buffer position reached — walking through wrapped
+ *  continuation rows and accounting for wide (2-cell) characters. */
+function mapStrIdx(term: Terminal, lineIndex: number, columnIndex: number, count: number): [number, number] {
+  const buf = term.buffer.active;
+  const nullCell = buf.getNullCell();
+  let li = lineIndex;
+  let col = columnIndex;
+  let remaining = count;
+  while (remaining > 0) {
+    const line = buf.getLine(li);
+    if (!line) return [-1, -1];
+    for (let x = col; x < line.length; x++) {
+      line.getCell(x, nullCell);
+      const chars = nullCell.getChars();
+      if (nullCell.getWidth()) {
+        remaining -= chars.length || 1;
+        if (x === line.length - 1 && chars === "") {
+          const nextLine = buf.getLine(li + 1);
+          if (nextLine?.isWrapped) {
+            nextLine.getCell(0, nullCell);
+            if (nullCell.getWidth() === 2) remaining += 1;
+          }
+        }
+      }
+      if (remaining < 0) return [li, x];
+    }
+    li++;
+    col = 0;
+  }
+  return [li, col];
+}
+
+/** Custom xterm link provider for file paths — WebLinksAddon's regex is URL-only. Reads the
+ *  hovered logical (wrapped) line, extracts path-ish candidates, resolves+validates each against
+ *  the filesystem, and only surfaces validated paths as clickable links (modifier-gated). */
+export class FileLinkProvider implements ILinkProvider {
+  constructor(
+    private readonly term: Terminal,
+    private readonly getCwd: () => string | null,
+    private readonly getWorkspaceRoot: () => string | null,
+    private readonly probe: MtimeProbe,
+    private readonly onActivate: (absPath: string, line?: number) => void,
+  ) {}
+
+  provideLinks(y: number, callback: (links: ILink[] | undefined) => void): void {
+    void this.computeLinks(y - 1).then(callback);
+  }
+
+  private async computeLinks(y0: number): Promise<ILink[] | undefined> {
+    const windowed = getWindowedLine(this.term, y0);
+    if (!windowed) return undefined;
+    const matches = findPathMatches(windowed.text);
+    if (matches.length === 0) return undefined;
+
+    const home = await getHomeDir();
+    const ctx = { cwd: this.getCwd(), workspaceRoot: this.getWorkspaceRoot(), home };
+    const links: ILink[] = [];
+    for (const match of matches) {
+      const resolved = await resolveLinkPath(match.path, ctx, this.probe);
+      if (!resolved) continue;
+      const [startLine, startCol] = mapStrIdx(this.term, windowed.startRow, 0, match.index);
+      const [endLine, endCol] = mapStrIdx(this.term, startLine, startCol, match.length);
+      if (startLine === -1 || endLine === -1) continue;
+      links.push({
+        range: { start: { x: startCol + 1, y: startLine + 1 }, end: { x: endCol, y: endLine + 1 } },
+        text: windowed.text.slice(match.index, match.index + match.length),
+        activate: (event) => {
+          if (!isMod(event)) return;
+          this.onActivate(resolved, match.line);
+        },
+      });
+    }
+    return links.length ? links : undefined;
+  }
 }
 
 // Random PTY ids survive HMR reloads — the Rust process keeps running across hot
@@ -114,7 +305,8 @@ export class TerminalManager {
   onTabsChanged?: () => void;
   /** Fires after a Claude/Codex command is delivered to an integrated terminal. */
   onAgentAttached?: () => void;
-  onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
+  onUrlActivate?: (uri: string, kind: "localhost" | "external") => void; // cmd+click on a URL
+  onFileLinkActivate?: (absPath: string, line?: number) => void; // cmd+click on a resolved file path
 
   constructor(host: HTMLElement, area: HTMLElement, mainEl: HTMLElement) {
     this.mainEl = mainEl;
@@ -259,6 +451,7 @@ export class TerminalManager {
   async create(sideArg?: TerminalGroupSide, cwd?: string): Promise<void> {
     const num = ++this.seq; // display number, resets per workspace
     const id = newPtyId();
+    const sessionCwd = cwd ?? this.cwd;
     const term = new Terminal({
       theme: buildTermTheme(),
       fontFamily: this.fontFamily,
@@ -273,15 +466,11 @@ export class TerminalManager {
     const search = new SearchAddon();
     term.loadAddon(search);
 
-    // Load web-links addon; redirect to onLinkActivate hook if set, else system open.
-    const webLinks = new WebLinksAddon((_event: MouseEvent, uri: string) => {
-      if (this.onLinkActivate) {
-        this.onLinkActivate(uri);
-      } else {
-        // Fallback: open in system browser.
-        // (Group 5 will repoint this to mini-browser)
-        window.open(uri, "_blank");
-      }
+    // Load web-links addon; only modifier-clicks activate (Decision 9 — plain click is a no-op),
+    // routed by classifyLink to the embedded browser (localhost) or OS browser (external).
+    const webLinks = new WebLinksAddon((event: MouseEvent, uri: string) => {
+      if (!isMod(event)) return;
+      this.onUrlActivate?.(uri, classifyLink(uri));
     });
     term.loadAddon(webLinks);
 
@@ -292,11 +481,23 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, agentAttached: false, cmdHistory: [], currentInput: "" };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, agentAttached: false, cmdHistory: [], currentInput: "", cwd: sessionCwd };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
     this.renderGroups();
+
+    // File-path link provider (WebLinksAddon's regex is URL-only): resolves and validates
+    // path-ish tokens on the hovered line, surfacing only real files as clickable links.
+    term.registerLinkProvider(
+      new FileLinkProvider(
+        term,
+        () => t.cwd,
+        () => this.cwd,
+        fileMtime,
+        (absPath, line) => this.onFileLinkActivate?.(absPath, line),
+      ),
+    );
     term.onData((d) => {
       // Only track a shell command line while the normal buffer is active.
       // Full-screen programs (vim/less/fzf/htop) switch to the alternate

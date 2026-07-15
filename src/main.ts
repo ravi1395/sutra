@@ -3,6 +3,7 @@
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
 import "./styles.css";
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
@@ -358,11 +359,19 @@ async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
 }
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
 
-// Wire terminal link clicks → embedded browser.
-terminals.onLinkActivate = (url: string) => {
-  setBrowser(true);
-  browser.show();
-  void browser.open(url);
+// Wire terminal cmd+click links: localhost → embedded browser pane, other URLs → OS
+// default browser, resolved file paths → editor at the reported line.
+terminals.onUrlActivate = (uri, kind) => {
+  if (kind === "localhost") {
+    setBrowser(true);
+    browser.show();
+    void browser.open(uri);
+  } else {
+    void openUrl(uri).catch(() => {});
+  }
+};
+terminals.onFileLinkActivate = (absPath, line) => {
+  void editor.openFile(absPath, line);
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
