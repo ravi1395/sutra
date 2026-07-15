@@ -80,6 +80,16 @@ export function reduce(state: Annotation[], action: AnnAction): Annotation[] {
   }
 }
 
+/** Coarse relative-time label for the annotation rail's "agent pulled …" status. */
+export function formatAgo(deltaMs: number): string {
+  const s = Math.max(0, Math.floor(deltaMs / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
+}
+
 export function isTrustedMessage(
   e: { origin: string; source: unknown },
   expectedOrigin: string,

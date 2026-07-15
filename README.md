@@ -583,9 +583,17 @@ annotation records:
 - locator hints — `data-testid`, `role`, `aria-label`, and visible text (up to
   80 chars)
 
-Annotations appear in the side list, scoped to the current route. Ask the
-in-app agent `review my annotations` (or any prompt that calls the
-`get_annotations` MCP tool) to pull the current list into context.
+Annotations appear in the side rail, scoped to the current route. Notes stay
+editable there: click a note (or the `add note…` placeholder) to open an inline
+textarea — Enter or blur saves, Esc cancels.
+
+Ask the in-app agent `review my annotations` (or any prompt that calls the
+`get_annotations` MCP tool) to pull the current list into context. The rail
+shows delivery honestly: the header reads `Agent pulled Ns ago` after each
+fetch, and every annotation included in a pull gets a ✓ ("Read by agent").
+Editing a note clears its ✓ — the agent now holds a stale copy — until the next
+pull. In an untrusted workspace the header shows `Not shared with the agent —
+workspace untrusted` and `get_annotations` returns nothing.
 
 ### How it works
 

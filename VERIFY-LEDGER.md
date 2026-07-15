@@ -104,16 +104,36 @@ Breakpoint agent-attribution render (branch `main`). Bug: MCP-set breakpoints ro
 
 ---
 
-v2.3.3 token-restyle + terminal links (branch `feat/token-restyle`, commits `44212be..HEAD`). All 20 mechanical acceptance criteria (greps, token parity, unit tests, security invariants, version lockstep) GATE PASS via adversarial skeptical-reviewer 2026-07-15 (npm 587/587, cargo 268/268, build clean). The rows below are the 9 `[sutra-verify]` live-GUI criteria the reviewer structurally cannot observe — drive each in `npm run tauri dev` and record what you see. Map to PLAN.md:150-159 manual E2E tail.
+v2.3.3 token-restyle + terminal links (branch `v2.3.3`, verified commit `0570f57`; changes originally landed from `feat/token-restyle`). All 20 mechanical acceptance criteria (greps, token parity, unit tests, security invariants, version lockstep) GATE PASS via adversarial skeptical-reviewer 2026-07-15 (npm 587/587, cargo 268/268, build clean). The rows below are the 9 `[sutra-verify]` live-GUI criteria the reviewer structurally cannot observe — drive each in `npm run tauri dev` and record what you see. Map to PLAN.md:150-159 manual E2E tail.
 
 | Date | Version | Criterion | Surface | Evidence | Status |
 |---|---|---|---|---|---|
-| 2026-07-15 | 2.3.3 | TR-1 (P1): Toggle washi → titlebar, gitbar, automations drawer, palette, settings modal, task modal all light; zero dark patches | UI | — | BLOCKED(enable washi theme → inspect each surface; no `#0c0d0e`/dark remnants anywhere) |
-| 2026-07-15 | 2.3.3 | TR-2 (P2): Two terminals with colored output → toggle → both repaint live; all 16 ANSI colors legible on BOTH themes | UI | — | BLOCKED(run `ls -G` + a compiler-error stream in 2 terms, toggle → both re-theme without reload; ANSI readable on light bg) |
-| 2026-07-15 | 2.3.3 | TR-3 (P3): Open README.md preview → toggle → follows without re-open; scripts still blocked | UI | — | BLOCKED(open .md preview, toggle theme → colors follow; confirm srcdoc `sandbox=""` still blocks scripts) |
-| 2026-07-15 | 2.3.3 | TR-4 (P4): Browser annotation open → toggle → marker + composer legible both themes, before AND after toggle | UI | — | BLOCKED(annotate a proxied page, toggle → textarea + pin re-color live via postMessage bridge; legible both) |
+| 2026-07-15 | 2.3.3 | TR-1 (P1): Toggle washi → titlebar, gitbar, automations drawer, palette, settings modal, task modal all light; zero dark patches | UI | Live `tauri dev` (`0570f57`). Washi enabled; DOM-wide luminance scan (bg/color/border) via inspector console across visible surfaces returned 0 dark-patch offenders. | PASS |
+| 2026-07-15 | 2.3.3 | TR-2 (P2): Two terminals with colored output → toggle → both repaint live; all 16 ANSI colors legible on BOTH themes | UI | PASS — isolated current-source debug bundle (`0570f57`, unique bundle id); printed ANSI 30–37/90–97 in terminals created before and after launch, toggled ink→washi, and both existing xterms repainted immediately to the light terminal tokens without reload | PASS |
+| 2026-07-15 | 2.3.3 | TR-3 (P3): Open README.md preview → toggle → follows without re-open; scripts still blocked | UI | PASS — isolated current-source debug bundle (`0570f57`); open README preview changed washi→ink in place without reopening. `PreviewController` retained the open document and regenerated themed markup; HTML srcdoc still sets `sandbox=""` and sanitizes the document | PASS |
+| 2026-07-15 | 2.3.3 | TR-4 (P4): Browser annotation open → toggle → marker + composer legible both themes, before AND after toggle | UI | Live `tauri dev` (`v2.3.3`, matching origin). Loaded fixture page (card + button) via `navigate_browser`, armed annotate mode, opened composer on the card, opened Settings → Light mode → user confirmed composer stayed open and recolored live (no blur/close). `annotation-agent.ts:restyleOpenTextarea()` recolors the still-open textarea on the `"theme"` postMessage. | PASS |
 | 2026-07-15 | 2.3.3 | TR-5 (P1): Palette open animation smooth; macOS Reduce Motion ON → instant | UI | — | BLOCKED(open palette → ~120ms fade/translate; enable Reduce Motion → no animation) |
 | 2026-07-15 | 2.3.3 | TR-6 (P1): Drag all three splitters → frame-perfect, no transition lag | UI | — | BLOCKED(drag tree/terminal/browser splitters → 60fps, no easing lag from new motion rules) |
 | 2026-07-15 | 2.3.3 | TR-7 (P5): `cargo build` error in terminal → cmd+click `src/x.rs:12` → editor opens at line 12; plain click → nothing | UI | — | BLOCKED(produce a compiler-error path, cmd+click → editor jumps to line; plain click inert) |
 | 2026-07-15 | 2.3.3 | TR-8 (P5): cmd+click `https://github.com` in terminal → OS default browser | UI | — | BLOCKED(echo an external URL, cmd+click → opens in system browser, not in-app pane) |
 | 2026-07-15 | 2.3.3 | TR-9 (P5): `npm run dev` → cmd+click `http://localhost:5173` → in-app browser pane | UI | — | BLOCKED(echo a localhost URL, cmd+click → in-app browser pane shows it) |
+
+Annotation rail placement (Direction A — reflow side-dock). Logic gated PASS by adversarial Opus review (6/6 criteria); rows below are the live-GUI criteria inspection could not confirm — drive each in `npm run tauri dev` with the browser pane + annotate mode.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-15 | 2.3.3 | AR-1: annotate a localhost app → rail sits beside iframe, iframe reflows narrower, app's top-right chrome no longer occluded | UI | — | BLOCKED(arm annotate, add ≥1 note → rail is a column, not an overlay; app nav/menu in top-right stays visible) |
+| 2026-07-15 | 2.3.3 | AR-2: dock-toggle flips rail left↔right; divider sits between frame and rail on both sides | UI | — | BLOCKED(click dock-toggle in rail head → rail moves to opposite edge, border on inner edge) |
+| 2026-07-15 | 2.3.3 | AR-3: collapse → 26px spine + emerald count badge; click spine → re-expands with rows | UI | — | BLOCKED(click collapse → spine w/ badge = note count; click spine → full list returns) |
+| 2026-07-15 | 2.3.3 | AR-4: dock side + collapsed state survive window reload (persisted in settings) | UI | — | BLOCKED(set left-dock + collapsed, reload `tauri dev` window → state restored, not reset to right/expanded) |
+| 2026-07-15 | 2.3.3 | NB-1: navigate_browser with workspace .html path loads it in browser pane with annotation agent (get_annotations sees notes) | UI+MCP | — | BLOCKED(restart tauri dev, call navigate_browser("annotate-test.html") → page renders in browser pane; add annotation → get_annotations returns it) |
+| 2026-07-15 | 2.3.3 | NB-2: navigate_browser with file:// outside root returns MCP error, not ok:true | MCP | — | BLOCKED(call navigate_browser("file:///tmp/x.html") → tool result is invalid_request "path escapes workspace root") |
+| 2026-07-15 | 2.3.3 | NB-3: failed proxy target (external https) shows red ⚠ error in browser URL bar | UI | — | BLOCKED(URL-bar enter "github.com" → placeholder shows "⚠ target github.com is not loopback" in red; focus restores typed URL) |
+
+Annotation rail: editable notes + MCP pull indicator (v2.3.3). Reducer/panel logic unit-tested (604 npm green); rows below are live-GUI behavior — drive in `npm run tauri dev` with the browser pane + annotate mode on a trusted root.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-15 | 2.3.3 | AE-1: click a note in the rail → inline textarea; Enter saves (text persists to .sutra/annotations.json), Esc reverts | UI | — | BLOCKED(annotate an element, click its note text → textarea seeded with note; edit + Enter → row shows new text; reopen + Esc → unchanged) |
+| 2026-07-15 | 2.3.3 | AE-2: agent get_annotations pull → header flips to "Agent pulled …" + ✓ on each pulled row; editing a note clears its ✓ | UI+MCP | — | BLOCKED(trusted root, ask in-app agent to review annotations → header timestamp + per-row ✓ appear; edit one note → that row's ✓ gone, others keep it) |
+| 2026-07-15 | 2.3.3 | AE-3: untrusted root shows "Not shared with the agent — workspace untrusted"; clicking Trust toast flips banner + get_annotations live (no reopen) | UI+MCP | — | BLOCKED(open root via CLI/OS → banner shows untrusted + get_annotations []; click Trust folder toast → banner flips to shared, get_annotations returns notes without reopening workspace) |

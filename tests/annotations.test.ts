@@ -20,6 +20,8 @@ class FakeClassList {
   }
 }
 
+type FakeEvent = { stopPropagation(): void; preventDefault(): void; key?: string; shiftKey?: boolean };
+
 class FakeElement {
   className = "";
   classList = new FakeClassList();
@@ -27,14 +29,16 @@ class FakeElement {
   children: FakeElement[] = [];
   textContent = "";
   id = "";
+  title = "";
+  value = "";
   parentElement: FakeElement | null = null;
-  private listeners = new Map<string, (event?: { stopPropagation(): void }) => void>();
+  private listeners = new Map<string, (event?: FakeEvent) => void>();
 
   set innerHTML(_value: string) {
     this.children = [];
   }
 
-  addEventListener(type: string, listener: (event?: { stopPropagation(): void }) => void): void {
+  addEventListener(type: string, listener: (event?: FakeEvent) => void): void {
     this.listeners.set(type, listener);
   }
 
@@ -62,8 +66,15 @@ class FakeElement {
   }
 
   click(): void {
-    this.listeners.get("click")?.({ stopPropagation() {} });
+    this.fire("click");
   }
+
+  /** Dispatch any listener with a minimal event, for keydown/blur in the edit tests. */
+  fire(type: string, event: Partial<FakeEvent> = {}): void {
+    this.listeners.get(type)?.({ stopPropagation() {}, preventDefault() {}, ...event });
+  }
+
+  focus(): void {}
 
   setAttribute(_name: string, _value: string): void {}
 }
@@ -452,6 +463,126 @@ test("clicking the spine calls rail.setCollapsed(false) to expand", () => {
     const [spine] = findByClassName(ctx.list, "ann-spine");
     spine.click();
     assert.deepEqual(setCollapsedCalls, [false]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Inline note editing + MCP pull indicator (v2.3.3 annotation-rail feedback).
+
+/** Shared fixture: targeted panel with one picked annotation on a known route. */
+function setupWithPick() {
+  const ctx = setup();
+  ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+  ctx.message({
+    origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+    data: { type: "ready", route: "http://app.test/settings" },
+  });
+  ctx.message({
+    origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+    data: { type: "picked", payload: { selector: "#hero", tag: "div", html: "", styles: {}, hints: {} } },
+  });
+  return ctx;
+}
+
+test("clicking the note span swaps it for a textarea seeded with the current feedback", () => {
+  const ctx = setupWithPick();
+  try {
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "feedbackChanged", n: 1, text: "too wide" },
+    });
+    const [fb] = findByClassName(ctx.list, "ann-fb");
+    fb.click();
+    const editors = findByClassName(ctx.list, "ann-fb-edit");
+    assert.equal(editors.length, 1);
+    assert.equal(editors[0].value, "too wide");
+    assert.equal(findByClassName(ctx.list, "ann-fb").length, 0); // span replaced
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("Enter commits the edited note through setFeedback and re-renders the span", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    const [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "align with header";
+    editor.fire("keydown", { key: "Enter", shiftKey: false });
+
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "align with header");
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-fb")[0].textContent, "align with header");
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("blur commits the edited note; Escape cancels without changing feedback", () => {
+  const ctx = setupWithPick();
+  try {
+    // blur commits
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    let [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "from blur";
+    editor.fire("blur");
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "from blur");
+
+    // Escape cancels
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "discarded";
+    editor.fire("keydown", { key: "Escape" });
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "from blur");
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("empty note renders the add-note placeholder", () => {
+  const ctx = setupWithPick();
+  try {
+    const [fb] = findByClassName(ctx.list, "ann-fb");
+    assert.equal(fb.textContent, "add note…");
+    assert.ok(fb.className.includes("empty"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("markPulled marks rows ✓, header shows pulled status, and an edit clears the ✓", () => {
+  const ctx = setupWithPick();
+  try {
+    ctx.panel.setMcpShared(true);
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 0);
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.includes("not pulled yet"));
+
+    ctx.panel.markPulled([1]);
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 1);
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.startsWith("Agent pulled"));
+
+    // Edit after pull: the agent's copy is stale, so the ✓ must disappear.
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "feedbackChanged", n: 1, text: "changed after pull" },
+    });
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 0);
+    // The header timestamp survives — the pull itself still happened.
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.startsWith("Agent pulled"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("untrusted workspace renders the not-shared banner instead of pull status", () => {
+  const ctx = setupWithPick();
+  try {
+    // mcpShared defaults to false (trust is proven, not assumed).
+    const [hint] = findByClassName(ctx.list, "ann-hint");
+    assert.ok(hint.textContent.includes("workspace untrusted"));
+    assert.ok(hint.className.includes("untrusted"));
   } finally {
     ctx.restore();
   }

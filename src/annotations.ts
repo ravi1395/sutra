@@ -1,6 +1,6 @@
 // Parent-side canonical owner of annotation state. Bridges the in-iframe agent
 // (validated postMessage) and the side list. DOM-bound; verified manually.
-import { reduce, isTrustedMessage, type Annotation, type AnnAction, type AnnotationTheme } from "./annotation-core";
+import { reduce, isTrustedMessage, formatAgo, type Annotation, type AnnAction, type AnnotationTheme } from "./annotation-core";
 import { annotationId, buildAnnotationContextPack } from "./annotation-context";
 import { annotationsForRoute, backupCorruptAnnotationsFile, loadAnnotations, saveAnnotations, type AnnotationPersistence } from "./annotation-store";
 import type { Task } from "./tasks";
@@ -27,6 +27,18 @@ export class AnnotationsPanel {
   private onDeliver: ((task: Task, prompt: string) => Promise<void>) | null = null;
   private lastTheme: AnnotationTheme | null = null;
   private disposeTheme: (() => void) | null = null;
+  /** Annotation number currently being edited inline in the rail, if any. */
+  private editingN: number | null = null;
+  /** Session-only pull tracking: n → timestamp of the last MCP fetch that included it.
+   * Lives outside the Annotation model on purpose — the store persists whole
+   * annotations, and "read by agent" must never survive a restart (the next
+   * agent session has not pulled anything). ✓ means "agent's copy matches what
+   * you see", so edits/removals invalidate entries (see dispatch). */
+  private sentAt = new Map<number, number>();
+  private lastPulledAt: number | null = null;
+  /** Whether annotations are currently exposed over MCP (workspace trust gate). */
+  private mcpShared = false;
+  private statusTick: ReturnType<typeof setTimeout> | null = null;
   /** Surfaces recoverable load warnings (corrupt/partial annotations file) to the shell. */
   onWarnings: ((warnings: string[]) => void) | null = null;
   /** Resolves once the in-flight setRoot() hydration completes. Inbound browser
@@ -45,6 +57,9 @@ export class AnnotationsPanel {
     this.toggleBtn.addEventListener("click", () => this.toggle());
     window.addEventListener("message", (e) => this.onMessage(e));
     window.addEventListener("keydown", (e) => {
+      // An in-progress note edit owns Escape (cancel) before the armed toggle,
+      // otherwise cancelling an edit while armed would also exit picking mode.
+      if (e.key === "Escape" && this.editingN !== null) { e.preventDefault(); this.cancelEdit(); return; }
       if (e.key === "Escape" && this.armed) { e.preventDefault(); this.toggle(); }
     }, true);
     // Mirrors PreviewController/terminal.ts's onThemeChange self-subscription: live-retheme
@@ -57,6 +72,7 @@ export class AnnotationsPanel {
   dispose(): void {
     this.disposeTheme?.();
     this.disposeTheme = null;
+    if (this.statusTick !== null) { clearTimeout(this.statusTick); this.statusTick = null; }
   }
 
   /** Last resolved theme colors, if pushTheme() has run at least once — exposed for tests
@@ -84,6 +100,9 @@ export class AnnotationsPanel {
     // expose the previous project's annotations during hydration.
     this.state = [];
     this.route = "";
+    this.editingN = null;
+    this.sentAt.clear();
+    this.lastPulledAt = null;
     this.render();
     if (!root) { this.hydrating = null; return; }
     let resolveHydrating!: () => void;
@@ -136,6 +155,24 @@ export class AnnotationsPanel {
     return annotationsForRoute(this.state, this.route);
   }
 
+  /** Record that the MCP agent just pulled these annotations (by n). Drives the
+   * per-row ✓ and the header "agent pulled …" status. An empty pull still counts
+   * as a pull for the header timestamp. */
+  markPulled(ns: number[]): void {
+    const now = Date.now();
+    for (const n of ns) this.sentAt.set(n, now);
+    this.lastPulledAt = now;
+    this.render();
+  }
+
+  /** Trust gate mirror: whether get_annotations currently exposes this workspace's
+   * annotations. Drives the header banner (shared vs "not shared — untrusted"). */
+  setMcpShared(shared: boolean): void {
+    if (this.mcpShared === shared) return;
+    this.mcpShared = shared;
+    this.render();
+  }
+
   private toggle() {
     this.armed = !this.armed;
     this.toggleBtn.classList.toggle("active", this.armed);
@@ -152,6 +189,9 @@ export class AnnotationsPanel {
   }
 
   private dispatch(action: AnnAction) {
+    // ✓ means "agent's copy matches what you see": any feedback edit or removal
+    // invalidates the pulled copy for that annotation.
+    if (action.type === "setFeedback" || action.type === "remove") this.sentAt.delete(action.n);
     this.state = reduce(this.state, action);
     if (this.root) {
       const root = this.root;
@@ -202,6 +242,30 @@ export class AnnotationsPanel {
         this.dispatch({ type: "reanchorResult", route: m.route, resolved: m.resolved });
         break;
     }
+  }
+
+  /** Commit an inline note edit through the same reducer path the pick-time
+   * popup uses (setFeedback → save → render). No-op dispatch when unchanged. */
+  private commitEdit(n: number, text: string) {
+    this.editingN = null;
+    const current = this.state.find((a) => a.n === n);
+    if (current && current.feedback !== text) this.dispatch({ type: "setFeedback", n, text });
+    else this.render();
+  }
+
+  private cancelEdit() {
+    this.editingN = null;
+    this.render();
+  }
+
+  /** While a pull timestamp is showing, refresh the relative-time label every 30 s.
+   * unref'd where available so a pending tick never keeps a test process alive. */
+  private scheduleStatusTick() {
+    if (this.statusTick !== null) { clearTimeout(this.statusTick); this.statusTick = null; }
+    if (this.lastPulledAt === null) return;
+    const t = setTimeout(() => { this.statusTick = null; this.render(); }, 30_000);
+    (t as unknown as { unref?: () => void }).unref?.();
+    this.statusTick = t;
   }
 
   private render() {
@@ -258,11 +322,18 @@ export class AnnotationsPanel {
     head.append(title, dockToggle, collapse);
     this.listEl.appendChild(head);
 
-    // Trust banner: tells the user where their feedback goes.
+    // Status banner: tells the user where their feedback goes AND whether the
+    // agent has actually pulled it (get_annotations is pull-based — nothing is
+    // "sent" until the agent asks).
     const hint = document.createElement("div");
-    hint.className = "ann-hint";
-    hint.textContent = "Annotations are sent directly to the MCP agent.";
+    hint.className = "ann-hint" + (!this.mcpShared ? " untrusted" : this.lastPulledAt !== null ? " pulled" : "");
+    hint.textContent = !this.mcpShared
+      ? "Not shared with the agent — workspace untrusted."
+      : this.lastPulledAt === null
+        ? "Agent reads these via MCP — not pulled yet."
+        : `Agent pulled ${formatAgo(Date.now() - this.lastPulledAt)}.`;
     this.listEl.appendChild(hint);
+    this.scheduleStatusTick();
 
     // Armed-state instruction so the picking mode is obvious.
     if (this.armed) {
@@ -284,9 +355,35 @@ export class AnnotationsPanel {
       sel.className = "ann-sel";
       sel.textContent = a.selector;
 
-      const fb = document.createElement("span");
-      fb.className = "ann-fb";
-      fb.textContent = a.feedback || "…";
+      // Note: inline-editable. Click swaps the span for a textarea; Enter/blur
+      // commits through the same setFeedback path as the pick-time popup.
+      let fb: HTMLElement;
+      if (this.editingN === a.n) {
+        const ta = document.createElement("textarea");
+        ta.className = "ann-fb-edit";
+        ta.value = a.feedback;
+        ta.setAttribute("aria-label", `Edit note for annotation ${a.n}`);
+        ta.addEventListener("click", (e) => e.stopPropagation());
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.commitEdit(a.n, ta.value); }
+          else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.cancelEdit(); }
+        });
+        ta.addEventListener("blur", () => { if (this.editingN === a.n) this.commitEdit(a.n, ta.value); });
+        // Focus after the row is attached; optional-chained for the test fakes.
+        queueMicrotask(() => ta.focus?.());
+        fb = ta;
+      } else {
+        const span = document.createElement("span");
+        span.className = "ann-fb" + (a.feedback ? "" : " empty");
+        span.textContent = a.feedback || "add note…";
+        span.title = "Click to edit note";
+        span.addEventListener("click", (e) => {
+          e.stopPropagation(); // row click scrolls to the pin — editing must not
+          this.editingN = a.n;
+          this.render();
+        });
+        fb = span;
+      }
 
       const del = document.createElement("button");
       del.className = "ann-del";
@@ -308,7 +405,15 @@ export class AnnotationsPanel {
       row.addEventListener("mouseleave", () => this.postToAgent({ type: "flashPin", n: a.n, on: false }));
       row.addEventListener("click", () => this.postToAgent({ type: "scrollToPin", n: a.n }));
 
-      row.append(num, sel, fb, del);
+      row.append(num, sel, fb);
+      if (this.sentAt.has(a.n)) {
+        const sent = document.createElement("span");
+        sent.className = "ann-sent";
+        sent.textContent = "✓";
+        sent.title = "Read by agent";
+        row.appendChild(sent);
+      }
+      row.appendChild(del);
       if (this.tasks.length && this.onAttach) {
         const task = this.tasks.find((candidate) => candidate.annotationIds.includes(annotationId(a)));
         const taskSelect = document.createElement("select");

@@ -512,7 +512,14 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations().map(redactAnnotationForExternal) : [],
+    annotations: () => {
+      if (!currentWorkspaceTrusted) return [];
+      const anns = annotations.currentRouteAnnotations();
+      // Stamp the pull so the rail can show "✓ read by agent" per row + a
+      // header timestamp — get_annotations is the only moment delivery happens.
+      annotations.markPulled(anns.map((a) => a.n));
+      return anns.map(redactAnnotationForExternal);
+    },
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
@@ -931,6 +938,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   persistWorkspaceSession();
   suppressSessionSave = true;
   currentWorkspaceTrusted = false;
+  annotations.setMcpShared(false);
   try {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
@@ -956,6 +964,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     if (currentRoot !== dir) return;
     await annotations.setRoot(dir);
     currentWorkspaceTrusted = await isWorkspaceTrusted(dir).catch(() => false);
+    annotations.setMcpShared(currentWorkspaceTrusted);
     // Publish the MCP root only after annotation state is hydrated; queries
     // cannot observe the previous project's annotations during a switch.
     void mcpSetRoot(dir);
@@ -1857,6 +1866,12 @@ function showTrustToast(root: string): void {
   trustBtn.onclick = () => {
     void (async () => {
       await trustWorkspace(root); // must land before the trust re-check below
+      // Sync the in-memory gate too: MCP get_annotations and the rail banner
+      // read this flag, and without it the grant only took effect on reopen.
+      if (currentRoot === root) {
+        currentWorkspaceTrusted = true;
+        annotations.setMcpShared(true);
+      }
       hideTrustToast();
       void runDiagnostics(root); // run the now-permitted jobs immediately
       // Top-level reload so the now-trusted root runs its one-time worktree

@@ -89,6 +89,19 @@ test("isTrustedMessage requires both origin and source", () => {
   assert.equal(isTrustedMessage({ origin: "o", source: {} }, "o", win), false);
 });
 
+import { formatAgo } from "../src/annotation-core";
+
+test("formatAgo buckets: just now / seconds / minutes / hours", () => {
+  assert.equal(formatAgo(0), "just now");
+  assert.equal(formatAgo(9_000), "just now");
+  assert.equal(formatAgo(10_000), "10s ago");
+  assert.equal(formatAgo(59_000), "59s ago");
+  assert.equal(formatAgo(60_000), "1m ago");
+  assert.equal(formatAgo(59 * 60_000), "59m ago");
+  assert.equal(formatAgo(2 * 3_600_000), "2h ago");
+  assert.equal(formatAgo(-5_000), "just now"); // clock skew never renders negative
+});
+
 import { resolveUiQuery } from "../src/annotation-core";
 
 const providers = {
