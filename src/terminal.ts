@@ -1,7 +1,7 @@
 // Terminal subsystem: xterm.js front-ends bound to portable-pty sessions in Rust.
 // Multiple terminals; toggling the panel only hides the DOM — PTYs keep running,
 // so reopening resumes the live session.
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -21,6 +21,7 @@ import {
 import { icon } from "./icons";
 import { isMod } from "./shortcuts";
 import { isControlSequence } from "./terminal-input";
+import { cssVar, onThemeChange, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
 
 interface Term {
   id: string;
@@ -34,12 +35,40 @@ interface Term {
   currentInput: string; // Current line being typed
 }
 
-const THEME = {
-  background: "#181818",
-  foreground: "#cccccc",
-  cursor: "#cccccc",
-  selectionBackground: "#264f78",
-};
+/** Build the live xterm theme from ink/washi CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
+export function buildTermTheme(): ITheme {
+  return {
+    background: cssVar("--bg-2", D.background),
+    foreground: cssVar("--fg", D.foreground),
+    cursor: cssVar("--fg", D.cursor),
+    cursorAccent: cssVar("--bg-2", D.cursorAccent),
+    selectionBackground: cssVar("--em-wash", D.selectionBackground),
+    black: cssVar("--ansi-black", D.black),
+    red: cssVar("--ansi-red", D.red),
+    green: cssVar("--ansi-green", D.green),
+    yellow: cssVar("--ansi-yellow", D.yellow),
+    blue: cssVar("--ansi-blue", D.blue),
+    magenta: cssVar("--ansi-magenta", D.magenta),
+    cyan: cssVar("--ansi-cyan", D.cyan),
+    white: cssVar("--ansi-white", D.white),
+    brightBlack: cssVar("--ansi-bright-black", D.brightBlack),
+    brightRed: cssVar("--ansi-bright-red", D.brightRed),
+    brightGreen: cssVar("--ansi-bright-green", D.brightGreen),
+    brightYellow: cssVar("--ansi-bright-yellow", D.brightYellow),
+    brightBlue: cssVar("--ansi-bright-blue", D.brightBlue),
+    brightMagenta: cssVar("--ansi-bright-magenta", D.brightMagenta),
+    brightCyan: cssVar("--ansi-bright-cyan", D.brightCyan),
+    brightWhite: cssVar("--ansi-bright-white", D.brightWhite),
+  };
+}
+
+/** Re-theme every live terminal session in place; xterm repaints on `options.theme` assignment.
+ *  Exported (rather than inlined in the subscription) so tests can drive it against fake
+ *  sessions without a MutationObserver/DOM. */
+export function retheme(sessions: ReadonlyArray<{ term: Pick<Terminal, "options"> }>): void {
+  const theme = buildTermTheme();
+  for (const s of sessions) s.term.options.theme = theme;
+}
 
 // Random PTY ids survive HMR reloads — the Rust process keeps running across hot
 // reloads, so a counter reset would re-issue the same id and pick up the old
@@ -153,6 +182,11 @@ export class TerminalManager {
         this.renderTabs();
       }
     });
+
+    // Single subscription for the (singleton) manager, not one per terminal: re-theme every
+    // live session on ink/washi toggle. A terminal spawned after a toggle already reads
+    // current tokens at construction, so it never needs a catch-up call here.
+    onThemeChange(() => retheme(this.terms));
   }
 
   get count(): number {
@@ -226,7 +260,7 @@ export class TerminalManager {
     const num = ++this.seq; // display number, resets per workspace
     const id = newPtyId();
     const term = new Terminal({
-      theme: THEME,
+      theme: buildTermTheme(),
       fontFamily: this.fontFamily,
       fontSize: this.fontSize,
       cursorBlink: !this.reducedMotion && !this.blinkPaused,
