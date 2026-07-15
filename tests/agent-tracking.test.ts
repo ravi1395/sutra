@@ -179,3 +179,222 @@ test("suppressibleCancelledIds swallows a cancel that throws (W3.7)", async () =
   });
   assert.deepEqual(out, []);
 });
+
+// --- Turn-UX rehaul P1: collapsed summary row + dropdown ---
+import {
+  agentLabel,
+  olderTurnsCount,
+  recentClosedTurns,
+  relTime,
+  turnDropdownEl,
+  turnHeaderEl,
+  turnSummaryEl,
+  turnSummaryState,
+} from "../src/agent-tracking";
+
+// Minimal fake DOM: the summary/dropdown builders only createElement, set
+// className/textContent/title/style, and appendChild — mirrors the FakeElement
+// shim used by tests/debugger-sidebar.test.ts and tests/rollback-dialog.test.ts.
+class FakeElement {
+  tagName: string;
+  className = "";
+  textContent = "";
+  title = "";
+  disabled = false;
+  onclick: ((ev?: { stopPropagation: () => void }) => void) | null = null;
+  style: Record<string, string> = {};
+  children: FakeElement[] = [];
+  constructor(tagName = "div") {
+    this.tagName = tagName;
+  }
+  appendChild(child: FakeElement): FakeElement {
+    this.children.push(child);
+    return child;
+  }
+}
+
+function setupFakeDom(): () => void {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: (tag: string) => new FakeElement(tag) } as unknown as Document;
+  return () => {
+    globalThis.document = previous;
+  };
+}
+
+function findAllByClass(el: FakeElement, cls: string): FakeElement[] {
+  const out: FakeElement[] = [];
+  if (el.className.split(" ").includes(cls)) out.push(el);
+  for (const child of el.children) out.push(...findAllByClass(child, cls));
+  return out;
+}
+
+const closedTurn = (id: number, closedAt: number, overrides: Partial<Turn> = {}): Turn => ({
+  id,
+  root: "/r",
+  agentKind: "claude",
+  boundarySource: "hook",
+  openedAt: closedAt - 500,
+  closedAt,
+  files: [{ path: `f${id}.ts`, beforeHash: "b", afterHash: "a", snapshotted: true }],
+  testStatus: null,
+  rolledBack: false,
+  ...overrides,
+});
+
+const openTurnFixture = (id: number, nFiles: number): Turn => ({
+  id,
+  root: "/r",
+  agentKind: "unknown",
+  boundarySource: "open",
+  openedAt: id * 1000,
+  closedAt: null,
+  files: Array.from({ length: nFiles }, (_, i) => ({ path: `o${i}.ts`, beforeHash: "b", afterHash: "a", snapshotted: true })),
+  testStatus: null,
+  rolledBack: false,
+});
+
+test("agentLabel: unknown degrades to agent, other kinds pass through", () => {
+  assert.equal(agentLabel("unknown"), "agent");
+  assert.equal(agentLabel("claude"), "claude");
+  assert.equal(agentLabel("codex"), "codex");
+});
+
+test("relTime: bucket boundaries", () => {
+  const now = 1_000_000_000;
+  assert.equal(relTime(now - 10_000, now), "just now");
+  assert.equal(relTime(now - 59_000, now), "just now");
+  assert.equal(relTime(now - 120_000, now), "2m ago");
+  assert.equal(relTime(now - 3 * 3_600_000, now), "3h ago");
+  assert.equal(relTime(now - 2 * 24 * 3_600_000, now), "2d ago");
+  assert.equal(relTime(now + 5_000, now), "just now"); // never negative
+});
+
+test("turnSummaryState: 0 turns (or only synthetic rollback turns) is hidden", () => {
+  assert.deepEqual(turnSummaryState([], 0), { kind: "hidden" });
+  const synthetic = closedTurn(1, 1000, { boundarySource: "rollback" });
+  assert.deepEqual(turnSummaryState([synthetic], 2000), { kind: "hidden" });
+});
+
+test("turnSummaryState: resting reports count/agent/relTime/chip from the latest closed turn", () => {
+  const t1 = closedTurn(1, 1000);
+  const t2 = closedTurn(2, 2000, { agentKind: "unknown", testStatus: { state: "pass", outputTail: "" } });
+  const state = turnSummaryState([t1, t2], 122_000); // 2m after t2's closedAt (2000)
+  assert.deepEqual(state, { kind: "resting", count: 2, agent: "agent", relTime: "2m ago", chipClass: "turn-chip--pass", chipLabel: "pass" });
+});
+
+test("turnSummaryState: open turn wins regardless of closed count, reports file count", () => {
+  const t1 = closedTurn(1, 1000);
+  const open = openTurnFixture(2, 3);
+  assert.deepEqual(turnSummaryState([t1, open], 5000), { kind: "open", fileCount: 3 });
+});
+
+test("recentClosedTurns / olderTurnsCount: slices to newest-6, remaining count for footer", () => {
+  const turns = Array.from({ length: 8 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+  assert.deepEqual(recentClosedTurns(turns).map((t) => t.id), [8, 7, 6, 5, 4, 3]);
+  assert.equal(olderTurnsCount(turns), 2);
+  const five = turns.slice(0, 5);
+  assert.deepEqual(recentClosedTurns(five).map((t) => t.id), [5, 4, 3, 2, 1]);
+  assert.equal(olderTurnsCount(five), 0);
+});
+
+test("turnSummaryEl: hidden state renders a display:none row", () => {
+  const restore = setupFakeDom();
+  try {
+    const row = turnSummaryEl([], 0, () => {}) as unknown as FakeElement;
+    assert.equal(row.style.display, "none");
+  } finally {
+    restore();
+  }
+});
+
+test("turnSummaryEl: resting label + chip", () => {
+  const restore = setupFakeDom();
+  try {
+    const t1 = closedTurn(1, 1000, { agentKind: "unknown", testStatus: { state: "fail", outputTail: "" } });
+    const row = turnSummaryEl([t1], 61_000, () => {}) as unknown as FakeElement;
+    const label = findAllByClass(row, "turn-summary-label")[0];
+    assert.equal(label.textContent, "⟲ 1 turn · agent · 1m ago");
+    assert.equal(findAllByClass(row, "turn-chip--fail").length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("turnSummaryEl: open state shows pulsing dot + file count, no chip", () => {
+  const restore = setupFakeDom();
+  try {
+    const open = openTurnFixture(1, 3);
+    const row = turnSummaryEl([open], 0, () => {}) as unknown as FakeElement;
+    assert.equal(findAllByClass(row, "turn-summary-dot").length, 1);
+    const label = findAllByClass(row, "turn-summary-label")[0];
+    assert.equal(label.textContent, "turn open · 3 files…");
+  } finally {
+    restore();
+  }
+});
+
+test("turnHeaderEl: unknown agentKind renders as agent, includes relTime", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(7, 1000, { agentKind: "unknown" });
+    const header = turnHeaderEl(t, [t], 61_000, () => {}) as unknown as FakeElement;
+    const label = findAllByClass(header, "turn-header-label")[0];
+    assert.equal(label.textContent, "Turn 7 · agent · 1 file · 1m ago");
+  } finally {
+    restore();
+  }
+});
+
+test("turnHeaderEl: rolledBack turn is dimmed with the rollback button hidden entirely", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(3, 1000, { rolledBack: true });
+    const header = turnHeaderEl(t, [t], 1000, () => {}) as unknown as FakeElement;
+    assert.ok(header.className.split(" ").includes("turn-header--rolled-back"));
+    assert.equal(findAllByClass(header, "turn-rollback").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("turnHeaderEl: non-rolledBack turn keeps a live rollback button", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(4, 1000);
+    const header = turnHeaderEl(t, [t], 1000, () => {}) as unknown as FakeElement;
+    const buttons = findAllByClass(header, "turn-rollback");
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].disabled, false);
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: slices to last 6 newest-first and shows the older-turns footer", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = Array.from({ length: 9 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+    const dropdown = turnDropdownEl(turns, 9000, () => {}) as unknown as FakeElement;
+    const labels = findAllByClass(dropdown, "turn-header-label").map((el) => el.textContent);
+    assert.deepEqual(
+      labels.map((t) => t.split(" · ")[0]),
+      ["Turn 9", "Turn 8", "Turn 7", "Turn 6", "Turn 5", "Turn 4"],
+    );
+    const footer = findAllByClass(dropdown, "turn-dropdown-footer");
+    assert.equal(footer.length, 1);
+    assert.equal(footer[0].textContent, "3 older turns…");
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: no footer when 6 or fewer closed turns exist", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = Array.from({ length: 6 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+    const dropdown = turnDropdownEl(turns, 6000, () => {}) as unknown as FakeElement;
+    assert.equal(findAllByClass(dropdown, "turn-dropdown-footer").length, 0);
+  } finally {
+    restore();
+  }
+});

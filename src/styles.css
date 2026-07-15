@@ -1544,6 +1544,7 @@ button:hover {
   overflow: hidden;
 }
 #diff-pane {
+  position: relative; /* positioning context for .turn-dropdown's max-height: 40% */
   flex: 0 0 45%;
   display: flex;
   flex-direction: column;
@@ -3640,6 +3641,8 @@ button:hover {
   cursor: pointer;
 }
 .turn-header:hover { background: var(--bg-3); }
+.turn-header--rolled-back { opacity: 0.55; }
+.turn-header--rolled-back .turn-header-label { text-decoration: line-through; }
 .turn-chip--pass { color: var(--em); border-color: var(--em-dim); }
 .turn-chip--fail { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 55%, transparent); }
 .turn-chip--running { color: var(--modified); border-color: color-mix(in srgb, var(--modified) 55%, transparent); }
@@ -3714,9 +3717,51 @@ button:hover {
   border-top: 1px solid var(--line-menu);
 }
 
-/* -- turn strip: turn headers above the changed-file list -- */
+/* -- turn strip: collapsed summary row + on-demand dropdown, above the
+   changed-file list (turn-UX rehaul P1: replaces the old per-turn stack) -- */
 #turn-strip:empty { display: none; }
 #turn-strip { border-bottom: 1px solid var(--line); }
+.turn-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.turn-summary:hover { background: var(--bg-3); }
+.turn-summary-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-summary-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--modified);
+  animation: turn-summary-pulse 1.2s ease-in-out infinite;
+}
+@keyframes turn-summary-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.turn-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 40%;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.85);
+}
+.turn-dropdown-footer {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-align: center;
+}
 .turn-rollback {
   margin-left: auto;
   font-size: 11px;

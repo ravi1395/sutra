@@ -95,7 +95,7 @@ import {
   type AgentTrackingStatus,
   type Turn,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnHeaderEl, whisperText } from "./agent-tracking";
+import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnDropdownEl, turnSummaryEl, turnSummaryState, whisperText } from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -1074,10 +1074,48 @@ function setTerminal(on: boolean): void {
 btnTerm.onclick = () => setTerminal(!drawerState.open);
 terminals.onTabsChanged = renderTerminalSeam;
 
-// ---- turn strip (harness v2) ----
-// Turn headers (Turn N · agent · N files · test chip) above the changed-file
-// list; Rollback opens the per-file checklist dialog backed by turn snapshots,
-// with live disk hashes powering human-touched detection.
+// ---- turn strip (harness v2 → turn-UX rehaul P1) ----
+// Collapsed to a single .turn-summary row (⟲ N turns · agent · relTime [chip])
+// above the changed-file list; click toggles a .turn-dropdown overlay with the
+// last 6 closed turns (turn-header rows). Rollback opens the per-file
+// checklist dialog backed by turn snapshots, with live disk hashes powering
+// human-touched detection.
+let turnDropdownOpen = false;
+let turnDropdownDismissers: { onKey: (ev: KeyboardEvent) => void; onMouse: (ev: MouseEvent) => void } | null = null;
+
+function closeTurnDropdown(): void {
+  turnDropdownOpen = false;
+  if (turnDropdownDismissers) {
+    document.removeEventListener("keydown", turnDropdownDismissers.onKey);
+    document.removeEventListener("mousedown", turnDropdownDismissers.onMouse);
+    turnDropdownDismissers = null;
+  }
+}
+
+// Looks up summary/dropdown by id at event-time (not a captured element
+// reference) since renderTurnStrip rebuilds both on every poll tick while the
+// dropdown may be open; a stale captured node would misreport "outside".
+function openTurnDropdown(root: string): void {
+  turnDropdownOpen = true;
+  const isInside = (t: Node) =>
+    !!document.getElementById("turn-summary")?.contains(t) || !!document.getElementById("turn-dropdown")?.contains(t);
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key === "Escape") {
+      closeTurnDropdown();
+      renderTurnStrip(root);
+    }
+  };
+  const onMouse = (ev: MouseEvent) => {
+    if (!isInside(ev.target as Node)) {
+      closeTurnDropdown();
+      renderTurnStrip(root);
+    }
+  };
+  turnDropdownDismissers = { onKey, onMouse };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("mousedown", onMouse);
+}
+
 function renderTurnStrip(root: string): void {
   const pane = document.getElementById("diff-pane");
   if (!pane) return;
@@ -1089,6 +1127,13 @@ function renderTurnStrip(root: string): void {
   }
   strip.textContent = "";
   const turns = getTurns(root);
+  // 0 non-synthetic turns: leave the strip with no children at all (not just
+  // a display:none row) so #turn-strip:empty collapses it, matching the
+  // pre-rehaul "hidden entirely" behavior.
+  if (turnSummaryState(turns, Date.now()).kind === "hidden") {
+    if (turnDropdownOpen) closeTurnDropdown();
+    return;
+  }
   const onRollback = (turn: Turn) => {
     openRollbackDialog(root, turn, {
       turns,
@@ -1131,11 +1176,21 @@ function renderTurnStrip(root: string): void {
     });
   };
   // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
-  // rollback can itself be undone; they aren't a real agent turn and have no
-  // useful strip entry of their own.
-  for (const turn of turns) {
-    if (turn.boundarySource === "rollback") continue;
-    strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  // rollback can itself be undone; they aren't a real agent turn and are
+  // filtered out of both the summary count and the dropdown (agent-tracking's
+  // closedTurns / turnSummaryState).
+  const summary = turnSummaryEl(turns, Date.now(), () => {
+    if (turnDropdownOpen) closeTurnDropdown();
+    else openTurnDropdown(root);
+    renderTurnStrip(root);
+  });
+  summary.id = "turn-summary";
+  strip.appendChild(summary);
+  if (turnDropdownOpen) {
+    const dropdown = turnDropdownEl(turns, Date.now(), onRollback);
+    dropdown.id = "turn-dropdown";
+    dropdown.style.top = `${summary.offsetHeight}px`;
+    strip.appendChild(dropdown);
   }
 }
 
