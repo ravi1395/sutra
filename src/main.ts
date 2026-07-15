@@ -22,7 +22,7 @@ import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
 import { redactAnnotationForExternal } from "./annotation-context";
-import { AnnotationsPanel } from "./annotations";
+import { AnnotationsPanel, type RailLayout } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks, toMark } from "./editor";
 import { DebugSession, resolveDebugUiCore } from "./debug-session";
@@ -318,10 +318,17 @@ const browser = new BrowserPane(
   $<HTMLButtonElement>("btn-reload"),
   $<HTMLButtonElement>("btn-browser-maximize"),
 );
+const railLayout: RailLayout = {
+  get: () => ({ dockSide: settings.annotationDockSide, collapsed: settings.annotationRailCollapsed }),
+  setDockSide: (side) => persistSettings({ ...settings, annotationDockSide: side }),
+  setCollapsed: (collapsed) => persistSettings({ ...settings, annotationRailCollapsed: collapsed }),
+};
 const annotations = new AnnotationsPanel(
   browserFrame,
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
+  undefined,
+  railLayout,
 );
 // Corrupt/partial annotations.json is quarantined to a .bak by the panel
 // itself; this only needs to tell the user it happened. Reuses the same

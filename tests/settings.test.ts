@@ -136,3 +136,21 @@ test("formatOnSave defaults to true and round-trips through clampSettings", () =
   assert.equal(clampSettings({ formatOnSave: false }).formatOnSave, false);
   assert.equal(clampSettings({ formatOnSave: "nonsense" as unknown as boolean }).formatOnSave, true);
 });
+
+test("annotation rail settings round-trip through serialize/deserialize", () => {
+  const s = clampSettings({ annotationDockSide: "left", annotationRailCollapsed: true });
+  const round = deserializeSettings(serializeSettings(s));
+  assert.equal(round.annotationDockSide, "left");
+  assert.equal(round.annotationRailCollapsed, true);
+});
+
+test("annotation rail settings default to right/expanded when keys are missing", () => {
+  const s = deserializeSettings("{}");
+  assert.equal(s.annotationDockSide, "right");
+  assert.equal(s.annotationRailCollapsed, false);
+});
+
+test("annotation rail dock side rejects garbage values", () => {
+  const s = deserializeSettings(JSON.stringify({ annotationDockSide: "up" }));
+  assert.equal(s.annotationDockSide, "right");
+});

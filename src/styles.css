@@ -2489,9 +2489,20 @@ button:hover {
   border: 0;
   background: white;
   min-height: 0;
+  min-width: 0;
 }
 #browser-resizer.hidden {
   display: none;
+}
+#browser-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  min-width: 0;
+}
+#browser-body.dock-left {
+  flex-direction: row-reverse;
 }
 
 /* ---- task control plane ---- */
@@ -3441,7 +3452,15 @@ button:hover {
 .tm-tpl-order { width: 100%; }
 
 /* ---- annotation side list ---- */
-.annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg); }
+.annotation-list { flex: 0 0 248px; overflow: auto; background: var(--panel-bg); border-left: 1px solid var(--line); }
+#browser-body.dock-left .annotation-list { border-left: 0; border-right: 1px solid var(--line); }
+.annotation-list.collapsed { flex-basis: 26px; overflow: hidden; }
+.ann-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--em-dim); }
+.ann-rail-head .rail-btn { background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
+.ann-rail-head .rail-btn:hover { color: var(--em); }
+.ann-rail-title { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--em); }
+.ann-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; cursor: pointer; height: 100%; }
+.ann-spine .ann-spine-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--em); color: var(--on-em); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
 .annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; cursor: pointer; }
 .annotation-row:hover { background: var(--em-wash-row); }
 .annotation-row.stale { opacity: 0.5; }

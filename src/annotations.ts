@@ -6,6 +6,14 @@ import { annotationsForRoute, backupCorruptAnnotationsFile, loadAnnotations, sav
 import type { Task } from "./tasks";
 import { cssVar, onThemeChange } from "./theme-tokens";
 
+/** Injected accessor for the annotation rail's dock side + collapsed state, so the panel
+ *  can render its chrome without owning layout persistence itself. */
+export interface RailLayout {
+  get(): { dockSide: "left" | "right"; collapsed: boolean };
+  setDockSide(side: "left" | "right"): void;
+  setCollapsed(collapsed: boolean): void;
+}
+
 export class AnnotationsPanel {
   private state: Annotation[] = [];
   private route = "";
@@ -32,6 +40,7 @@ export class AnnotationsPanel {
     private listEl: HTMLElement,
     private toggleBtn: HTMLButtonElement,
     private persistence?: AnnotationPersistence,
+    private rail?: RailLayout,
   ) {
     this.toggleBtn.addEventListener("click", () => this.toggle());
     window.addEventListener("message", (e) => this.onMessage(e));
@@ -204,6 +213,50 @@ export class AnnotationsPanel {
     // Count badge on the toggle: shows pending annotations at a glance.
     this.toggleBtn.textContent = anns.length > 0 ? `⊕ ${anns.length}` : "⊕";
     if (!visible) return;
+
+    // Rail chrome: dock side on the shared body ancestor, collapsed state on the list
+    // itself. Defaults keep behavior identical when no RailLayout is injected.
+    const layout = this.rail?.get() ?? { dockSide: "right" as const, collapsed: false };
+    const body = this.listEl.closest("#browser-body");
+    body?.classList.toggle("dock-left", layout.dockSide === "left");
+    this.listEl.classList.toggle("collapsed", layout.collapsed);
+
+    if (layout.collapsed) {
+      // Collapsed: render only the spine (count badge), never the rows.
+      const spine = document.createElement("div");
+      spine.className = "ann-spine";
+      const badge = document.createElement("span");
+      badge.className = "ann-spine-badge";
+      badge.textContent = String(anns.length);
+      spine.appendChild(badge);
+      spine.addEventListener("click", () => { this.rail?.setCollapsed(false); this.render(); });
+      this.listEl.appendChild(spine);
+      return;
+    }
+
+    // Expanded: header row with dock-toggle + collapse controls, above the existing
+    // hint/rows rendering.
+    const head = document.createElement("div");
+    head.className = "ann-rail-head";
+    const title = document.createElement("span");
+    title.className = "ann-rail-title";
+    title.textContent = "Annotations";
+    const dockToggle = document.createElement("button");
+    dockToggle.className = "rail-btn ann-dock-toggle";
+    dockToggle.setAttribute("aria-label", "Toggle dock side");
+    dockToggle.textContent = "⇄";
+    dockToggle.addEventListener("click", () => {
+      const next = layout.dockSide === "left" ? "right" : "left";
+      this.rail?.setDockSide(next);
+      this.render();
+    });
+    const collapse = document.createElement("button");
+    collapse.className = "rail-btn ann-collapse";
+    collapse.setAttribute("aria-label", "Collapse");
+    collapse.textContent = "⟩";
+    collapse.addEventListener("click", () => { this.rail?.setCollapsed(true); this.render(); });
+    head.append(title, dockToggle, collapse);
+    this.listEl.appendChild(head);
 
     // Trust banner: tells the user where their feedback goes.
     const hint = document.createElement("div");

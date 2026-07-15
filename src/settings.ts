@@ -17,6 +17,8 @@ export interface UserSettings {
   theme: "ink" | "washi";
   diagnosticsEnabled: boolean;
   quietWindowMs: number; // harness v2 turn quiet-window; clamped 3000–60000
+  annotationDockSide: "left" | "right";
+  annotationRailCollapsed: boolean;
 }
 
 // Whitelists: every multi-choice setting validates against one of these.
@@ -49,6 +51,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   theme: "ink",
   diagnosticsEnabled: true,
   quietWindowMs: 10000,
+  annotationDockSide: "right",
+  annotationRailCollapsed: false,
 };
 
 // Legacy localStorage key — read once (loadSettings) to port a pre-migration
@@ -78,6 +82,10 @@ function pickBool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function pickDockSide(value: unknown, fallback: "left" | "right"): "left" | "right" {
+  return value === "left" ? "left" : value === "right" ? "right" : fallback;
+}
+
 export function clampSettings(value: Partial<UserSettings>): UserSettings {
   const d = DEFAULT_SETTINGS;
   return {
@@ -96,6 +104,8 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     theme: value.theme === "washi" ? "washi" : "ink",
     diagnosticsEnabled: pickBool(value.diagnosticsEnabled, d.diagnosticsEnabled),
     quietWindowMs: clampQuietWindow(value.quietWindowMs, d.quietWindowMs),
+    annotationDockSide: pickDockSide(value.annotationDockSide, d.annotationDockSide),
+    annotationRailCollapsed: pickBool(value.annotationRailCollapsed, d.annotationRailCollapsed),
   };
 }
 

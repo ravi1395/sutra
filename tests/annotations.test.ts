@@ -1,7 +1,7 @@
 // DOM-bound annotation-panel behavior with minimal browser fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AnnotationsPanel } from "../src/annotations";
+import { AnnotationsPanel, type RailLayout } from "../src/annotations";
 import { ANNOTATIONS_FILE, type AnnotationPersistence } from "../src/annotation-store";
 import type { Task } from "../src/tasks";
 
@@ -26,6 +26,8 @@ class FakeElement {
   dataset: Record<string, string> = {};
   children: FakeElement[] = [];
   textContent = "";
+  id = "";
+  parentElement: FakeElement | null = null;
   private listeners = new Map<string, (event?: { stopPropagation(): void }) => void>();
 
   set innerHTML(_value: string) {
@@ -37,12 +39,26 @@ class FakeElement {
   }
 
   append(...children: FakeElement[]): void {
+    for (const child of children) child.parentElement = this;
     this.children.push(...children);
   }
 
   appendChild(child: FakeElement): FakeElement {
+    child.parentElement = this;
     this.children.push(child);
     return child;
+  }
+
+  /** Minimal stand-in for Element.closest(): supports only `#id` selectors, which is all
+   *  the rail-chrome render() code needs (`listEl.closest("#browser-body")`). */
+  closest(selector: string): FakeElement | null {
+    let node: FakeElement | null = this;
+    const id = selector.startsWith("#") ? selector.slice(1) : null;
+    while (node) {
+      if (id !== null && node.id === id) return node;
+      node = node.parentElement;
+    }
+    return null;
   }
 
   click(): void {
@@ -70,7 +86,7 @@ function frame() {
   return { contentWindow, sent };
 }
 
-function setup(persistence?: AnnotationPersistence) {
+function setup(persistence?: AnnotationPersistence, rail?: RailLayout) {
   const previousWindow = globalThis.window;
   const previousDocument = globalThis.document;
   const listeners = new Map<string, (event: MessageEvent) => void>();
@@ -84,17 +100,22 @@ function setup(persistence?: AnnotationPersistence) {
   } as unknown as Document;
 
   const first = frame();
+  const body = new FakeElement();
+  body.id = "browser-body";
   const list = new FakeElement();
+  body.appendChild(list); // mirrors real DOM: #annotation-list lives inside #browser-body
   const toggle = new FakeElement();
   const panel = new AnnotationsPanel(
     first as unknown as HTMLIFrameElement,
     list as unknown as HTMLElement,
     toggle as unknown as HTMLButtonElement,
     persistence,
+    rail,
   );
 
   return {
     first,
+    body,
     list,
     toggle,
     panel,
@@ -106,6 +127,31 @@ function setup(persistence?: AnnotationPersistence) {
       globalThis.document = previousDocument;
     },
   };
+}
+
+/** Spy RailLayout for rail-chrome tests: mutable in-memory state + call recorders. */
+function fakeRail(initial: { dockSide: "left" | "right"; collapsed: boolean }) {
+  const state = { ...initial };
+  const setDockSideCalls: Array<"left" | "right"> = [];
+  const setCollapsedCalls: boolean[] = [];
+  const rail: RailLayout = {
+    get: () => ({ ...state }),
+    setDockSide: (side) => { state.dockSide = side; setDockSideCalls.push(side); },
+    setCollapsed: (collapsed) => { state.collapsed = collapsed; setCollapsedCalls.push(collapsed); },
+  };
+  return { rail, state, setDockSideCalls, setCollapsedCalls };
+}
+
+/** Recursively collects every FakeElement under `root` (inclusive) whose className
+ *  includes `cls` — a querySelectorAll("." + cls) stand-in for the fake DOM. */
+function findByClassName(root: FakeElement, cls: string): FakeElement[] {
+  const found: FakeElement[] = [];
+  const visit = (el: FakeElement) => {
+    if (el.className.split(" ").includes(cls)) found.push(el);
+    for (const child of el.children) visit(child);
+  };
+  visit(root);
+  return found;
 }
 
 test("setTarget disarms old iframe and routes later toggles to new iframe", () => {
@@ -152,9 +198,9 @@ test("setTarget rejects stale messages and renders picked messages from current 
     assert.equal(ctx.list.children.length, 0);
 
     ctx.message({ origin: "http://new.test", source: second.contentWindow as unknown as Window, data: picked });
-    // children[0] is the MCP trust banner; the annotation row follows.
-    assert.equal(ctx.list.children.length, 2);
-    assert.equal(ctx.list.children[1].children[1].textContent, "#hero");
+    // children[0] is the rail head, children[1] is the MCP trust banner, the annotation row follows.
+    assert.equal(ctx.list.children.length, 3);
+    assert.equal(ctx.list.children[2].children[1].textContent, "#hero");
   } finally {
     ctx.restore();
   }
@@ -193,8 +239,8 @@ test("deleting an annotation cascades detach from every task that references it"
       async (task, _annotation, reason) => { detached.push({ taskId: task.id, reason }); },
     );
 
-    // row.children = [num, sel, fb, del, taskSelect]; del is index 3.
-    const del = ctx.list.children[1].children[3];
+    // list.children = [head, hint, row]; row.children = [num, sel, fb, del, taskSelect]; del is index 3.
+    const del = ctx.list.children[2].children[3];
     del.click();
 
     assert.deepEqual(detached.map((d) => d.taskId).sort(), ["other", "owner"]);
@@ -329,6 +375,96 @@ test("pushTheme no-ops when the panel has no targeted iframe/origin (never throw
   try {
     ctx.panel.pushTheme(); // never targeted via setTarget in this test
     assert.equal(ctx.first.sent.length, 0);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Rail chrome (T3): header row (dock-toggle + collapse) when expanded, thin spine
+// (count badge, click to expand) when collapsed. Layout comes from an injected RailLayout.
+
+test("collapsed rail renders only the spine badge, never annotation rows", () => {
+  const { rail } = fakeRail({ dockSide: "right", collapsed: true });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/settings" },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#a", tag: "div", html: "", styles: {}, hints: {} } },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#b", tag: "div", html: "", styles: {}, hints: {} } },
+    });
+
+    assert.equal(findByClassName(ctx.list, "ann-spine").length, 1);
+    const badges = findByClassName(ctx.list, "ann-spine-badge");
+    assert.equal(badges[0].textContent, "2");
+    assert.equal(findByClassName(ctx.list, "annotation-row").length, 0);
+    assert.equal(ctx.list.classList.contains("collapsed"), true);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("expanded rail toggles dock-left on #browser-body based on dockSide", () => {
+  const left = fakeRail({ dockSide: "left", collapsed: false });
+  const leftCtx = setup(undefined, left.rail);
+  try {
+    leftCtx.toggle.click(); // arm -> visible, no annotations needed
+    assert.equal(leftCtx.body.classList.contains("dock-left"), true);
+  } finally {
+    leftCtx.restore();
+  }
+
+  const right = fakeRail({ dockSide: "right", collapsed: false });
+  const rightCtx = setup(undefined, right.rail);
+  try {
+    rightCtx.toggle.click();
+    assert.equal(rightCtx.body.classList.contains("dock-left"), false);
+  } finally {
+    rightCtx.restore();
+  }
+});
+
+test("clicking the dock-toggle button calls rail.setDockSide with the opposite side", () => {
+  const { rail, setDockSideCalls } = fakeRail({ dockSide: "right", collapsed: false });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.toggle.click(); // arm -> visible, renders the head
+    const [dockToggle] = findByClassName(ctx.list, "ann-dock-toggle");
+    dockToggle.click();
+    assert.deepEqual(setDockSideCalls, ["left"]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("clicking the spine calls rail.setCollapsed(false) to expand", () => {
+  const { rail, setCollapsedCalls } = fakeRail({ dockSide: "right", collapsed: true });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.toggle.click(); // arm -> visible, collapsed renders the spine
+    const [spine] = findByClassName(ctx.list, "ann-spine");
+    spine.click();
+    assert.deepEqual(setCollapsedCalls, [false]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("regression: no annotations and not armed keeps the list hidden with no rail chrome", () => {
+  const { rail } = fakeRail({ dockSide: "right", collapsed: false });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test"); // triggers a render, still unarmed/empty
+    assert.equal(ctx.list.classList.contains("hidden"), true);
+    assert.equal(findByClassName(ctx.list, "ann-spine").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-rail-head").length, 0);
   } finally {
     ctx.restore();
   }
