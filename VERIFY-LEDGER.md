@@ -101,3 +101,19 @@ Breakpoint agent-attribution render (branch `main`). Bug: MCP-set breakpoints ro
 |---|---|---|---|---|---|
 | 2026-07-15 | 2.3.2 | BP-ATTR-1: agent-set breakpoint paints a violet `✦` in the gutter, visually distinct from a human-set red `●`/`◆`/`◇` | UI | — | BLOCKED(live session, MCP `debug_set_breakpoint` on line A + human gutter-click line B → line A shows violet ✦, line B shows red glyph; the two are unmistakably different) |
 | 2026-07-15 | 2.3.2 | BP-ATTR-2: Breakpoints panel row for an agent breakpoint shows a filled-violet `agent` chip; cond/hit/log chips also render as styled pills (not bare text) | UI | — | BLOCKED(with an agent breakpoint carrying a condition → panel row shows a violet `agent` pill AND a `cond` pill, both styled; human-set row has no agent chip) |
+
+---
+
+v2.3.3 token-restyle + terminal links (branch `feat/token-restyle`, commits `44212be..HEAD`). All 20 mechanical acceptance criteria (greps, token parity, unit tests, security invariants, version lockstep) GATE PASS via adversarial skeptical-reviewer 2026-07-15 (npm 587/587, cargo 268/268, build clean). The rows below are the 9 `[sutra-verify]` live-GUI criteria the reviewer structurally cannot observe — drive each in `npm run tauri dev` and record what you see. Map to PLAN.md:150-159 manual E2E tail.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-15 | 2.3.3 | TR-1 (P1): Toggle washi → titlebar, gitbar, automations drawer, palette, settings modal, task modal all light; zero dark patches | UI | — | BLOCKED(enable washi theme → inspect each surface; no `#0c0d0e`/dark remnants anywhere) |
+| 2026-07-15 | 2.3.3 | TR-2 (P2): Two terminals with colored output → toggle → both repaint live; all 16 ANSI colors legible on BOTH themes | UI | — | BLOCKED(run `ls -G` + a compiler-error stream in 2 terms, toggle → both re-theme without reload; ANSI readable on light bg) |
+| 2026-07-15 | 2.3.3 | TR-3 (P3): Open README.md preview → toggle → follows without re-open; scripts still blocked | UI | — | BLOCKED(open .md preview, toggle theme → colors follow; confirm srcdoc `sandbox=""` still blocks scripts) |
+| 2026-07-15 | 2.3.3 | TR-4 (P4): Browser annotation open → toggle → marker + composer legible both themes, before AND after toggle | UI | — | BLOCKED(annotate a proxied page, toggle → textarea + pin re-color live via postMessage bridge; legible both) |
+| 2026-07-15 | 2.3.3 | TR-5 (P1): Palette open animation smooth; macOS Reduce Motion ON → instant | UI | — | BLOCKED(open palette → ~120ms fade/translate; enable Reduce Motion → no animation) |
+| 2026-07-15 | 2.3.3 | TR-6 (P1): Drag all three splitters → frame-perfect, no transition lag | UI | — | BLOCKED(drag tree/terminal/browser splitters → 60fps, no easing lag from new motion rules) |
+| 2026-07-15 | 2.3.3 | TR-7 (P5): `cargo build` error in terminal → cmd+click `src/x.rs:12` → editor opens at line 12; plain click → nothing | UI | — | BLOCKED(produce a compiler-error path, cmd+click → editor jumps to line; plain click inert) |
+| 2026-07-15 | 2.3.3 | TR-8 (P5): cmd+click `https://github.com` in terminal → OS default browser | UI | — | BLOCKED(echo an external URL, cmd+click → opens in system browser, not in-app pane) |
+| 2026-07-15 | 2.3.3 | TR-9 (P5): `npm run dev` → cmd+click `http://localhost:5173` → in-app browser pane | UI | — | BLOCKED(echo a localhost URL, cmd+click → in-app browser pane shows it) |
