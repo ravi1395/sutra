@@ -102,6 +102,44 @@ function makeFakeTerm(lineText: string) {
   };
 }
 
+/** Same fake, but multiple rows — `wrapped[i]` marks row i as a continuation of row i-1,
+ *  exercising getWindowedLine's backward/forward wrap-chain walk and mapStrIdx's cross-row
+ *  advance (the provider must read the LOGICAL line, not just the hovered visual row). */
+function makeFakeTermRows(rows: string[], wrapped: boolean[]) {
+  const lines = rows.map((text, i) => {
+    const chars = Array.from(text);
+    return {
+      isWrapped: wrapped[i],
+      length: chars.length,
+      getCell(x: number, cell: { _set: (c: string, w: number) => void }) {
+        if (x >= chars.length) return undefined;
+        cell._set(chars[x], 1);
+        return cell;
+      },
+      translateToString: () => text,
+    };
+  });
+  return {
+    buffer: {
+      active: {
+        getLine: (y: number) => lines[y],
+        getNullCell: () => {
+          let ch = "";
+          let width = 0;
+          return {
+            getChars: () => ch,
+            getWidth: () => width,
+            _set: (c: string, w: number) => {
+              ch = c;
+              width = w;
+            },
+          };
+        },
+      },
+    },
+  };
+}
+
 // isMod() checks metaKey on Mac, ctrlKey elsewhere (src/shortcuts.ts); IS_MAC reads
 // navigator.userAgent, which under node:test is not a Mac UA, so ctrlKey is what gates here
 // (matches tests/shortcuts.test.ts's own "non-Mac" comment for the same reason).
@@ -140,6 +178,49 @@ test("FileLinkProvider: surfaces only validated paths, with a correct buffer ran
   // Modifier-click activates with the resolved path + extracted line.
   link.activate(fakeMouseEvent(true), link.text);
   assert.deepEqual(activated, [{ absPath: "/root/proj/src/main.ts", line: 42 }]);
+});
+
+test("FileLinkProvider: reads the logical wrapped line, not just the hovered visual row", async () => {
+  // A path token straddling the wrap boundary: row0 ends mid-path, row1 (isWrapped) continues it.
+  const row0 = "cargo build failed at src/ver";
+  const row1 = "ylong/main.ts:9 — see log";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const term = makeFakeTermRows([row0, row1], [false, true]) as any;
+  const activated: Array<{ absPath: string; line?: number }> = [];
+  const provider = new FileLinkProvider(
+    term,
+    () => "/root/proj",
+    () => null,
+    async (p) => {
+      if (p === "/root/proj/src/verylong/main.ts") return 1;
+      throw new Error("ENOENT");
+    },
+    (absPath, line) => activated.push({ absPath, line }),
+  );
+
+  // Hover the SECOND (continuation) row — the provider must still recover the full logical line.
+  const links = await new Promise<ILink[] | undefined>((resolve) => provider.provideLinks(2, resolve));
+  assert.ok(links && links.length === 1, "expected exactly one resolved link spanning both rows");
+  const link = links![0];
+  assert.equal(link.text, "src/verylong/main.ts:9");
+
+  const full = row0 + row1;
+  const token = "src/verylong/main.ts:9";
+  const startIdx = full.indexOf(token);
+  const endIdx = startIdx + token.length; // exclusive
+  const rowColFor = (charIdx: number) =>
+    charIdx < row0.length ? { row: 0, col: charIdx } : { row: 1, col: charIdx - row0.length };
+  const startRC = rowColFor(startIdx);
+  const endRC = rowColFor(endIdx);
+
+  assert.deepEqual(link.range.start, { x: startRC.col + 1, y: startRC.row + 1 });
+  assert.deepEqual(link.range.end, { x: endRC.col, y: endRC.row + 1 });
+  // The range genuinely spans the two rows (proves the cross-row advance, not a single-row fluke).
+  assert.equal(startRC.row, 0);
+  assert.equal(endRC.row, 1);
+
+  link.activate(fakeMouseEvent(true), link.text);
+  assert.deepEqual(activated, [{ absPath: "/root/proj/src/verylong/main.ts", line: 9 }]);
 });
 
 test("FileLinkProvider: a line with no path-ish tokens yields no links", async () => {
