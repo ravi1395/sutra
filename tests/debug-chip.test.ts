@@ -54,7 +54,7 @@ test("renderDebugChip: paused shows 'paused · <file>:<line>' and click jumps to
     const el = debugChipEl();
     assert.equal(el.textContent, "paused · turns.rs:43");
     assert.equal(typeof el.onclick, "function");
-    el.onclick!();
+    (el.onclick as unknown as () => void)!();
     assert.equal(jumped, true);
   } finally {
     restore();

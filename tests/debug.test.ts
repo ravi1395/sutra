@@ -14,6 +14,7 @@ import {
   loadBreakpointStore,
   saveBreakpointStore,
   type AdapterKind,
+  type AdapterSpec,
   type DapTransport,
 } from "../src/debug";
 import { bpGlyphChar, breakpointGutterMouseDown } from "../src/editor";
@@ -243,21 +244,21 @@ test("chooseAdapterForRoot: unresolvable implied adapter returns one honest not-
 });
 
 test("workspace-sourced adapter command requires a trust prompt the first time", () => {
-  const spec = {
+  const spec: AdapterSpec = {
     type: "custom",
     transport: { kind: "stdio", command: "/repo/x", args: [] },
     fromWorkspace: true,
-  } as const;
+  };
   assert.equal(requiresTrustPrompt(spec, new Set(), "/repo"), true);
   assert.equal(requiresTrustPrompt(spec, new Set(["/repo"]), "/repo"), false);
 });
 
 test("auto-detected (non-workspace) adapter never prompts", () => {
-  const spec = {
+  const spec: AdapterSpec = {
     type: "lldb",
     transport: { kind: "stdio", command: "codelldb", args: [] },
     fromWorkspace: false,
-  } as const;
+  };
   assert.equal(requiresTrustPrompt(spec, new Set(), "/repo"), false);
 });
 

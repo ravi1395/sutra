@@ -93,19 +93,19 @@ test("mountDebugStrip: absent from the container until active, torn down (not hi
   try {
     const container = new FakeElement();
     const session = new FakeSession();
-    const handle = mountDebugStrip(container, session);
+    const handle = mountDebugStrip(container as unknown as HTMLElement, session);
 
-    assert.equal(container.children.includes(handle.el), false); // no session yet — absent, not hidden
+    assert.equal(container.children.includes(handle.el as unknown as FakeElement), false); // no session yet — absent, not hidden
 
     session.emit({ active: true, paused: null });
-    assert.equal(container.children.includes(handle.el), true);
+    assert.equal(container.children.includes(handle.el as unknown as FakeElement), true);
 
     // Re-emitting the same active state must not duplicate the strip in the container.
     session.emit({ active: true, paused: { path: "/a.rs", line: 3 } });
-    assert.equal(container.children.filter((c) => c === handle.el).length, 1);
+    assert.equal(container.children.filter((c) => c === (handle.el as unknown as FakeElement)).length, 1);
 
     session.emit({ active: false, paused: null });
-    assert.equal(container.children.includes(handle.el), false); // gone, no orphan DOM
+    assert.equal(container.children.includes(handle.el as unknown as FakeElement), false); // gone, no orphan DOM
   } finally {
     restore();
   }
@@ -116,7 +116,7 @@ test("mountDebugStrip: active child sessions append their count to the session l
   try {
     const container = new FakeElement();
     const session = new FakeSession();
-    const handle = mountDebugStrip(container, session);
+    const handle = mountDebugStrip(container as unknown as HTMLElement, session);
     session.emit({ active: true, paused: null, childCount: 2 });
     assert.equal(handle.el.children[0].textContent, "running · 2 children");
   } finally {
@@ -133,8 +133,8 @@ test("mountDebugStrip: every button is pure delegation to the session's own meth
     // Buttons are appended as FakeElement children of the strip's root; click each by
     // invoking its onclick, in the order the strip constructs them (continue, step
     // over/into/out, pause, stop) per the Changes contract.
-    const handle = mountDebugStrip(container, session);
-    const buttons = handle.el.children.filter((c) => typeof c.onclick === "function");
+    const handle = mountDebugStrip(container as unknown as HTMLElement, session);
+    const buttons = (handle.el.children as unknown as FakeElement[]).filter((c) => typeof c.onclick === "function");
     for (const btn of buttons) btn.onclick!();
 
     assert.deepEqual(session.calls, ["continue", "stepOver", "stepIn", "stepOut", "pause", "stop"]);
@@ -175,7 +175,7 @@ test("setAgentActive: ships dark (no 'lit' class) until explicitly toggled — P
     const session = new FakeSession();
     let addedLit = false;
     let removedLit = false;
-    const handle = mountDebugStrip(container, session);
+    const handle = mountDebugStrip(container as unknown as HTMLElement, session);
     const badge = handle.el.children[handle.el.children.length - 1];
     badge.classList.add = (...c: string[]) => {
       if (c.includes("lit")) addedLit = true;

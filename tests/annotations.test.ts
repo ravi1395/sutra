@@ -69,9 +69,14 @@ class FakeElement {
     this.fire("click");
   }
 
-  /** Dispatch any listener with a minimal event, for keydown/blur in the edit tests. */
+  /** Dispatch a minimal event that bubbles to ancestors unless a listener calls
+   *  stopPropagation — so tests can prove propagation actually stops. */
   fire(type: string, event: Partial<FakeEvent> = {}): void {
-    this.listeners.get(type)?.({ stopPropagation() {}, preventDefault() {}, ...event });
+    let stopped = false;
+    const ev: FakeEvent = { stopPropagation() { stopped = true; }, preventDefault() {}, ...event };
+    for (let node: FakeElement | null = this; node && !stopped; node = node.parentElement) {
+      node.listeners.get(type)?.(ev);
+    }
   }
 
   focus(): void {}
@@ -571,6 +576,26 @@ test("markPulled marks rows ✓, header shows pulled status, and an edit clears 
     assert.equal(findByClassName(ctx.list, "ann-sent").length, 0);
     // The header timestamp survives — the pull itself still happened.
     assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.startsWith("Agent pulled"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("note/textarea clicks stop propagation — scrollToPin fires only on row clicks", () => {
+  const ctx = setupWithPick();
+  try {
+    const scrolls = () =>
+      withoutTheme(ctx.first.sent).filter((s) => (s.message as { type?: string }).type === "scrollToPin").length;
+
+    // Positive control: the bubbling harness delivers a row click to the row handler.
+    findByClassName(ctx.list, "annotation-row")[0].fire("click");
+    assert.equal(scrolls(), 1);
+
+    findByClassName(ctx.list, "ann-fb")[0].fire("click"); // enters edit mode
+    assert.equal(scrolls(), 1); // note click did NOT bubble to the row
+
+    findByClassName(ctx.list, "ann-fb-edit")[0].fire("click");
+    assert.equal(scrolls(), 1); // textarea click did NOT bubble either
   } finally {
     ctx.restore();
   }

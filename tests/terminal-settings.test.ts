@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { loadDrawerState } from "../src/terminal-groups";
 import { buildTermTheme, retheme } from "../src/terminal";
+import type { ITheme } from "@xterm/xterm";
 import { onThemeChange } from "../src/theme-tokens";
 
 const ANSI_FIELDS = [
@@ -70,9 +71,9 @@ test("buildTermTheme resolves all 16 ANSI + base fields, none empty", () => {
 
 test("retheme() fans a freshly built theme out to every live session", () => {
   const sessions = [
-    { term: { options: {} as { theme?: unknown } } },
-    { term: { options: {} as { theme?: unknown } } },
-    { term: { options: {} as { theme?: unknown } } },
+    { term: { options: {} as { theme?: ITheme } } },
+    { term: { options: {} as { theme?: ITheme } } },
+    { term: { options: {} as { theme?: ITheme } } },
   ];
   retheme(sessions);
   const theme = buildTermTheme();

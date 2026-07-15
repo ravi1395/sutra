@@ -217,6 +217,8 @@ function baseTasksPanelOptions(overrides: Partial<TasksPanelOptions> & Pick<Task
     cancelWorktreeSetup: async () => false,
     isWorktreeSetupActive: () => false,
     confirmDiscard: async () => false,
+    commitHandoff: async () => ({ sha: "" }),
+    unstageHandoffExtras: async () => {},
     ...overrides,
   };
 }
@@ -590,7 +592,7 @@ test("handoffReceiptEvidence has a distinct label per outcome and no checkId", (
   const external = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: true, recordedAt: 10 });
   assert.equal(own.kind, "manual");
   assert.equal("checkId" in own ? own.checkId : undefined, undefined);
-  assert.notEqual(own.label, external.label);
+  assert.notEqual(own.label, (external as { label: string }).label);
   assert.match((own as { note?: string }).note ?? "", /abc123/);
 });
 
