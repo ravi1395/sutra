@@ -107,6 +107,42 @@ export function setTurnTestStatus(root: string, turnId: number, status: TestStat
   if (turn) turn.testStatus = status;
 }
 
+/** Launch a turn's auto-test: stamp "running" locally, persist it, then start
+ * the runner. If either the record or the launch fails, degrade to a terminal
+ * "fail" status (locally + best-effort backend record) — a runner that never
+ * started emits no completion event, so a swallowed error here would leave the
+ * chip stuck on "running" forever. "fail" over "skipped": a launch failure
+ * needs attention, and the outputTail disambiguates it from a real test fail.
+ * IPC deps are injected so this sequence is unit-testable without Tauri. */
+export async function launchTurnTest(
+  root: string,
+  turnId: number,
+  record: (root: string, turnId: number, status: TestStatus) => Promise<void>,
+  run: () => Promise<void>,
+  rerender: () => void,
+): Promise<void> {
+  const runningStatus: TestStatus = { state: "running", outputTail: "" };
+  setTurnTestStatus(root, turnId, runningStatus);
+  rerender();
+  try {
+    await record(root, turnId, runningStatus);
+    await run();
+  } catch (error) {
+    const failedStatus: TestStatus = { state: "fail", exitCode: null, outputTail: `test runner failed to start: ${String(error)}` };
+    setTurnTestStatus(root, turnId, failedStatus);
+    rerender();
+    await record(root, turnId, failedStatus).catch(() => {});
+  }
+}
+
+/** Final chip state for a completed test:<root>:<turnId> runner. A cancelled
+ * run's verdict is unknown — "skipped", never pass/fail; a deadline kill is a
+ * "fail" even if the killed process managed to exit 0. */
+export function runnerDoneTestState(p: { exitCode: number | null; timedOut: boolean; cancelled: boolean }): TestStatus["state"] {
+  if (p.cancelled) return "skipped";
+  return p.exitCode === 0 && !p.timedOut ? "pass" : "fail";
+}
+
 /** Of `ids`, the turn-test runner ids a cancel actually KILLED (returned true).
  * Only these may be suppressed in onRunnerDone — poisoning an id with nothing
  * running (cancel → false, e.g. a still-open newer turn whose test hasn't

@@ -66,9 +66,11 @@ import {
   groupHunksByTurn,
   hunkDiagBadge,
   isRollbackable,
+  launchTurnTest,
   markRolledBack,
   onTurnClosed,
   replaceTurns,
+  runnerDoneTestState,
   setTurnState,
   setTurnTestStatus,
   suppressibleCancelledIds,
@@ -171,6 +173,64 @@ test("setTurnTestStatus stamps testStatus on the matching turn only, unknown id 
   assert.equal(getTurns("/rootE").find((t) => t.id === 2)?.testStatus, null);
   assert.doesNotThrow(() => setTurnTestStatus("/rootE", 99, { state: "pass", outputTail: "" })); // unknown id → no-op
   assert.equal(getTurns("/rootE").find((t) => t.id === 1)?.testStatus?.state, "running");
+});
+
+test("launchTurnTest: record failure degrades chip to terminal fail, not stuck running", async () => {
+  setTurnState("/rootF", { openTurn: null, closed: [turnFixture(1, ["a.ts"])] });
+  const recorded: TestStatus[] = [];
+  let renders = 0;
+  let ran = false;
+  await launchTurnTest(
+    "/rootF",
+    1,
+    async (_root, _id, status) => {
+      recorded.push(status);
+      if (status.state === "running") throw new Error("disk full");
+    },
+    async () => { ran = true; },
+    () => { renders++; },
+  );
+  const status = getTurns("/rootF").find((t) => t.id === 1)?.testStatus;
+  assert.equal(status?.state, "fail");
+  assert.match(status?.outputTail ?? "", /test runner failed to start.*disk full/);
+  assert.equal(ran, false); // runner never launched
+  assert.equal(renders, 2); // running stamp + degraded stamp
+  assert.deepEqual(recorded.map((s) => s.state), ["running", "fail"]); // terminal state persisted so backend agrees
+});
+
+test("launchTurnTest: runner launch failure degrades chip even when terminal record also fails", async () => {
+  setTurnState("/rootG", { openTurn: null, closed: [turnFixture(1, ["a.ts"])] });
+  const recorded: TestStatus[] = [];
+  await launchTurnTest(
+    "/rootG",
+    1,
+    async (_root, _id, status) => {
+      recorded.push(status);
+      if (status.state === "fail") throw new Error("still broken");
+    },
+    async () => { throw new Error("spawn EPERM"); },
+    () => {},
+  );
+  assert.equal(getTurns("/rootG").find((t) => t.id === 1)?.testStatus?.state, "fail");
+  assert.deepEqual(recorded.map((s) => s.state), ["running", "fail"]); // best-effort record: rejection swallowed
+});
+
+test("launchTurnTest: success path stamps running once and starts the runner", async () => {
+  setTurnState("/rootH", { openTurn: null, closed: [turnFixture(1, ["a.ts"])] });
+  const recorded: TestStatus[] = [];
+  let ran = false;
+  await launchTurnTest("/rootH", 1, async (_root, _id, status) => { recorded.push(status); }, async () => { ran = true; }, () => {});
+  assert.equal(getTurns("/rootH").find((t) => t.id === 1)?.testStatus?.state, "running");
+  assert.equal(ran, true);
+  assert.deepEqual(recorded.map((s) => s.state), ["running"]);
+});
+
+test("runnerDoneTestState: cancelled → skipped, timeout → fail, exit 0 → pass", () => {
+  assert.equal(runnerDoneTestState({ exitCode: 0, timedOut: false, cancelled: false }), "pass");
+  assert.equal(runnerDoneTestState({ exitCode: 1, timedOut: false, cancelled: false }), "fail");
+  assert.equal(runnerDoneTestState({ exitCode: null, timedOut: true, cancelled: false }), "fail");
+  assert.equal(runnerDoneTestState({ exitCode: 0, timedOut: true, cancelled: false }), "fail"); // deadline kill outranks exit code
+  assert.equal(runnerDoneTestState({ exitCode: null, timedOut: false, cancelled: true }), "skipped");
 });
 
 test("suppressibleCancelledIds suppresses only ids a cancel actually killed (W3.7)", async () => {

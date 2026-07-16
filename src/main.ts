@@ -105,11 +105,13 @@ import {
   firstViewableAgentChange,
   getTurns,
   hunkDiagBadgeEl,
+  launchTurnTest,
   markRolledBack,
   mergeChangedFiles,
   onTurnClosed,
   replaceTurns,
   reviewablePaths,
+  runnerDoneTestState,
   setTurnState,
   setTurnTestStatus,
   suppressibleCancelledIds,
@@ -2307,15 +2309,13 @@ onTurnClosed((root, turn) => {
     if (!(await isWorkspaceTrusted(root))) return; // never auto-run a repo's test command for an untrusted folder
     const test = testAutomation(automations);
     if (!test) return;
-    const runningStatus: TestStatus = { state: "running", outputTail: "" };
-    // Update the local model regardless of whether the backend record call
-    // below succeeds: the UI should reflect what the runner is actually
-    // doing, and a persistence failure shouldn't leave the chip stale.
-    setTurnTestStatus(root, turn.id, runningStatus);
-    if (currentRoot === root) renderTurnStrip(root);
-    await turnTestRecord(root, turn.id, runningStatus)
-      .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
-      .catch(() => {});
+    await launchTurnTest(
+      root,
+      turn.id,
+      turnTestRecord,
+      () => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000),
+      () => { if (currentRoot === root) renderTurnStrip(root); },
+    );
   })();
 });
 
@@ -2388,7 +2388,7 @@ void onRunnerDone((p) => {
   const turnId = Number(rest.slice(sep + 1));
   if (!Number.isFinite(turnId)) return;
   const finalStatus: TestStatus = {
-    state: p.exitCode === 0 ? "pass" : "fail",
+    state: runnerDoneTestState(p),
     exitCode: p.exitCode,
     durationMs: p.durationMs,
     outputTail: (p.stdout + p.stderr).slice(-4000),
