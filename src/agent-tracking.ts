@@ -1,4 +1,4 @@
-import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, Turn, TurnFileEntry, TurnPollResult } from "./ipc";
+import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, TestStatus, Turn, TurnFileEntry, TurnPollResult } from "./ipc";
 import { getDiagnosticsFor } from "./diagnostics";
 
 export interface ReviewFile extends ChangedFile {
@@ -94,6 +94,17 @@ export function markRolledBack(root: string, turnId: number): void {
   const turns = turnsByRoot.get(root);
   const turn = turns?.find((t) => t.id === turnId);
   if (turn) turn.rolledBack = true;
+}
+
+/** Optimistically stamp `turnId`'s live test status in the local cache — the
+ * counterpart to turnTestRecord's backend write. turn_poll is consume-once
+ * (setTurnState), so without this the chip (turnChipClass/turnHeaderEl) only
+ * catches up on the next replaceTurns (rollback) or workspace reopen. Unknown
+ * turn id is a no-op: the runner event may race a turn the client hasn't
+ * learned about yet. */
+export function setTurnTestStatus(root: string, turnId: number, status: TestStatus): void {
+  const turn = turnsByRoot.get(root)?.find((t) => t.id === turnId);
+  if (turn) turn.testStatus = status;
 }
 
 /** Of `ids`, the turn-test runner ids a cancel actually KILLED (returned true).

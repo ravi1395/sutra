@@ -70,6 +70,7 @@ import {
   onTurnClosed,
   replaceTurns,
   setTurnState,
+  setTurnTestStatus,
   suppressibleCancelledIds,
   turnChipClass,
   type ReviewFile,
@@ -161,6 +162,15 @@ test("markRolledBack flags the turn locally (W2.1 fallback when turnList refetch
   assert.equal(getTurns("/rootD").find((t) => t.id === 2)?.rolledBack, true);
   assert.equal(getTurns("/rootD").find((t) => t.id === 1)?.rolledBack, false);
   markRolledBack("/rootD", 99); // unknown id → no throw, no effect
+});
+
+test("setTurnTestStatus stamps testStatus on the matching turn only, unknown id is a no-op", () => {
+  setTurnState("/rootE", { openTurn: null, closed: [turnFixture(1, ["a.ts"]), turnFixture(2, ["b.ts"])] });
+  setTurnTestStatus("/rootE", 1, { state: "running", outputTail: "" });
+  assert.deepEqual(getTurns("/rootE").find((t) => t.id === 1)?.testStatus, { state: "running", outputTail: "" });
+  assert.equal(getTurns("/rootE").find((t) => t.id === 2)?.testStatus, null);
+  assert.doesNotThrow(() => setTurnTestStatus("/rootE", 99, { state: "pass", outputTail: "" })); // unknown id → no-op
+  assert.equal(getTurns("/rootE").find((t) => t.id === 1)?.testStatus?.state, "running");
 });
 
 test("suppressibleCancelledIds suppresses only ids a cancel actually killed (W3.7)", async () => {
@@ -454,6 +464,24 @@ test("turnStripRenderKey: changes when a turn's mutable fields change (closedAt/
   assert.notEqual(base, rolled);
   assert.notEqual(base, tested);
   assert.notEqual(base, laterClose);
+});
+
+test("turnStripRenderKey: a running->fail testStatus flip (live runner completion) changes the key", () => {
+  const running = turnStripRenderKey(
+    [closedTurn(1, 1000, { testStatus: { state: "running", outputTail: "" } })],
+    workspaceScope,
+    false,
+    6,
+    5000,
+  );
+  const failed = turnStripRenderKey(
+    [closedTurn(1, 1000, { testStatus: { state: "fail", outputTail: "boom" } })],
+    workspaceScope,
+    false,
+    6,
+    5000,
+  );
+  assert.notEqual(running, failed);
 });
 
 test("turnStripRenderKey: changes with scope, dropdown-open state, and paging visibleCount", () => {

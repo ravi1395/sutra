@@ -94,6 +94,7 @@ import {
   listFiles,
   langWorkspaceSymbols,
   type AgentTrackingStatus,
+  type TestStatus,
   type Turn,
   type TurnFileContent,
 } from "./ipc";
@@ -110,6 +111,7 @@ import {
   replaceTurns,
   reviewablePaths,
   setTurnState,
+  setTurnTestStatus,
   suppressibleCancelledIds,
   turnBreadcrumbEl,
   turnDropdownEl,
@@ -2305,7 +2307,13 @@ onTurnClosed((root, turn) => {
     if (!(await isWorkspaceTrusted(root))) return; // never auto-run a repo's test command for an untrusted folder
     const test = testAutomation(automations);
     if (!test) return;
-    await turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
+    const runningStatus: TestStatus = { state: "running", outputTail: "" };
+    // Update the local model regardless of whether the backend record call
+    // below succeeds: the UI should reflect what the runner is actually
+    // doing, and a persistence failure shouldn't leave the chip stale.
+    setTurnTestStatus(root, turn.id, runningStatus);
+    if (currentRoot === root) renderTurnStrip(root);
+    await turnTestRecord(root, turn.id, runningStatus)
       .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
       .catch(() => {});
   })();
@@ -2379,12 +2387,18 @@ void onRunnerDone((p) => {
   const root = rest.slice(0, sep);
   const turnId = Number(rest.slice(sep + 1));
   if (!Number.isFinite(turnId)) return;
-  void turnTestRecord(root, turnId, {
+  const finalStatus: TestStatus = {
     state: p.exitCode === 0 ? "pass" : "fail",
     exitCode: p.exitCode,
     durationMs: p.durationMs,
     outputTail: (p.stdout + p.stderr).slice(-4000),
-  }).catch(() => {});
+  };
+  // Same rationale as the "running" stamp above: keep the local model
+  // truthful to what the runner observed even if the backend record call
+  // below fails.
+  setTurnTestStatus(root, turnId, finalStatus);
+  if (currentRoot === root) renderTurnStrip(root);
+  void turnTestRecord(root, turnId, finalStatus).catch(() => {});
 });
 
 // MCP/agent navigation: open file + reveal line.
