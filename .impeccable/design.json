@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-16T00:00:00Z",
+  "title": "Design System: Sutra — Ink & Washi",
+  "extensions": {
+    "colorMeta": {
+      "jade-signal": {
+        "role": "primary",
+        "displayName": "Jade Signal",
+        "canonical": "#4ade93",
+        "tonalRamp": ["#0e2a1c", "#164a30", "#1f8a63", "#2fb87f", "#4ade93", "#7ee9b3", "#b3f2d1", "#e3faec"]
+      },
+      "ink-bg-0": {
+        "role": "neutral",
+        "displayName": "Void",
+        "canonical": "#101311",
+        "tonalRamp": ["#0e110f", "#101311", "#131614", "#161a17", "#1f2420", "#3e443e", "#565c54", "#8b9189"]
+      },
+      "washi-bg-0": {
+        "role": "neutral",
+        "displayName": "Washi Paper",
+        "canonical": "#f5f2eb",
+        "tonalRamp": ["#1f231f", "#6e7268", "#9c988a", "#b5b1a4", "#efebe0", "#f1ede3", "#f5f2eb", "#fbf9f4"]
+      },
+      "diff-added": { "role": "tertiary", "displayName": "Added Amber", "canonical": "#e3b341", "tonalRamp": ["#4a3a10", "#7a5f1a", "#a8842f", "#c69f38", "#e3b341", "#ecc670", "#f3d99e", "#f9ecc9"] },
+      "diff-modified": { "role": "tertiary", "displayName": "Modified Blue", "canonical": "#4493f8", "tonalRamp": ["#0f2547", "#1c4a80", "#2b5fad", "#3f74c9", "#4493f8", "#78b3fa", "#aad0fc", "#d9ecfe"] },
+      "diff-deleted": { "role": "tertiary", "displayName": "Deleted Red", "canonical": "#f0716a", "tonalRamp": ["#4a1512", "#7a231e", "#b3261e", "#d1453d", "#f0716a", "#f59892", "#f9c1bd", "#fce5e3"] }
+    },
+    "typographyMeta": {
+      "ui": { "displayName": "UI Chrome", "purpose": "All controls, labels, menus, chips — the majority of the interface." },
+      "mono": { "displayName": "Mono / Code", "purpose": "Editor buffers and terminal content via Spline Sans Mono." },
+      "voice": { "displayName": "Voice", "purpose": "Rare italic-serif moments — empty states, taglines. Never UI chrome." }
+    },
+    "shadows": [
+      { "name": "dropdown", "value": "0 4px 12px rgba(0,0,0,0.3)", "purpose": "gitbar and lightweight dropdown menus" },
+      { "name": "floating-panel", "value": "0 10px 28px rgba(0,0,0,0.45)", "purpose": "automation drawer and deeper popovers" }
+    ],
+    "motion": [
+      { "name": "pulse", "value": "keyframes pulse (opacity/scale loop)", "purpose": "live/running-process indicator on auto-chip and auto-dot; has a prefers-reduced-motion static fallback" }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Glyph Button",
+      "kind": "button",
+      "refersTo": "glyph-button",
+      "description": "Icon-only toolbar button (terminal toggle, diff toggle, menu). Default transparent, active state fills jade.",
+      "html": "<button class=\"ds-glyph\" aria-label=\"Toggle terminal\">\n  <svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M4 17l6-6-6-6M12 19h8\"/></svg>\n</button>",
+      "css": ".ds-glyph { display: inline-flex; align-items: center; justify-content: center; padding: 5px 7px; border-radius: 5px; border: none; background: transparent; color: #8b9189; cursor: pointer; transition: background 0.15s, color 0.15s; } .ds-glyph:hover { background: #1f2420; color: #e8eae4; } .ds-glyph:focus-visible { outline: 2px solid #4ade93; outline-offset: 1px; } .ds-glyph.ds-on { background: #1f8a63; color: #101311; }"
+    },
+    {
+      "name": "Pill Chip",
+      "kind": "chip",
+      "refersTo": "pill-chip",
+      "description": "Workspace/branch/automation pill with name + chevron, used to open a related dropdown.",
+      "html": "<button class=\"ds-pill\"><span class=\"ds-pill-name\">main</span><svg class=\"ds-pill-chev\" width=\"10\" height=\"10\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M6 9l6 6 6-6\"/></svg></button>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 8px; border: none; background: #161a17; color: #e8eae4; font-size: 12.5px; font-weight: 500; cursor: pointer; transition: background 0.15s; } .ds-pill:hover { background: #1f2420; } .ds-pill-chev { opacity: 0.6; }"
+    },
+    {
+      "name": "Dropdown Row",
+      "kind": "custom",
+      "refersTo": "dropdown-menu",
+      "description": "A single row inside a menu-card/auto-dd dropdown, with current-item state shown via background wash, never a border stripe.",
+      "html": "<div class=\"ds-menu\"><div class=\"ds-menu-row ds-cur\">index.ts</div><div class=\"ds-menu-row\">styles.css</div></div>",
+      "css": ".ds-menu { background: #161a17; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); padding: 4px 0; min-width: 200px; } .ds-menu-row { padding: 8px 14px; font-size: 13px; color: #e8eae4; cursor: pointer; transition: background 0.12s; } .ds-menu-row:hover { background: #1f2420; } .ds-menu-row.ds-cur { background: rgba(74,222,147,0.08); }"
+    },
+    {
+      "name": "Keyboard Badge",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Small literal-key badge shown next to a menu row or tooltip.",
+      "html": "<span class=\"ds-kbd\">⌘K</span>",
+      "css": ".ds-kbd { display: inline-block; padding: 1px 6px; border-radius: 5px; background: #1f2420; color: #8b9189; font-size: 11px; font-family: 'Spline Sans Mono', ui-monospace, monospace; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Ink & Washi",
+    "overview": "Sutra is an instrument, not a platform: a dense cockpit of small, precise controls wrapped around a terminal and a diff gutter that carry the real content. The system ships two literal inks — a near-black ink theme and a paper-toned washi theme — sharing one token vocabulary so nothing is redefined per-theme, only re-valued. The system explicitly rejects the Electron/VS Code IDE-clone language: no heavy multi-panel chrome, no extension-marketplace visual sprawl, no command bloat. Density comes from restraint, not decoration — sharp, minimal, fast.",
+    "keyCharacteristics": [
+      "Two themes, one token set: :root (ink) and .theme-washi override the same variable names, never introduce parallel ones.",
+      "Small type scale (9.5–15px) built for chrome density, not marketing hierarchy.",
+      "One accent color, used as a signal, not a decoration.",
+      "Flat at rest; shadow appears only on floating/overlay surfaces.",
+      "Icon-glyph and pill controls throughout — there is no marketing-style primary CTA button."
+    ],
+    "rules": [
+      { "name": "The One Signal Rule", "body": "Jade is the only saturated color available for UI state. If a new control needs to communicate \"active\" or \"on\", it reaches for jade or it reaches for nothing — never a second accent hue.", "section": "colors" },
+      { "name": "The Fixed Diff Rule", "body": "diff-added, diff-modified, diff-deleted are constant across ink and washi. They encode git semantics, not theme mood, and must never be re-themed or reused for unrelated UI state.", "section": "colors" },
+      { "name": "The No-Hierarchy-Theater Rule", "body": "This is not a marketing type scale. There is no h1/h2/h3 drama; every UI text role sits within a 9.5–15px band. If a new element needs a size outside that band to read as important, the layout is wrong, not the type.", "section": "typography" },
+      { "name": "The Floating-Only Rule", "body": "Shadow appears exclusively on elements that are position: absolute/fixed above the base layout. A shadow on a static, in-flow panel is a bug, not a style choice.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep ink and washi on one token set — a new color must be added as a variable pair in both :root and .theme-washi, never hardcoded per-theme.",
+      "Do keep the type scale inside 9.5–15px for all UI chrome; let mono/terminal content set its own size independently.",
+      "Do reserve jade for active/on/signal state only — one accent, used sparingly.",
+      "Do keep shadows literal black and reserved for floating/overlay surfaces only.",
+      "Do favor icon-glyph and pill controls consistent with the existing dense, instrumented chrome."
+    ],
+    "donts": [
+      "Don't build toward an Electron/VS Code-clone look — no heavy multi-panel chrome, no extension-marketplace visual language, no sprawling top-level menu bloat.",
+      "Don't introduce a second saturated accent color alongside jade.",
+      "Don't use border-left as a colored accent stripe for current/active rows — use the jade wash background instead.",
+      "Don't add card-style elevation/shadow to static, in-flow panels; flat is the resting state everywhere except dropdowns and popovers.",
+      "Don't reach for Fraunces/voice type for UI chrome — it is reserved for rare, deliberate voice moments, not headings or labels."
+    ]
+  }
+}
