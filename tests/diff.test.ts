@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeLineDiff, DiffViewer, hunkIndexAtLine, hunkSummaries, lensModel } from "../src/diff";
+import { computeLineDiff, DiffViewer, hunkIndexAtLine, hunkSummaries, lensModel, turnFileHunkRows } from "../src/diff";
 
 class FakeClassList {
   private values = new Set<string>();
@@ -253,4 +253,71 @@ test("lensModel multi-line range label and null attribution", () => {
   const m = lensModel(hunks, 0, null);
   assert.equal(m.title, "hunk 1 of 1 · lines 2–3");
   assert.equal(m.attribution, null);
+});
+
+// --- Turn-scoped diff mode (turn-UX rehaul P2) ---
+
+test("turnFileHunkRows: before=null (file created in the turn) is a whole-file-added diff", () => {
+  const rows = turnFileHunkRows(null, "one\ntwo\n");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "added");
+});
+
+test("turnFileHunkRows: after=null (file deleted in the turn) is a whole-file-deleted diff", () => {
+  const rows = turnFileHunkRows("one\ntwo\n", null);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "deleted");
+});
+
+test("turnFileHunkRows: before and after both present diffs normally", () => {
+  const rows = turnFileHunkRows("one\ntwo\nthree", "one\ndos\nthree");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "modified");
+  assert.equal(rows[0].label, "line 2");
+});
+
+test("turnFileHunkRows: both null (nothing to show) yields no hunks", () => {
+  assert.deepEqual(turnFileHunkRows(null, null), []);
+});
+
+test("DiffViewer.renderFileList: renders a per-file ~HEAD fallback badge when given", async () => {
+  const { filesEl, restore } = installDiffDom();
+  try {
+    const viewer = new DiffViewer();
+    viewer.renderFileList(
+      [
+        { path: "/repo/a.ts", status: "M", badge: "~HEAD" },
+        { path: "/repo/b.ts", status: "M" },
+      ],
+      null,
+      { onFilePick: () => {}, onExpand: async () => [], onHunkPick: () => {} },
+    );
+    const badges = filesEl.querySelectorAll(".diff-file-badge");
+    assert.equal(badges.length, 1);
+    assert.equal(badges[0].textContent, "~HEAD");
+  } finally {
+    restore();
+  }
+});
+
+test("DiffViewer.renderFileList: no accept/reject affordances when the handlers are omitted (turn-scoped read-only review)", async () => {
+  const { filesEl, restore } = installDiffDom();
+  try {
+    const viewer = new DiffViewer();
+    viewer.renderFileList(
+      [{ path: "/repo/a.ts", status: "M" }],
+      null,
+      {
+        onFilePick: () => {},
+        onExpand: async () => [{ kind: "modified" as const, startLine: 0, label: "line 1", newFrom: 0, newTo: 1, oldText: ["x"] }],
+        onHunkPick: () => {},
+        // onAccept/onReject intentionally omitted
+      },
+    );
+    await filesEl.querySelector(".diff-file-chevron")?.onclick?.({ stopPropagation() {} });
+    assert.equal(filesEl.querySelectorAll(".diff-file-action").length, 0);
+    assert.equal(filesEl.querySelectorAll(".diff-hunk-action").length, 0);
+  } finally {
+    restore();
+  }
 });

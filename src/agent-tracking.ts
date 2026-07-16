@@ -1,4 +1,4 @@
-import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, Turn, TurnPollResult } from "./ipc";
+import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, Turn, TurnFileEntry, TurnPollResult } from "./ipc";
 import { getDiagnosticsFor } from "./diagnostics";
 
 export interface ReviewFile extends ChangedFile {
@@ -256,15 +256,20 @@ export function turnSummaryEl(turns: Turn[], nowMs: number, onClick: () => void)
  * used both standalone and as a `.turn-dropdown` row; chip title carries the
  * test output tail (popover). Rolled-back turns render dimmed + strikethrough
  * with the rollback button hidden entirely (nothing left to roll back).
- * Otherwise Rollback is disabled while any turn is still open (agent mid-write). */
+ * Otherwise Rollback is disabled while any turn is still open (agent mid-write).
+ * `onSelect`, if given, fires on a row-body click (turn-scoped diff entry) —
+ * the rollback button's own click already stops propagation, so it never
+ * reaches this handler. */
 export function turnHeaderEl(
   turn: Turn,
   allTurns: Turn[],
   nowMs: number,
   onRollback: (turn: Turn) => void,
+  onSelect?: (turn: Turn) => void,
 ): HTMLElement {
   const header = document.createElement("div");
   header.className = "turn-header" + (turn.rolledBack ? " turn-header--rolled-back" : "");
+  if (onSelect) header.onclick = () => onSelect(turn);
   const label = document.createElement("span");
   label.className = "turn-header-label";
   const n = turn.files.length;
@@ -295,17 +300,19 @@ export function turnHeaderEl(
 
 /** `.turn-dropdown` overlay: last `limit` closed turns (newest first) via
  * `turnHeaderEl`, plus a non-interactive "{n} older turns…" footer stub when
- * more exist (paging lands in a later task). */
+ * more exist (paging lands in a later task). `onSelect` threads through to
+ * each row for turn-scoped diff entry. */
 export function turnDropdownEl(
   turns: Turn[],
   nowMs: number,
   onRollback: (turn: Turn) => void,
+  onSelect?: (turn: Turn) => void,
   limit = 6,
 ): HTMLElement {
   const dropdown = document.createElement("div");
   dropdown.className = "turn-dropdown";
   for (const turn of recentClosedTurns(turns, limit)) {
-    dropdown.appendChild(turnHeaderEl(turn, turns, nowMs, onRollback));
+    dropdown.appendChild(turnHeaderEl(turn, turns, nowMs, onRollback, onSelect));
   }
   const older = olderTurnsCount(turns, limit);
   if (older > 0) {
@@ -315,6 +322,70 @@ export function turnDropdownEl(
     dropdown.appendChild(footer);
   }
   return dropdown;
+}
+
+// --- Turn-scoped diff mode (turn-UX rehaul P2) ---
+
+export type DiffScope = { kind: "workspace" } | { kind: "turn"; turnId: number };
+
+/** Enter turn-scoped diff mode for `turn`; a no-op (returns `current`
+ * unchanged, by reference) for the still-open (unclosed) turn — scoped
+ * review only applies to a turn whose before/after snapshots are final.
+ * Callers detect the no-op via `result === current`. */
+export function enterTurnScope(current: DiffScope, turn: Turn): DiffScope {
+  if (turn.closedAt == null) return current;
+  return { kind: "turn", turnId: turn.id };
+}
+
+/** Exit turn-scoped diff mode back to the normal working-tree view. */
+export function exitTurnScope(): DiffScope {
+  return { kind: "workspace" };
+}
+
+/** Synchronous A/D/M inference for a turn's file-list row status, from the
+ * manifest's before/after hash presence alone (no blob read). Only trusted
+ * when `entry.snapshotted`: an unsnapshotted entry's `afterHash: null` can
+ * mean a genuine deletion OR an unrelated read failure (oversized/unreadable
+ * at turn-close — see turns.rs), so it degrades to "M" rather than guessing;
+ * the row's `~HEAD` fallback badge covers the ambiguity. */
+export function turnFileStatus(entry: TurnFileEntry): "A" | "D" | "M" {
+  if (!entry.snapshotted) return "M";
+  if (entry.beforeHash == null) return "A";
+  if (entry.afterHash == null) return "D";
+  return "M";
+}
+
+/** `.turn-breadcrumb` bar shown atop the diff pane while turn-scoped:
+ * `Viewing Turn {id} · ✕ back to working tree` plus a rollback button —
+ * hidden if `turn` is already rolled back, disabled while any turn is open
+ * (same `isRollbackable` lock as `turnHeaderEl`). Replaces `.turn-summary`
+ * for the duration of the scope. */
+export function turnBreadcrumbEl(
+  turn: Turn,
+  allTurns: Turn[],
+  onExit: () => void,
+  onRollback: (turn: Turn) => void,
+): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "turn-breadcrumb";
+  const label = document.createElement("span");
+  label.className = "turn-breadcrumb-label";
+  label.textContent = `Viewing Turn ${turn.id} ·`;
+  bar.appendChild(label);
+  const exit = document.createElement("button");
+  exit.className = "turn-breadcrumb-exit";
+  exit.textContent = "✕ back to working tree";
+  exit.onclick = onExit;
+  bar.appendChild(exit);
+  if (!turn.rolledBack) {
+    const rollback = document.createElement("button");
+    rollback.className = "turn-rollback";
+    rollback.textContent = "rollback";
+    rollback.disabled = !isRollbackable(turn, allTurns);
+    rollback.onclick = () => onRollback(turn);
+    bar.appendChild(rollback);
+  }
+  return bar;
 }
 
 /** `.hunk-diag-badge` count element for a hunk row, sourced from the live

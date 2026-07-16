@@ -17,7 +17,7 @@ import {
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
 import { TerminalManager } from "./terminal";
-import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
+import { DiffViewer, computeLineDiff, hunkSummaries, turnFileHunkRows } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
@@ -83,6 +83,7 @@ import {
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
+  turnFileContent,
   deliverToPty,
   runnerRun,
   runnerCancel,
@@ -94,8 +95,30 @@ import {
   langWorkspaceSymbols,
   type AgentTrackingStatus,
   type Turn,
+  type TurnFileContent,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnDropdownEl, turnSummaryEl, turnSummaryState, whisperText } from "./agent-tracking";
+import {
+  baseSourceFor,
+  enterTurnScope,
+  exitTurnScope,
+  firstViewableAgentChange,
+  getTurns,
+  hunkDiagBadgeEl,
+  markRolledBack,
+  mergeChangedFiles,
+  onTurnClosed,
+  replaceTurns,
+  reviewablePaths,
+  setTurnState,
+  suppressibleCancelledIds,
+  turnBreadcrumbEl,
+  turnDropdownEl,
+  turnFileStatus,
+  turnSummaryEl,
+  turnSummaryState,
+  whisperText,
+  type DiffScope,
+} from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -935,6 +958,9 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (!(await confirmWorkspaceClose(dir))) return;
   if (explicit) await trustWorkspace(dir);
   hideTrustToast(); // drop any leftover toast from the previous root
+  // Turn ids are per-root; a scope pointed at the old root's turn would
+  // render the wrong (or nonexistent) snapshot against the new one.
+  diffScope = exitTurnScope();
   persistWorkspaceSession();
   suppressSessionSave = true;
   currentWorkspaceTrusted = false;
@@ -1116,6 +1142,22 @@ function openTurnDropdown(root: string): void {
   document.addEventListener("mousedown", onMouse);
 }
 
+// ---- turn-scoped diff mode (turn-UX rehaul P2) ----
+// A turn row's BODY click (dropdown or breadcrumb rollback excluded) scopes
+// the diff pane to that turn's before/after snapshots instead of the normal
+// git-HEAD-vs-worktree view; see refreshScopedDiffFileList. Entered/exited
+// via the pure enterTurnScope/exitTurnScope so the transition itself stays
+// unit-testable without a DOM.
+let diffScope: DiffScope = { kind: "workspace" };
+
+function exitScopedDiff(root: string): void {
+  if (diffScope.kind !== "turn") return;
+  diffScope = exitTurnScope();
+  diffViewer.invalidate(); // mode switch: drop the scoped onExpand/onAccept closures
+  renderTurnStrip(root);
+  void refreshDiffFileList();
+}
+
 function renderTurnStrip(root: string): void {
   const pane = document.getElementById("diff-pane");
   if (!pane) return;
@@ -1127,13 +1169,7 @@ function renderTurnStrip(root: string): void {
   }
   strip.textContent = "";
   const turns = getTurns(root);
-  // 0 non-synthetic turns: leave the strip with no children at all (not just
-  // a display:none row) so #turn-strip:empty collapses it, matching the
-  // pre-rehaul "hidden entirely" behavior.
-  if (turnSummaryState(turns, Date.now()).kind === "hidden") {
-    if (turnDropdownOpen) closeTurnDropdown();
-    return;
-  }
+
   const onRollback = (turn: Turn) => {
     openRollbackDialog(root, turn, {
       turns,
@@ -1165,6 +1201,10 @@ function renderTurnStrip(root: string): void {
         } catch (e) {
           console.warn("turnList refresh after rollback failed", e);
         }
+        // A rollback fired from the breadcrumb just emptied the turn it was
+        // reviewing — fall back to the normal working-tree view rather than
+        // keep the pane scoped to a now-rolled-back snapshot.
+        if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
         diffViewer.invalidate();
         void refreshDiffFileList();
         return res;
@@ -1174,6 +1214,39 @@ function renderTurnStrip(root: string): void {
           (await turnDiskHashes(r, ps)).filter(([, hash]) => hash != null),
         ) as Record<string, string>,
     });
+  };
+
+  if (diffScope.kind === "turn") {
+    const scopedTurnId = diffScope.turnId;
+    const turn = turns.find((t) => t.id === scopedTurnId);
+    if (!turn) {
+      // Turn vanished from the local cache (shouldn't happen) — fall back
+      // defensively instead of rendering a breadcrumb for nothing.
+      diffScope = exitTurnScope();
+    } else {
+      if (turnDropdownOpen) closeTurnDropdown();
+      const breadcrumb = turnBreadcrumbEl(turn, turns, () => exitScopedDiff(root), onRollback);
+      breadcrumb.id = "turn-breadcrumb";
+      strip.appendChild(breadcrumb);
+      return; // .turn-summary/.turn-dropdown stay hidden while scoped
+    }
+  }
+
+  // 0 non-synthetic turns: leave the strip with no children at all (not just
+  // a display:none row) so #turn-strip:empty collapses it, matching the
+  // pre-rehaul "hidden entirely" behavior.
+  if (turnSummaryState(turns, Date.now()).kind === "hidden") {
+    if (turnDropdownOpen) closeTurnDropdown();
+    return;
+  }
+  const onSelectTurn = (turn: Turn) => {
+    const next = enterTurnScope(diffScope, turn);
+    if (next === diffScope) return; // open (unclosed) turn: ignored
+    diffScope = next;
+    diffViewer.invalidate(); // mode switch: drop the normal onExpand/onAccept closures
+    closeTurnDropdown();
+    renderTurnStrip(root);
+    void refreshDiffFileList();
   };
   // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
   // rollback can itself be undone; they aren't a real agent turn and are
@@ -1187,11 +1260,76 @@ function renderTurnStrip(root: string): void {
   summary.id = "turn-summary";
   strip.appendChild(summary);
   if (turnDropdownOpen) {
-    const dropdown = turnDropdownEl(turns, Date.now(), onRollback);
+    const dropdown = turnDropdownEl(turns, Date.now(), onRollback, onSelectTurn);
     dropdown.id = "turn-dropdown";
     dropdown.style.top = `${summary.offsetHeight}px`;
     strip.appendChild(dropdown);
   }
+}
+
+// Esc exits turn-scoped diff mode, same as the breadcrumb's ✕. Skipped while
+// the rollback dialog overlay is up so its own Esc-to-close (rollback-dialog.ts)
+// isn't compounded with also dropping the scope underneath it.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape" || diffScope.kind !== "turn") return;
+  if (document.querySelector(".rollback-overlay")) return;
+  if (currentRoot) exitScopedDiff(currentRoot);
+});
+
+// Turn-scoped file list: shows only `turnId`'s files, diffed against that
+// turn's own before/after snapshot content (turnFileContent) rather than
+// git-HEAD-vs-worktree — the latter would smear in every later turn's edits
+// on the same file. Fetched eagerly for all of the turn's files (turns touch
+// few) so each row's ~HEAD fallback badge is known before it's expanded, and
+// a per-file IPC error degrades to the same fallback rather than a blank row.
+async function refreshScopedDiffFileList(root: string, turnId: number): Promise<void> {
+  const turn = getTurns(root).find((t) => t.id === turnId);
+  if (!turn) {
+    exitScopedDiff(root);
+    return;
+  }
+  const contents = new Map<string, TurnFileContent | null>();
+  await Promise.all(
+    turn.files.map(async (f) => {
+      try {
+        contents.set(f.path, await turnFileContent(root, turnId, f.path));
+      } catch (e) {
+        console.warn(`turn_file_content failed for turn ${turnId} ${f.path}`, e);
+        contents.set(f.path, null); // IPC error → same fallback as snapshotted:false
+      }
+    }),
+  );
+  // The scope changed (or the pane closed) while the fetch was in flight.
+  if (currentRoot !== root || diffScope.kind !== "turn" || diffScope.turnId !== turnId) return;
+
+  const activePath = editor.active?.path ?? null;
+  const files = turn.files.map((f) => {
+    const content = contents.get(f.path) ?? null;
+    const headFallback = !content || !content.snapshotted;
+    return { path: f.path, status: turnFileStatus(f), badge: headFallback ? "~HEAD" : undefined };
+  });
+  diffViewer.renderFileList(files, activePath, {
+    onFilePick: (path: string) => {
+      void editor.openFile(path).then(() => tree.setActive(path)).catch((e) => console.warn(`cannot open ${path}`, e));
+    },
+    onExpand: async (path: string) => {
+      const content = contents.get(path);
+      if (content?.snapshotted) return turnFileHunkRows(content.before, content.after);
+      try {
+        const base = (await gitHeadContent(path).catch(() => "")) ?? "";
+        const current = await readFile(path).catch(() => "");
+        return hunkSummaries(computeLineDiff(base, current).hunks);
+      } catch {
+        return [];
+      }
+    },
+    onHunkPick: (path: string, startLine: number) => {
+      const entry = turn.files.find((f) => f.path === path);
+      void editor.revealHunkPeek(path, startLine, entry ? turnFileStatus(entry) : "M");
+    },
+    // Scoped review is read-only against a fixed snapshot baseline — no
+    // accept/reject affordances (onAccept/onReject both omitted).
+  });
 }
 
 // ---- diff file list ----
@@ -1199,6 +1337,10 @@ async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
   const root = currentRoot;
   renderTurnStrip(root);
+  if (diffScope.kind === "turn") {
+    await refreshScopedDiffFileList(root, diffScope.turnId);
+    return;
+  }
   try {
     await editor.refreshCleanGitBaselines();
     if (currentRoot !== root) return;

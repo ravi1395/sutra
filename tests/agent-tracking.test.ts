@@ -74,7 +74,7 @@ import {
   turnChipClass,
   type ReviewFile,
 } from "../src/agent-tracking";
-import type { Diagnostic, TestStatus, Turn } from "../src/ipc";
+import type { Diagnostic, TestStatus, Turn, TurnFileEntry } from "../src/ipc";
 
 const turnFixture = (id: number, paths: string[]): Turn => ({
   id,
@@ -183,13 +183,18 @@ test("suppressibleCancelledIds swallows a cancel that throws (W3.7)", async () =
 // --- Turn-UX rehaul P1: collapsed summary row + dropdown ---
 import {
   agentLabel,
+  enterTurnScope,
+  exitTurnScope,
   olderTurnsCount,
   recentClosedTurns,
   relTime,
+  turnBreadcrumbEl,
   turnDropdownEl,
+  turnFileStatus,
   turnHeaderEl,
   turnSummaryEl,
   turnSummaryState,
+  type DiffScope,
 } from "../src/agent-tracking";
 
 // Minimal fake DOM: the summary/dropdown builders only createElement, set
@@ -394,6 +399,131 @@ test("turnDropdownEl: no footer when 6 or fewer closed turns exist", () => {
     const turns = Array.from({ length: 6 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
     const dropdown = turnDropdownEl(turns, 6000, () => {}) as unknown as FakeElement;
     assert.equal(findAllByClass(dropdown, "turn-dropdown-footer").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+// --- Turn-scoped diff mode (turn-UX rehaul P2) ---
+
+test("enterTurnScope: a closed turn enters turn scope", () => {
+  const workspace: DiffScope = { kind: "workspace" };
+  const t = closedTurn(5, 1000);
+  assert.deepEqual(enterTurnScope(workspace, t), { kind: "turn", turnId: 5 });
+});
+
+test("enterTurnScope: the still-open (unclosed) turn is a no-op — same reference back", () => {
+  const workspace: DiffScope = { kind: "workspace" };
+  const open = openTurnFixture(9, 2);
+  assert.equal(enterTurnScope(workspace, open), workspace);
+
+  // Also a no-op when already scoped to a different turn — open-turn clicks
+  // never change the current scope.
+  const scoped: DiffScope = { kind: "turn", turnId: 3 };
+  assert.equal(enterTurnScope(scoped, open), scoped);
+});
+
+test("exitTurnScope: always restores the workspace (normal) scope", () => {
+  assert.deepEqual(exitTurnScope(), { kind: "workspace" });
+});
+
+test("turnFileStatus: created/deleted/modified inferred from hash presence when snapshotted", () => {
+  const created: TurnFileEntry = { path: "a", beforeHash: null, afterHash: "h2", snapshotted: true };
+  const deleted: TurnFileEntry = { path: "b", beforeHash: "h1", afterHash: null, snapshotted: true };
+  const modified: TurnFileEntry = { path: "c", beforeHash: "h1", afterHash: "h2", snapshotted: true };
+  assert.equal(turnFileStatus(created), "A");
+  assert.equal(turnFileStatus(deleted), "D");
+  assert.equal(turnFileStatus(modified), "M");
+});
+
+test("turnFileStatus: unsnapshotted entry degrades to M regardless of hash presence", () => {
+  // afterHash: null on an unsnapshotted entry can mean "deleted" OR "grown past
+  // the cap / unreadable" (turns.rs) — must not guess D from hashes alone.
+  const ambiguous: TurnFileEntry = { path: "d", beforeHash: "h1", afterHash: null, snapshotted: false };
+  assert.equal(turnFileStatus(ambiguous), "M");
+});
+
+test("turnHeaderEl: onSelect fires on a row-body click; the rollback button is wired separately", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(6, 1000);
+    let selected: Turn | null = null;
+    let rolledBack: Turn | null = null;
+    const header = turnHeaderEl(t, [t], 1000, (turn) => { rolledBack = turn; }, (turn) => { selected = turn; }) as unknown as FakeElement;
+
+    header.onclick?.();
+    assert.equal(selected, t);
+    assert.equal(rolledBack, null);
+
+    const rollback = findAllByClass(header, "turn-rollback")[0];
+    rollback.onclick?.({ stopPropagation: () => {} });
+    assert.equal(rolledBack, t);
+  } finally {
+    restore();
+  }
+});
+
+test("turnHeaderEl: without onSelect, row click is inert (no crash, no handler)", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(7, 1000);
+    const header = turnHeaderEl(t, [t], 1000, () => {}) as unknown as FakeElement;
+    assert.equal(header.onclick, null);
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: threads onSelect through to each row", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = [closedTurn(1, 1000), closedTurn(2, 2000)];
+    const selectedIds: number[] = [];
+    const dropdown = turnDropdownEl(turns, 3000, () => {}, (turn) => selectedIds.push(turn.id)) as unknown as FakeElement;
+    const headers = findAllByClass(dropdown, "turn-header");
+    headers[0].onclick?.();
+    headers[1].onclick?.();
+    assert.deepEqual(selectedIds, [2, 1]); // newest-first row order
+  } finally {
+    restore();
+  }
+});
+
+test("turnBreadcrumbEl: label names the turn; exit button wired to onExit", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(71, 1000);
+    let exited = false;
+    const bar = turnBreadcrumbEl(t, [t], () => { exited = true; }, () => {}) as unknown as FakeElement;
+    const label = findAllByClass(bar, "turn-breadcrumb-label")[0];
+    assert.equal(label.textContent, "Viewing Turn 71 ·");
+    const exit = findAllByClass(bar, "turn-breadcrumb-exit")[0];
+    exit.onclick?.();
+    assert.equal(exited, true);
+  } finally {
+    restore();
+  }
+});
+
+test("turnBreadcrumbEl: rollback button hidden once the turn is rolled back", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(4, 1000, { rolledBack: true });
+    const bar = turnBreadcrumbEl(t, [t], () => {}, () => {}) as unknown as FakeElement;
+    assert.equal(findAllByClass(bar, "turn-rollback").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("turnBreadcrumbEl: rollback disabled while any turn is still open", () => {
+  const restore = setupFakeDom();
+  try {
+    const t = closedTurn(4, 1000);
+    const open = openTurnFixture(5, 1);
+    const bar = turnBreadcrumbEl(t, [t, open], () => {}, () => {}) as unknown as FakeElement;
+    const rollback = findAllByClass(bar, "turn-rollback")[0];
+    assert.equal(rollback.disabled, true);
   } finally {
     restore();
   }
