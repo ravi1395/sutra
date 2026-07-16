@@ -375,6 +375,31 @@ export function exitTurnScope(): DiffScope {
   return { kind: "workspace" };
 }
 
+/** Render-relevant signature for `.turn-strip`: identical output across two
+ * calls means nothing a rebuild would visibly change. Covers turn identity +
+ * mutable fields (closedAt/rolledBack/testStatus/files.length — the last so
+ * an in-progress open turn's live "N files…" count keeps advancing as the
+ * agent touches more files, not just closed-turn transitions), scope,
+ * dropdown open state and paging, plus a minute-granularity time bucket
+ * roughly matching `relTime`'s own display precision (phase-offset from each
+ * turn's own closedAt, so an individual row's bucket can flip up to ~59s
+ * before this key catches up — acceptable slack for a coarse minutes label,
+ * and any real change still forces an immediate rebuild regardless). */
+export function turnStripRenderKey(
+  turns: Turn[],
+  scope: DiffScope,
+  dropdownOpen: boolean,
+  visibleCount: number,
+  nowMs: number,
+): string {
+  const turnsKey = turns
+    .map((t) => `${t.id}:${t.closedAt ?? "open"}:${t.rolledBack ? 1 : 0}:${t.testStatus?.state ?? ""}:${t.files.length}`)
+    .join(",");
+  const scopeKey = scope.kind === "turn" ? `turn:${scope.turnId}` : "workspace";
+  const minuteBucket = Math.floor(nowMs / 60000);
+  return `${turnsKey}|${scopeKey}|${dropdownOpen ? 1 : 0}|${visibleCount}|${minuteBucket}`;
+}
+
 /** Synchronous A/D/M inference for a turn's file-list row status, from the
  * manifest's before/after hash presence alone (no blob read). Only trusted
  * when `entry.snapshotted`: an unsnapshotted entry's `afterHash: null` can

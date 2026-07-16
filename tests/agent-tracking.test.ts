@@ -193,6 +193,7 @@ import {
   turnFileStatus,
   turnHeaderEl,
   turnLiveRowEl,
+  turnStripRenderKey,
   turnSummaryEl,
   turnSummaryState,
   type DiffScope,
@@ -426,6 +427,59 @@ test("enterTurnScope: the still-open (unclosed) turn is a no-op — same referen
 
 test("exitTurnScope: always restores the workspace (normal) scope", () => {
   assert.deepEqual(exitTurnScope(), { kind: "workspace" });
+});
+
+// --- turnStripRenderKey (F1: skip poll-driven rebuilds that wouldn't visibly change anything) ---
+
+const workspaceScope: DiffScope = { kind: "workspace" };
+
+test("turnStripRenderKey: identical inputs produce identical keys", () => {
+  const turns = [closedTurn(1, 1000)];
+  const a = turnStripRenderKey(turns, workspaceScope, false, 6, 5000);
+  const b = turnStripRenderKey(turns, workspaceScope, false, 6, 5000);
+  assert.equal(a, b);
+});
+
+test("turnStripRenderKey: changes when a turn's mutable fields change (closedAt/rolledBack/testStatus)", () => {
+  const base = turnStripRenderKey([closedTurn(1, 1000)], workspaceScope, false, 6, 5000);
+  const rolled = turnStripRenderKey([closedTurn(1, 1000, { rolledBack: true })], workspaceScope, false, 6, 5000);
+  const tested = turnStripRenderKey(
+    [closedTurn(1, 1000, { testStatus: { state: "pass", outputTail: "" } })],
+    workspaceScope,
+    false,
+    6,
+    5000,
+  );
+  const laterClose = turnStripRenderKey([closedTurn(1, 2000)], workspaceScope, false, 6, 5000);
+  assert.notEqual(base, rolled);
+  assert.notEqual(base, tested);
+  assert.notEqual(base, laterClose);
+});
+
+test("turnStripRenderKey: changes with scope, dropdown-open state, and paging visibleCount", () => {
+  const turns = [closedTurn(1, 1000)];
+  const workspaceKey = turnStripRenderKey(turns, workspaceScope, false, 6, 5000);
+  const scopedKey = turnStripRenderKey(turns, { kind: "turn", turnId: 1 }, false, 6, 5000);
+  const openKey = turnStripRenderKey(turns, workspaceScope, true, 6, 5000);
+  const pagedKey = turnStripRenderKey(turns, workspaceScope, false, 26, 5000);
+  assert.notEqual(workspaceKey, scopedKey);
+  assert.notEqual(workspaceKey, openKey);
+  assert.notEqual(workspaceKey, pagedKey);
+});
+
+test("turnStripRenderKey: an open turn's growing file count flips the key (live 'N files…' must keep advancing, not freeze until the minute rolls over)", () => {
+  const before = turnStripRenderKey([openTurnFixture(9, 2)], workspaceScope, false, 6, 5000);
+  const after = turnStripRenderKey([openTurnFixture(9, 3)], workspaceScope, false, 6, 5000);
+  assert.notEqual(before, after);
+});
+
+test("turnStripRenderKey: stable within the same relTime minute bucket, changes across a minute rollover", () => {
+  const turns = [closedTurn(1, 1000)];
+  const withinBucket = turnStripRenderKey(turns, workspaceScope, false, 6, 65_000); // 1m05s: same minute bucket as 60_000
+  const bucketStart = turnStripRenderKey(turns, workspaceScope, false, 6, 60_000);
+  const nextBucket = turnStripRenderKey(turns, workspaceScope, false, 6, 120_000); // next minute bucket
+  assert.equal(withinBucket, bucketStart);
+  assert.notEqual(bucketStart, nextBucket);
 });
 
 test("turnFileStatus: created/deleted/modified inferred from hash presence when snapshotted", () => {

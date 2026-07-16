@@ -114,6 +114,7 @@ import {
   turnBreadcrumbEl,
   turnDropdownEl,
   turnFileStatus,
+  turnStripRenderKey,
   turnSummaryEl,
   turnSummaryState,
   whisperText,
@@ -959,8 +960,22 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   if (explicit) await trustWorkspace(dir);
   hideTrustToast(); // drop any leftover toast from the previous root
   // Turn ids are per-root; a scope pointed at the old root's turn would
-  // render the wrong (or nonexistent) snapshot against the new one.
-  diffScope = exitTurnScope();
+  // render the wrong (or nonexistent) snapshot against the new one. Shares
+  // exitScopedDiff's exit routine (blob-cache drop + diffViewer.invalidate)
+  // but skips its render/refresh calls, which would repaint the OLD root's
+  // strip/file-list mid-switch — the new root's own poll-driven render
+  // (later in this function) covers that.
+  if (diffScope.kind === "turn") resetTurnScope();
+  // Belt-and-suspenders beyond resetTurnScope's own clear: a rollback can set
+  // diffScope back to "workspace" directly (bypassing resetTurnScope) while
+  // leaving a populated cache behind, so clear it unconditionally here too —
+  // a scoped blob cache must never survive into a different root.
+  scopedDiffCache = null;
+  // The dropdown's Esc/outside-click dismissers close over the OLD root, so
+  // leaving it open would repaint stale turns if Esc fires mid-switch; this
+  // also resets paging (turnDropdownVisibleCount) for the new root's view.
+  closeTurnDropdown();
+  lastTurnStripKey = null; // drop any stale key so the new root's first render isn't skipped
   persistWorkspaceSession();
   suppressSessionSave = true;
   currentWorkspaceTrusted = false;
@@ -1156,10 +1171,32 @@ function openTurnDropdown(root: string): void {
 // unit-testable without a DOM.
 let diffScope: DiffScope = { kind: "workspace" };
 
+// Last render's turn-strip key (see turnStripRenderKey); root-prefixed so a
+// root switch always compares unequal even if the new root's turn shape
+// happens to coincide with the old one's.
+let lastTurnStripKey: string | null = null;
+
+// A closed turn's snapshot blobs are immutable, so turnFileContent results
+// are cached per (root, turnId) rather than re-fetched every 1.5s poll tick.
+// A cached `null` means a prior IPC failure — also not retried every tick.
+let scopedDiffCache: { root: string; turnId: number; contents: Map<string, TurnFileContent | null> } | null = null;
+
+/** Drop turn-scoped diff mode's cached state (scope, blob cache, diffViewer's
+ * scoped onExpand/onAccept closures) with no DOM work. Shared by
+ * exitScopedDiff (user-triggered exit, which also repaints the current
+ * root's strip/file-list) and openWorkspace's root-switch path, which must
+ * NOT repaint the old root's strip while switching to a new one. Callers
+ * check `diffScope.kind === "turn"` first, matching exitScopedDiff's
+ * existing no-op-when-not-scoped behavior. */
+function resetTurnScope(): void {
+  diffScope = exitTurnScope();
+  scopedDiffCache = null;
+  diffViewer.invalidate();
+}
+
 function exitScopedDiff(root: string): void {
   if (diffScope.kind !== "turn") return;
-  diffScope = exitTurnScope();
-  diffViewer.invalidate(); // mode switch: drop the scoped onExpand/onAccept closures
+  resetTurnScope();
   renderTurnStrip(root);
   void refreshDiffFileList();
 }
@@ -1168,12 +1205,12 @@ function renderTurnStrip(root: string): void {
   const pane = document.getElementById("diff-pane");
   if (!pane) return;
   let strip = document.getElementById("turn-strip");
+  const isFreshStrip = !strip;
   if (!strip) {
     strip = document.createElement("div");
     strip.id = "turn-strip";
     pane.prepend(strip);
   }
-  strip.textContent = "";
   const turns = getTurns(root);
 
   const onRollback = (turn: Turn) => {
@@ -1222,20 +1259,37 @@ function renderTurnStrip(root: string): void {
     });
   };
 
+  // Resolve the scope BEFORE computing the render key: a vanished turn falls
+  // back to workspace scope, which the key must reflect.
+  let scopedTurn: Turn | undefined;
   if (diffScope.kind === "turn") {
     const scopedTurnId = diffScope.turnId;
-    const turn = turns.find((t) => t.id === scopedTurnId);
-    if (!turn) {
+    scopedTurn = turns.find((t) => t.id === scopedTurnId);
+    if (!scopedTurn) {
       // Turn vanished from the local cache (shouldn't happen) — fall back
       // defensively instead of rendering a breadcrumb for nothing.
       diffScope = exitTurnScope();
-    } else {
-      if (turnDropdownOpen) closeTurnDropdown();
-      const breadcrumb = turnBreadcrumbEl(turn, turns, () => exitScopedDiff(root), onRollback);
-      breadcrumb.id = "turn-breadcrumb";
-      strip.appendChild(breadcrumb);
-      return; // .turn-summary/.turn-dropdown stay hidden while scoped
     }
+  }
+
+  // Poll ticks fire every 1.5s; skip the rebuild when nothing render-relevant
+  // changed since the last call — this is what preserves an open dropdown's
+  // scrollTop across polling (rebuilding always resets it). Root-prefixed so
+  // a workspace switch never spuriously compares equal to the old root.
+  const key = `${root}::${turnStripRenderKey(turns, diffScope, turnDropdownOpen, turnDropdownVisibleCount, Date.now())}`;
+  if (!isFreshStrip && key === lastTurnStripKey) return;
+  lastTurnStripKey = key;
+
+  const existingDropdown = document.getElementById("turn-dropdown");
+  const savedScrollTop = existingDropdown ? existingDropdown.scrollTop : null;
+  strip.textContent = "";
+
+  if (scopedTurn) {
+    if (turnDropdownOpen) closeTurnDropdown();
+    const breadcrumb = turnBreadcrumbEl(scopedTurn, turns, () => exitScopedDiff(root), onRollback);
+    breadcrumb.id = "turn-breadcrumb";
+    strip.appendChild(breadcrumb);
+    return; // .turn-summary/.turn-dropdown stay hidden while scoped
   }
 
   // 0 non-synthetic turns: leave the strip with no children at all (not just
@@ -1273,6 +1327,7 @@ function renderTurnStrip(root: string): void {
     dropdown.id = "turn-dropdown";
     dropdown.style.top = `${summary.offsetHeight}px`;
     strip.appendChild(dropdown);
+    if (savedScrollTop != null) dropdown.scrollTop = savedScrollTop;
   }
 }
 
@@ -1297,14 +1352,21 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
     exitScopedDiff(root);
     return;
   }
-  const contents = new Map<string, TurnFileContent | null>();
+  // Reuse the (root, turnId)-keyed cache across poll ticks — a closed turn's
+  // snapshot blobs never change — and only fetch files not already cached
+  // (a fresh cache object for a new/different scope starts empty).
+  if (!scopedDiffCache || scopedDiffCache.root !== root || scopedDiffCache.turnId !== turnId) {
+    scopedDiffCache = { root, turnId, contents: new Map() };
+  }
+  const contents = scopedDiffCache.contents;
+  const uncached = turn.files.filter((f) => !contents.has(f.path));
   await Promise.all(
-    turn.files.map(async (f) => {
+    uncached.map(async (f) => {
       try {
         contents.set(f.path, await turnFileContent(root, turnId, f.path));
       } catch (e) {
         console.warn(`turn_file_content failed for turn ${turnId} ${f.path}`, e);
-        contents.set(f.path, null); // IPC error → same fallback as snapshotted:false
+        contents.set(f.path, null); // IPC error → same fallback as snapshotted:false; cached so it isn't retried every tick
       }
     }),
   );
