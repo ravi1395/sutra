@@ -1107,10 +1107,15 @@ terminals.onTabsChanged = renderTerminalSeam;
 // checklist dialog backed by turn snapshots, with live disk hashes powering
 // human-touched detection.
 let turnDropdownOpen = false;
+// Dropdown paging (P3): starts at the recent-6 default and grows +20 per
+// footer click; reset here (not just on open) so a re-open after a stray
+// close always starts collapsed rather than resuming wherever it was left.
+let turnDropdownVisibleCount = 6;
 let turnDropdownDismissers: { onKey: (ev: KeyboardEvent) => void; onMouse: (ev: MouseEvent) => void } | null = null;
 
 function closeTurnDropdown(): void {
   turnDropdownOpen = false;
+  turnDropdownVisibleCount = 6;
   if (turnDropdownDismissers) {
     document.removeEventListener("keydown", turnDropdownDismissers.onKey);
     document.removeEventListener("mousedown", turnDropdownDismissers.onMouse);
@@ -1123,6 +1128,7 @@ function closeTurnDropdown(): void {
 // dropdown may be open; a stale captured node would misreport "outside".
 function openTurnDropdown(root: string): void {
   turnDropdownOpen = true;
+  turnDropdownVisibleCount = 6;
   const isInside = (t: Node) =>
     !!document.getElementById("turn-summary")?.contains(t) || !!document.getElementById("turn-dropdown")?.contains(t);
   const onKey = (ev: KeyboardEvent) => {
@@ -1260,7 +1266,10 @@ function renderTurnStrip(root: string): void {
   summary.id = "turn-summary";
   strip.appendChild(summary);
   if (turnDropdownOpen) {
-    const dropdown = turnDropdownEl(turns, Date.now(), onRollback, onSelectTurn);
+    const dropdown = turnDropdownEl(turns, Date.now(), onRollback, onSelectTurn, turnDropdownVisibleCount, () => {
+      turnDropdownVisibleCount += 20;
+      renderTurnStrip(root);
+    });
     dropdown.id = "turn-dropdown";
     dropdown.style.top = `${summary.offsetHeight}px`;
     strip.appendChild(dropdown);

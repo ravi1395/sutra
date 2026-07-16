@@ -188,7 +188,8 @@ export function recentClosedTurns(turns: Turn[], limit = 6): Turn[] {
   return closedTurns(turns).slice(0, limit);
 }
 
-/** Count of closed turns beyond the dropdown's `limit` — footer stub count. */
+/** Count of closed turns beyond the dropdown's current `limit` (visible-count)
+ * — the footer's remaining-count label; 0 once paging has revealed all. */
 export function olderTurnsCount(turns: Turn[], limit = 6): number {
   return Math.max(0, closedTurns(turns).length - limit);
 }
@@ -298,27 +299,59 @@ export function turnHeaderEl(
   return header;
 }
 
-/** `.turn-dropdown` overlay: last `limit` closed turns (newest first) via
- * `turnHeaderEl`, plus a non-interactive "{n} older turns…" footer stub when
- * more exist (paging lands in a later task). `onSelect` threads through to
- * each row for turn-scoped diff entry. */
+/** Live top row for the still-open turn inside `.turn-dropdown`: pulsing dot +
+ * `turn open · {n} files…`, no rollback button, no click handler at all — an
+ * open turn is already a no-op for `enterTurnScope`, but this row doesn't even
+ * wire `onSelect` so there's no scoped-mode attempt to no-op in the first
+ * place. Reuses `.turn-summary-dot`'s pulse animation. */
+export function turnLiveRowEl(turn: Turn): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "turn-header turn-header--live";
+  const dot = document.createElement("span");
+  dot.className = "turn-summary-dot";
+  row.appendChild(dot);
+  const label = document.createElement("span");
+  label.className = "turn-header-label";
+  const n = turn.files.length;
+  label.textContent = `turn open · ${n} file${n === 1 ? "" : "s"}…`;
+  row.appendChild(label);
+  return row;
+}
+
+/** `.turn-dropdown` overlay: an open turn's live row (if any) atop the last
+ * `visibleCount` closed turns (newest first) via `turnHeaderEl`, plus an
+ * "{n} older turns…" footer when more exist. Clicking the footer calls
+ * `onLoadMore` (paging — the caller grows `visibleCount` and re-renders) and
+ * must not bubble into anything that would dismiss the dropdown or select a
+ * turn, so its own click handler stops propagation same as the rollback
+ * button. `onSelect` threads through to each closed-turn row for turn-scoped
+ * diff entry. */
 export function turnDropdownEl(
   turns: Turn[],
   nowMs: number,
   onRollback: (turn: Turn) => void,
   onSelect?: (turn: Turn) => void,
-  limit = 6,
+  visibleCount = 6,
+  onLoadMore?: () => void,
 ): HTMLElement {
   const dropdown = document.createElement("div");
   dropdown.className = "turn-dropdown";
-  for (const turn of recentClosedTurns(turns, limit)) {
+  const open = openTurnOf(turns);
+  if (open) dropdown.appendChild(turnLiveRowEl(open));
+  for (const turn of recentClosedTurns(turns, visibleCount)) {
     dropdown.appendChild(turnHeaderEl(turn, turns, nowMs, onRollback, onSelect));
   }
-  const older = olderTurnsCount(turns, limit);
+  const older = olderTurnsCount(turns, visibleCount);
   if (older > 0) {
     const footer = document.createElement("div");
     footer.className = "turn-dropdown-footer";
     footer.textContent = `${older} older turn${older === 1 ? "" : "s"}…`;
+    if (onLoadMore) {
+      footer.onclick = (ev) => {
+        ev.stopPropagation();
+        onLoadMore();
+      };
+    }
     dropdown.appendChild(footer);
   }
   return dropdown;

@@ -3761,7 +3761,13 @@ button:hover {
   font-size: 11px;
   color: var(--fg-faint);
   text-align: center;
+  cursor: pointer;
 }
+.turn-dropdown-footer:hover { background: var(--bg-3); color: var(--fg-dim); }
+/* Live top row for the still-open turn (P3): reuses .turn-header's layout but
+   isn't clickable — no onSelect wired, so no hover/pointer affordance either. */
+.turn-header--live { cursor: default; }
+.turn-header--live:hover { background: var(--bg-2); }
 .turn-rollback {
   margin-left: auto;
   font-size: 11px;

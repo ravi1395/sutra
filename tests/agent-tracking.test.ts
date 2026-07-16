@@ -192,6 +192,7 @@ import {
   turnDropdownEl,
   turnFileStatus,
   turnHeaderEl,
+  turnLiveRowEl,
   turnSummaryEl,
   turnSummaryState,
   type DiffScope,
@@ -524,6 +525,123 @@ test("turnBreadcrumbEl: rollback disabled while any turn is still open", () => {
     const bar = turnBreadcrumbEl(t, [t, open], () => {}, () => {}) as unknown as FakeElement;
     const rollback = findAllByClass(bar, "turn-rollback")[0];
     assert.equal(rollback.disabled, true);
+  } finally {
+    restore();
+  }
+});
+
+// --- Turn-UX rehaul P3: dropdown paging + open-turn live row ---
+
+test("paging math: 6 → 26 → 46 → all reveals every closed turn, remaining count shrinks to 0", () => {
+  const turns = Array.from({ length: 50 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+  assert.equal(recentClosedTurns(turns, 6).length, 6);
+  assert.equal(olderTurnsCount(turns, 6), 44);
+  assert.equal(recentClosedTurns(turns, 26).length, 26);
+  assert.equal(olderTurnsCount(turns, 26), 24);
+  assert.equal(recentClosedTurns(turns, 46).length, 46);
+  assert.equal(olderTurnsCount(turns, 46), 4);
+  // Fourth page (66) overshoots the 50-turn total — slice caps at all of them
+  // and the remaining count clamps to 0 rather than going negative.
+  assert.equal(recentClosedTurns(turns, 66).length, 50);
+  assert.equal(olderTurnsCount(turns, 66), 0);
+});
+
+test("turnDropdownEl: footer label reflects visibleCount and disappears once exhausted", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = Array.from({ length: 30 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+    const at6 = turnDropdownEl(turns, 30_000, () => {}, undefined, 6) as unknown as FakeElement;
+    assert.equal(findAllByClass(at6, "turn-header").length, 6);
+    assert.equal(findAllByClass(at6, "turn-dropdown-footer")[0].textContent, "24 older turns…");
+
+    const at26 = turnDropdownEl(turns, 30_000, () => {}, undefined, 26) as unknown as FakeElement;
+    assert.equal(findAllByClass(at26, "turn-header").length, 26);
+    assert.equal(findAllByClass(at26, "turn-dropdown-footer")[0].textContent, "4 older turns…");
+
+    const atAll = turnDropdownEl(turns, 30_000, () => {}, undefined, 46) as unknown as FakeElement;
+    assert.equal(findAllByClass(atAll, "turn-header").length, 30);
+    assert.equal(findAllByClass(atAll, "turn-dropdown-footer").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: visibleCount is caller-supplied — a fresh call at 6 reproduces the initial render (backs main.ts's reset-on-reopen, which just re-passes 6)", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = Array.from({ length: 30 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+    const first = turnDropdownEl(turns, 30_000, () => {}, undefined, 6) as unknown as FakeElement;
+    // Simulate paging forward while the dropdown is open...
+    turnDropdownEl(turns, 30_000, () => {}, undefined, 26);
+    // ...then a close+reopen: main.ts resets its visibleCount state to 6 and
+    // re-renders. The builder itself holds no state between calls, so this
+    // must reproduce the exact initial 6-row + "24 older" render.
+    const reopened = turnDropdownEl(turns, 30_000, () => {}, undefined, 6) as unknown as FakeElement;
+    assert.deepEqual(
+      findAllByClass(reopened, "turn-header-label").map((el) => el.textContent),
+      findAllByClass(first, "turn-header-label").map((el) => el.textContent),
+    );
+    assert.equal(findAllByClass(reopened, "turn-dropdown-footer")[0].textContent, "24 older turns…");
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: footer click fires onLoadMore only — never onSelect, never the rollback callback", () => {
+  const restore = setupFakeDom();
+  try {
+    const turns = Array.from({ length: 10 }, (_, i) => closedTurn(i + 1, (i + 1) * 1000));
+    let loadMoreCalls = 0;
+    let selected: Turn | null = null;
+    let rolledBack: Turn | null = null;
+    const dropdown = turnDropdownEl(
+      turns,
+      10_000,
+      (t) => { rolledBack = t; },
+      (t) => { selected = t; },
+      6,
+      () => { loadMoreCalls++; },
+    ) as unknown as FakeElement;
+    const footer = findAllByClass(dropdown, "turn-dropdown-footer")[0];
+    footer.onclick?.({ stopPropagation: () => {} });
+    assert.equal(loadMoreCalls, 1);
+    assert.equal(selected, null);
+    assert.equal(rolledBack, null);
+  } finally {
+    restore();
+  }
+});
+
+test("turnLiveRowEl: pulsing dot + file-count label, no rollback affordance, no click handler", () => {
+  const restore = setupFakeDom();
+  try {
+    const open = openTurnFixture(3, 1);
+    const row = turnLiveRowEl(open) as unknown as FakeElement;
+    assert.ok(row.className.split(" ").includes("turn-header--live"));
+    assert.equal(row.onclick, null);
+    assert.equal(findAllByClass(row, "turn-summary-dot").length, 1);
+    assert.equal(findAllByClass(row, "turn-rollback").length, 0);
+    const label = findAllByClass(row, "turn-header-label")[0];
+    assert.equal(label.textContent, "turn open · 1 file…");
+  } finally {
+    restore();
+  }
+});
+
+test("turnDropdownEl: open turn renders a live top row ahead of closed turns, not clickable / no rollback", () => {
+  const restore = setupFakeDom();
+  try {
+    const open = openTurnFixture(9, 4);
+    const closed = closedTurn(1, 1000);
+    const dropdown = turnDropdownEl([open, closed], 9000, () => {}, () => {}) as unknown as FakeElement;
+    const liveRows = findAllByClass(dropdown, "turn-header--live");
+    assert.equal(liveRows.length, 1);
+    const live = liveRows[0];
+    assert.equal(live.onclick, null);
+    assert.equal(findAllByClass(live, "turn-rollback").length, 0);
+    assert.equal(findAllByClass(live, "turn-header-label")[0].textContent, "turn open · 4 files…");
+    // Live row precedes the regular closed-turn rows.
+    assert.equal(dropdown.children[0], live);
   } finally {
     restore();
   }
