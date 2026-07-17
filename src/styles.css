@@ -92,6 +92,7 @@
   --diff-add: #3fb950; --diff-mod: #d29922; --diff-del: #f85149;
   --diff-add-wash: rgba(63, 185, 80, 0.13); --diff-del-wash: rgba(248, 81, 73, 0.13);
   --diff-file-mod: #d29922; --diff-file-add: #3fb950; --diff-file-del: #f85149;
+  --graphite-tab-active: #f78166;
   --bg-drawer: #10151c; --bg-whisper: #10151c;
   --on-em: #0d1117; --scrim: rgba(1, 4, 9, 0.6); --shadow: rgba(1, 4, 9, 0.45); --panel-bg: #161b22;
   --r-lg: 6px; --r-md: 6px; --r-sm: 3px;
@@ -1328,6 +1329,46 @@ button:hover {
   color: inherit;
 }
 
+/* ── W1/T2 Graphite structure: flat tree + text status badges only. ── */
+:root.view-graphite .tree {
+  padding: 6px 0;
+  font-family: var(--ui);
+}
+:root.view-graphite .tree-row {
+  height: 24px;
+  gap: 5px;
+  padding-right: 10px;
+  background: transparent;
+}
+:root.view-graphite .tree-row:hover,
+:root.view-graphite .tree-row.multi-selected {
+  background: var(--bg-3);
+}
+:root.view-graphite .tree-row.active,
+:root.view-graphite .tree-row.multi-selected.active {
+  --tree-active-stitch: 0px;
+  border-left: 0;
+  background: var(--em-wash-row);
+}
+:root.view-graphite .tree-icon {
+  display: none;
+}
+:root.view-graphite .tree-dot {
+  width: auto;
+  height: auto;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border-radius: 0;
+  background: none;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+:root.view-graphite .tree-dot.modified::after { content: "M"; color: var(--diff-mod); }
+:root.view-graphite .tree-dot.added::after { content: "A"; color: var(--diff-add); }
+:root.view-graphite .tree-dot.deleted::after { content: "D"; color: var(--diff-del); }
+
 /* ---- editor tabs ---- */
 .pane-tabs {
   flex: 0 0 32px;
@@ -1387,6 +1428,37 @@ button:hover {
 }
 .tab .tab-close:hover {
   opacity: 1;
+}
+
+/* ── W1/T2 Graphite structure: GitHub-style location underline. ── */
+:root.view-graphite .pane-tabs {
+  gap: 4px;
+  padding: 0 12px;
+  background: var(--bg-0);
+}
+:root.view-graphite .tab.graphite-tab {
+  position: relative;
+  gap: 7px;
+  padding: 0 12px;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+}
+:root.view-graphite .tab.graphite-tab:hover { color: var(--fg); }
+:root.view-graphite .tab.graphite-tab.active {
+  padding-bottom: 0;
+  border-bottom: 0;
+  color: var(--fg);
+  font-weight: 500;
+}
+:root.view-graphite .tab.graphite-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--graphite-tab-active);
 }
 
 .pane-host {
@@ -1782,6 +1854,42 @@ button:hover {
 .terminal-seam-rule {
   flex: 1;
   border-top: 1px dashed color-mix(in srgb, var(--fg-faint) 24%, transparent);
+}
+
+/* ── W1/T2 Graphite structure: dynamic Terminal/Problems band. ── */
+:root.view-graphite #terminal-area.terminal-collapsed #terminal-seam {
+  display: none;
+}
+:root.view-graphite .graphite-band {
+  display: flex;
+  flex: 0 0 35px;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+:root.view-graphite .graphite-band-tab {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+}
+:root.view-graphite .graphite-band-tab:hover { background: transparent; color: var(--fg); }
+:root.view-graphite .graphite-band-tab.active { color: var(--fg); font-weight: 500; }
+:root.view-graphite .graphite-band-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--graphite-tab-active);
 }
 #term-host {
   flex: 1;

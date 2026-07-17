@@ -407,7 +407,7 @@ The command palette switches between the coupled **Classic**, **North Light**, *
 
 ### Graphite
 
-Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git-diff green/amber/red paint, and a locally bundled font license. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime.
+Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git-diff green/amber/red paint, and a locally bundled font license. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime. Its v1 structure uses flat file-tree `M`/`A`/`D` badges, GitHub-style underline editor tabs, and a Terminal/Problems band that reuses the existing Problems panel.
 
 | Section | Options |
 |---|---|

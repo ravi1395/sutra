@@ -889,8 +889,14 @@ function applyTheme(view: ViewId, theme: ViewVariant): void {
 
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
-  settings = clampSettings(next);
+  const clamped = clampSettings(next);
+  const viewChanged = settings.view !== clamped.view;
+  settings = clamped;
   applyTheme(settings.view, settings.theme);
+  if (viewChanged) {
+    editor.renderAllTabs();
+    syncGraphiteBottomPanel();
+  }
   terminals.retheme();
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
@@ -1087,6 +1093,7 @@ const btnTerm = $("btn-term");
 // Real value loaded async at boot (see boot() below); this placeholder
 // (closed, default height) is only visible for the instant before then.
 let drawerState: DrawerState = clampDrawerState(null);
+let uiStateLoaded = false;
 const terminalSeam = document.createElement("button");
 terminalSeam.id = "terminal-seam";
 terminalSeam.type = "button";
@@ -1115,12 +1122,19 @@ function renderTerminalSeam(): void {
 }
 
 function setTerminal(on: boolean): void {
+  if (document.documentElement.classList.contains("view-graphite")) {
+    graphiteBottomPanel = on ? "terminal" : "problems";
+    setProblemsHost(!on);
+  }
   saveDrawerState({ ...drawerState, open: on });
   termArea.classList.toggle("terminal-collapsed", !on);
   hres.classList.toggle("hidden", !on);
   btnTerm.classList.toggle("on", on);
-  termArea.style.flex = on ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+  termArea.style.flex = on
+    ? `0 1 ${drawerState.heightPx}px`
+    : document.documentElement.classList.contains("view-graphite") ? "0 0 35px" : "0 0 30px";
   renderTerminalSeam();
+  renderGraphiteBottomPanel();
   if (on) {
     if (terminals.count === 0) void terminals.create();
     // Refit, then focus so keystrokes reach the shell without a manual click.
@@ -2428,8 +2442,82 @@ const problemsHost = $("problems-panel-host");
 problemsHost.append(problemsPanelEl());
 const sessionsHost = $("sessions-panel-host");
 sessionsHost.append(sessionsPanelEl());
-function setProblemsPanel(on: boolean): void {
+type GraphiteBottomPanel = "terminal" | "problems";
+type GraphiteBottomSnapshot = { drawer: DrawerState; problemsOpen: boolean };
+let graphiteBand: HTMLElement | null = null;
+let graphiteBottomPanel: GraphiteBottomPanel = "terminal";
+let graphiteBottomSnapshot: GraphiteBottomSnapshot | null = null;
+
+function setProblemsHost(on: boolean): void {
   problemsHost.classList.toggle("hidden", !on);
+}
+
+function renderGraphiteBottomPanel(): void {
+  if (!graphiteBand) return;
+  graphiteBand.querySelectorAll<HTMLButtonElement>(".graphite-band-tab").forEach((tab) => {
+    const active = tab.dataset.panel === graphiteBottomPanel;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+}
+
+function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  graphiteBottomPanel = panel;
+  setProblemsHost(panel === "problems");
+  setTerminal(panel === "terminal");
+}
+
+function syncGraphiteBottomPanel(): void {
+  if (!document.documentElement.classList.contains("view-graphite")) {
+    if (graphiteBand) {
+      graphiteBand.remove();
+      const snapshot = graphiteBottomSnapshot;
+      graphiteBottomSnapshot = null;
+      if (snapshot) {
+        drawerState = snapshot.drawer;
+        setTerminal(snapshot.drawer.open);
+        setProblemsHost(snapshot.problemsOpen);
+      } else {
+        termArea.style.flex = drawerState.open ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+        renderTerminalSeam();
+      }
+    }
+    graphiteBand = null;
+    return;
+  }
+  if (!graphiteBand) {
+    graphiteBottomSnapshot = { drawer: { ...drawerState }, problemsOpen: !problemsHost.classList.contains("hidden") };
+    const band = document.createElement("div");
+    band.className = "graphite-band";
+    band.setAttribute("role", "tablist");
+    for (const panel of ["terminal", "problems"] as const) {
+      const tab = document.createElement("button");
+      tab.className = "graphite-band-tab";
+      tab.type = "button";
+      tab.dataset.panel = panel;
+      tab.setAttribute("role", "tab");
+      tab.textContent = panel === "terminal" ? "Terminal" : "Problems";
+      tab.onclick = () => setGraphiteBottomPanel(panel);
+      band.append(tab);
+    }
+    graphiteBand = band;
+    termArea.prepend(band);
+    if (!drawerState.open) termArea.style.flex = "0 0 35px";
+  }
+  const panel = problemsHost.classList.contains("hidden") ? "terminal" : "problems";
+  if (uiStateLoaded) setGraphiteBottomPanel(panel);
+  else {
+    graphiteBottomPanel = panel;
+    renderGraphiteBottomPanel();
+  }
+}
+
+function setProblemsPanel(on: boolean): void {
+  if (document.documentElement.classList.contains("view-graphite")) {
+    setGraphiteBottomPanel(on ? "problems" : "terminal");
+    return;
+  }
+  setProblemsHost(on);
 }
 function setSessionsPanel(on: boolean): void {
   sessionsHost.classList.toggle("hidden", !on);
@@ -3102,14 +3190,17 @@ renderWhisperBar();
 // the user left off instead of a blank window; skips silently if the folder
 // was moved/deleted since last run.
 void (async function boot(): Promise<void> {
-  settings = await loadSettings();
-  applySettings(settings);
+  applySettings(await loadSettings());
 
   const ui = await readUiState({
     drawerRaw: localStorage.getItem(DRAWER_KEY),
     composerHRaw: localStorage.getItem(LEGACY_DRAWER_H_KEY),
   });
   drawerState = ui.terminalDrawer;
+  uiStateLoaded = true;
+  if (graphiteBand) {
+    graphiteBottomSnapshot = { drawer: { ...drawerState }, problemsOpen: !problemsHost.classList.contains("hidden") };
+  }
   setTerminal(drawerState.open);
 
   // One-shot on upgrade: port pre-migration recents/trustedRoots into the
