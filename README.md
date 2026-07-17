@@ -405,6 +405,10 @@ instantly and persist through Sutra's shared settings store across launches.
 
 The command palette switches between the coupled **Classic**, **North Light**, **Graphite**, and **Stanza** views. Use `View variant: next` to cycle only the variants valid for the active view; the selection persists per the existing single-window settings behavior.
 
+### North Light
+
+North Light adds a right-side **Ledger** rail for agent turns. It opens by default for the session and toggles with **⌘L** while the North sidebar drawer and blocking overlays are closed. Running turns stay expanded; closed turns can be expanded to inspect file names, test state, and linked-task review disposition. Closed real turns reuse the existing exact-turn **Review diff** and guarded **Rollback** actions. The rail deliberately shows no line-count deltas and does not appear in Classic, Graphite, or Stanza.
+
 ### Graphite
 
 Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git-diff green/amber/red paint, and a locally bundled font license. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime. Its v1 structure uses flat file-tree `M`/`A`/`D` badges, GitHub-style underline editor tabs, and a Terminal/Problems band that reuses the existing Problems panel.

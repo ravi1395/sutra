@@ -235,6 +235,7 @@ import {
   hasActiveBlockingOverlay,
 } from "./drawer";
 import { createTurnActions, waitForRollbackAction } from "./turn-actions";
+import { mountLedger } from "./ledger";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -681,6 +682,7 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let latestTasks: readonly Task[] = [];
 let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
@@ -932,6 +934,7 @@ function applySettings(next: UserSettings): void {
     northSurfacePills.replaceChildren();
     renderWhisperBar();
     if (latestSurfaces) renderSurfacePills(latestSurfaces);
+    refreshTurnActionConsumers();
   }
   terminals.retheme();
   const rootStyle = document.documentElement.style;
@@ -1042,6 +1045,8 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
     resetComposerForWorkspace();
+    latestTasks = [];
+    refreshTurnActionConsumers();
     // Invalidate the previous root's symbols at the switch boundary; the
     // backend builds off-thread and generation-gates late completions.
     void langIndexBuild(dir).catch(() => {});
@@ -1105,6 +1110,7 @@ async function hydrateTurnsForWorkspace(root: string): Promise<void> {
     const turns = await turnList(root);
     if (currentRoot !== root) return;
     replaceTurns(root, turns);
+    refreshTurnActionConsumers();
   } catch {
     // A non-Git root or unavailable backend still opens normally; saved task
     // evidence remains visible without the live turn detail.
@@ -1338,12 +1344,26 @@ async function applyTurnRollback(root: string, turnId: number, paths: string[]):
 
 function refreshTurnActionConsumers(): void {
   if (currentRoot) renderTurnStrip(currentRoot);
+  ledger.render({
+    root: currentRoot,
+    turns: currentRoot ? getTurns(currentRoot) : [],
+    tasks: latestTasks,
+  });
 }
 
 const turnActions = createTurnActions({
   openReviewDiff: openTurnReviewDiff,
   rollbackTurn: openTurnRollback,
   refresh: refreshTurnActionConsumers,
+});
+
+const ledgerHost = document.createElement("aside");
+ledgerHost.id = "ledger";
+ledgerHost.setAttribute("aria-label", "Turn ledger");
+$("body").appendChild(ledgerHost);
+const ledger = mountLedger(ledgerHost, turnActions, {
+  currentRoot: () => currentRoot,
+  turnsForRoot: (root) => getTurns(root),
 });
 
 // Last render's turn-strip key (see turnStripRenderKey); root-prefixed so a
@@ -1768,7 +1788,6 @@ btnTasks.setAttribute("aria-label", "Toggle tasks");
 btnTasks.innerHTML = icon("check", 17);
 $("view-tools").insertBefore(btnTasks, $("btn-menu"));
 const activeWorktreeSetups = new Map<string, { root: string; taskId: string; automationId: string }>();
-let latestTasks: readonly Task[] = [];
 const tasksPanel = mountTasksPanel({
   container: tasksPane,
   getRoot: () => currentRoot,
@@ -1928,6 +1947,7 @@ const tasksPanel = mountTasksPanel({
     const root = currentRoot;
     latestTasks = root ? entries.filter((task) => task.root === root) : [];
     annotations.setTaskContext(latestTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
+    refreshTurnActionConsumers();
   },
 });
 let tasksAgentRefreshTimer: number | undefined;
@@ -2360,8 +2380,9 @@ async function pollAgentChanges(): Promise<void> {
     const res = await turnPoll(root);
     if (currentRoot !== root) return;
     setTurnState(root, res);
-    // Strip re-render after state update (refreshDiffFileList above ran pre-poll).
-    if (!diffPane.classList.contains("hidden")) renderTurnStrip(root);
+    // Shared turn consumers re-render after state update
+    // (refreshDiffFileList above ran pre-poll).
+    refreshTurnActionConsumers();
   } catch {
     // Poll failures must not interrupt editing.
   }
@@ -2568,6 +2589,10 @@ export async function cancelTaskRequiredCheck(task: Task, automationId: string):
 }
 
 // Auto-run the project's test automation when an agent turn closes.
+onTurnClosed((root) => {
+  if (currentRoot === root) refreshTurnActionConsumers();
+});
+
 onTurnClosed((root, turn) => {
   void (async () => {
     if (!isTestAutoRunEnabled(root)) return;
@@ -2579,7 +2604,7 @@ onTurnClosed((root, turn) => {
       turn.id,
       turnTestRecord,
       () => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000),
-      () => { if (currentRoot === root) renderTurnStrip(root); },
+      () => { if (currentRoot === root) refreshTurnActionConsumers(); },
     );
   })();
 });
@@ -2662,7 +2687,7 @@ void onRunnerDone((p) => {
   // truthful to what the runner observed even if the backend record call
   // below fails.
   setTurnTestStatus(root, turnId, finalStatus);
-  if (currentRoot === root) renderTurnStrip(root);
+  if (currentRoot === root) refreshTurnActionConsumers();
   void turnTestRecord(root, turnId, finalStatus).catch(() => {});
 });
 
@@ -2993,6 +3018,21 @@ window.addEventListener("keydown", (e) => {
     preventDefault: () => e.preventDefault(),
     stopPropagation: () => e.stopPropagation(),
   }, { north: settings.view === "north", blockingOverlayActive })) return;
+  if (
+    settings.view === "north"
+    && mod
+    && e.code === "KeyL"
+    && !e.shiftKey
+    && !e.altKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    ledger.toggle();
+    return;
+  }
   if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window

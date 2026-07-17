@@ -182,3 +182,9 @@ Multi-view W2/T5 North sidebar drawer. Controller tests prove node-placement and
 | Date | Version | Criterion | Surface | Evidence | Status |
 |---|---|---|---|---|---|
 | 2026-07-17 | 2.3.3 | MV-5: North ⌘E drawer preserves tree state, Search/Outline access, file-open focus, and Classic docked-sidebar parity across view switches | UI | Behavioral controller tests in `tests/drawer.test.ts`; live behavior unobserved | BLOCKED(manual: expand directories → close/reopen with ⌘E and confirm expansion persists; open files from Files/Search/Outline and confirm drawer closes with editor focused; switch North day↔night while open, then North→Classic→North and confirm drawer/docked sidebar restoration; compare Classic against baseline) |
+
+Multi-view W2/T6b North ledger rail. Pure projection tests prove turn ordering, expansion defaults, file-name projection, review/test state, rollback filtering, and struck rollback rendering; the native layout/action flow remains a manual gate.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-18 | 2.3.3 | MV-6: North ledger renders live turn/task/test/review state and exact-turn actions without changing other views | UI | `tests/ledger.test.ts` model tests; shared 1.5 s turn poll and task/test/action refresh wiring; live behavior unobserved | BLOCKED(manual: switch North → ledger is open at the right of `#main`; start/close a real agent turn and confirm newest-first live expansion then closed collapse; expand it and confirm file names, test state, and linked review badge; invoke Review diff and confirm exact-turn scope; with no open turn invoke Rollback and confirm guarded dialog/result + struck row; toggle ⌘L, then open the ⌘E drawer/blocking overlay and confirm ⌘L is ignored; switch Classic/Graphite/Stanza and confirm no ledger layout effect; switch roots during an action and confirm no stale-root action or rows) |

@@ -163,7 +163,8 @@
 
 /* The North drawer host is created before the persisted view loads. Keep that
    dynamic overlay inert by default; every visible/layout rule remains North-scoped. */
-.north-sidebar-overlay { display: none; }
+.north-sidebar-overlay,
+#ledger { display: none; }
 
 /* ── W2/T3 North Light sheet paint. Existing hosts stay in their current ownership. ── */
 :root.view-north #titlebar {
@@ -205,6 +206,195 @@
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   box-shadow: var(--sheet-shadow);
+}
+:root.view-north #ledger:not(.hidden) {
+  width: 272px;
+  max-width: 272px;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 1 272px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sheet-shadow);
+}
+:root.view-north .ledger-header {
+  flex: 0 0 auto;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+:root.view-north .ledger-title {
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+:root.view-north .ledger-shortcut {
+  padding: 2px 5px;
+  color: var(--fg-faint);
+  font: 10px var(--ui);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-turns {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+:root.view-north .ledger-empty {
+  padding: 18px 10px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+:root.view-north .ledger-turn {
+  margin-bottom: 7px;
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+:root.view-north .ledger-turn-summary {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 7px;
+  align-items: center;
+  padding: 0 9px;
+  color: var(--fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+:root.view-north .ledger-turn-summary:hover,
+:root.view-north .ledger-turn-summary:focus-visible {
+  background: var(--em-wash-row);
+}
+:root.view-north .ledger-turn-id {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root.view-north .ledger-phase,
+:root.view-north .ledger-chevron {
+  color: var(--fg-faint);
+  font-size: 10px;
+}
+:root.view-north .ledger-running .ledger-phase {
+  color: var(--em);
+}
+:root.view-north .ledger-running .ledger-phase::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: 1px;
+  background: var(--em);
+  border-radius: 50%;
+}
+:root.view-north .ledger-struck .ledger-turn-id,
+:root.view-north .ledger-struck .ledger-file {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+:root.view-north .ledger-turn-details {
+  padding: 0 9px 9px;
+  border-top: 1px solid var(--line);
+}
+:root.view-north .ledger-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 0;
+}
+:root.view-north .ledger-badge {
+  padding: 2px 6px;
+  color: var(--fg-dim);
+  font-size: 9px;
+  line-height: 1.4;
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-test-pass,
+:root.view-north .ledger-review-accepted {
+  color: var(--diff-add);
+}
+:root.view-north .ledger-test-fail,
+:root.view-north .ledger-review-unresolved {
+  color: var(--diff-del);
+}
+:root.view-north .ledger-test-running {
+  color: var(--em);
+}
+:root.view-north .ledger-files {
+  max-height: 154px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+:root.view-north .ledger-file {
+  padding: 3px 0;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root.view-north .ledger-file::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--fg-ghost);
+}
+:root.view-north .ledger-file-empty {
+  color: var(--fg-faint);
+}
+:root.view-north .ledger-actions {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+}
+:root.view-north .ledger-action {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 6px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-action:hover:not(:disabled),
+:root.view-north .ledger-action:focus-visible:not(:disabled) {
+  color: var(--em);
+  border-color: var(--em-dim);
+}
+:root.view-north .ledger-action-danger:hover:not(:disabled),
+:root.view-north .ledger-action-danger:focus-visible:not(:disabled) {
+  color: var(--diff-del);
+  border-color: var(--diff-del);
+}
+:root.view-north .ledger-action:disabled {
+  color: var(--fg-ghost);
+  cursor: default;
+  opacity: .65;
 }
 :root.view-north #sidebar-header,
 :root.view-north .pane-tabs,
