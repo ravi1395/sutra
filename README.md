@@ -399,7 +399,7 @@ size cap), and `unsafe` (pre-edit content was never capturable).
 ## Settings
 
 Open with the titlebar Settings button, **⌘,**, or "Settings" in the command palette. Changes apply
-instantly and persist in `localStorage` across launches.
+instantly and persist through Sutra's shared settings store across launches.
 
 ### View switching
 

@@ -42,6 +42,21 @@ function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+function hexLuminance(hex: string): number {
+  const channels = hex.match(/[a-f0-9]{2}/gi);
+  assert.ok(channels?.length === 3, `expected a six-digit hex colour, received ${hex}`);
+  const linear = channels.map((channel) => {
+    const value = parseInt(channel, 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const [lighter, darker] = [hexLuminance(foreground), hexLuminance(background)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 test("zero legacy-alias var() consumers remain anywhere in styles.css", () => {
   for (const alias of LEGACY_ALIASES) {
     const count = countOccurrences(css, `var(${alias})`);
@@ -105,5 +120,19 @@ test("splitter/resizer selectors carry no transition (60fps drag invariant)", ()
   for (const selector of dragSelectors) {
     const block = extractBlock(css, selector);
     assert.doesNotMatch(block, /transition:/, `${selector} unexpectedly declares a transition`);
+  }
+});
+
+test("North day syntax spike meets body contrast against its editor sheet", () => {
+  const northBlock = extractBlock(css, ".view-north {");
+  const background = northBlock.match(/--bg-1:\s*(#[a-f0-9]{6})/i)?.[1];
+  assert.ok(background, "North day must declare --bg-1");
+  for (const token of ["--syn-type", "--syn-comment"]) {
+    const foreground = northBlock.match(new RegExp(`${token}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+    assert.ok(foreground, `North day must declare ${token}`);
+    assert.ok(
+      contrastRatio(foreground, background) >= 4.5,
+      `${token} must meet 4.5:1 against --bg-1`,
+    );
   }
 });
