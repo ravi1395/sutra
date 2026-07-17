@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { loadDrawerState } from "../src/terminal-groups";
-import { buildTermTheme, retheme } from "../src/terminal";
+import { buildTermTheme, retheme, TerminalManager } from "../src/terminal";
 import type { ITheme } from "@xterm/xterm";
 import { onThemeChange } from "../src/theme-tokens";
 
@@ -83,6 +83,53 @@ test("retheme() fans a freshly built theme out to every live session", () => {
   // Distinct object identity per session is not required (same theme all round), but every
   // session must have actually been written, not just the first/last.
   assert.equal(sessions.filter((s) => s.term.options.theme !== undefined).length, sessions.length);
+});
+
+test("terminal maximize state round-trips through the public owner API", () => {
+  const classList = () => {
+    const values = new Set<string>();
+    return {
+      add: (...names: string[]) => names.forEach((name) => values.add(name)),
+      remove: (...names: string[]) => names.forEach((name) => values.delete(name)),
+      contains: (name: string) => values.has(name),
+    };
+  };
+  const mainClasses = classList();
+  const leftClasses = classList();
+  const rightClasses = classList();
+  const areaStyle = { flex: "0 1 320px" };
+  let refits = 0;
+  const manager = Object.assign(Object.create(TerminalManager.prototype), {
+    maximizedGroup: null,
+    savedFlex: "",
+    groups: { left: [{}], right: [{}] },
+    mainEl: { classList: mainClasses },
+    area: { style: areaStyle },
+    groupHosts: {
+      left: { classList: leftClasses },
+      right: { classList: rightClasses },
+    },
+    renderMaximizeButtons: () => {},
+    refit: () => { refits += 1; },
+  }) as TerminalManager;
+
+  manager.setMaximizeState("left");
+  assert.equal(manager.getMaximizeState(), "left");
+  assert.equal(mainClasses.contains("terminal-maximized"), true);
+  assert.equal(rightClasses.contains("hidden"), true);
+  assert.equal(areaStyle.flex, "");
+
+  manager.setMaximizeState("right");
+  assert.equal(manager.getMaximizeState(), "right");
+  assert.equal(leftClasses.contains("hidden"), true);
+  assert.equal(rightClasses.contains("hidden"), false);
+
+  manager.setMaximizeState(null);
+  assert.equal(manager.getMaximizeState(), null);
+  assert.equal(mainClasses.contains("terminal-maximized"), false);
+  assert.equal(leftClasses.contains("hidden"), false);
+  assert.equal(areaStyle.flex, "0 1 320px");
+  assert.equal(refits, 3);
 });
 
 test("onThemeChange no-ops outside a DOM instead of throwing", () => {

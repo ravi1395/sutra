@@ -24,6 +24,8 @@ import { isMod } from "./shortcuts";
 import { isControlSequence } from "./terminal-input";
 import { cssVar, onThemeChange, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
 
+export type TerminalMaximizeState = TerminalGroupSide | null;
+
 interface Term {
   id: string;
   term: Terminal;
@@ -844,45 +846,48 @@ export class TerminalManager {
     }
   }
 
-  /** Toggle maximize for a specific group; in split view only that group expands. */
-  toggleMaximize(side: TerminalGroupSide): void {
-    const inSplit = this.groups.right.length > 0;
-    const isAlreadyMaximized = this.maximizedGroup === side;
+  /** Current terminal maximize state, suitable for snapshot/restore by layout owners. */
+  getMaximizeState(): TerminalMaximizeState {
+    return this.maximizedGroup;
+  }
 
-    if (isAlreadyMaximized) {
-      // Restore
+  /** Apply an exact maximize state through the same DOM path as the terminal controls. */
+  setMaximizeState(next: TerminalMaximizeState): void {
+    if (this.maximizedGroup === next) return;
+    const inSplit = this.groups.right.length > 0;
+    const previous = this.maximizedGroup;
+
+    if (previous !== null && inSplit) {
+      const other = previous === "left" ? "right" : "left";
+      this.groupHosts[other].classList.remove("hidden");
+    }
+
+    if (next === null) {
       this.maximizedGroup = null;
-      this.mainEl.classList.remove('terminal-maximized');
+      this.mainEl.classList.remove("terminal-maximized");
       this.area.style.flex = this.savedFlex;
-      if (inSplit) {
-        // Unhide the other group
-        const other = side === 'left' ? 'right' : 'left';
-        this.groupHosts[other].classList.remove('hidden');
-      }
     } else {
-      // Maximize this group
-      if (this.maximizedGroup !== null) {
-        // Un-hide previously hidden group before switching
-        const prev = this.maximizedGroup === 'left' ? 'right' : 'left';
-        this.groupHosts[prev].classList.remove('hidden');
-      }
-      this.maximizedGroup = side;
-      // Save inline flex set by drag-resizer before applying CSS class
-      this.savedFlex = this.area.style.flex;
-      this.area.style.flex = '';
-      this.mainEl.classList.add('terminal-maximized');
+      if (previous === null) this.savedFlex = this.area.style.flex;
+      this.maximizedGroup = next;
+      this.area.style.flex = "";
+      this.mainEl.classList.add("terminal-maximized");
       if (inSplit) {
-        const other = side === 'left' ? 'right' : 'left';
-        this.groupHosts[other].classList.add('hidden');
+        const other = next === "left" ? "right" : "left";
+        this.groupHosts[other].classList.add("hidden");
       }
     }
     this.renderMaximizeButtons();
     this.refit();
   }
 
+  /** Toggle maximize for a specific group; in split view only that group expands. */
+  toggleMaximize(side: TerminalGroupSide): void {
+    this.setMaximizeState(this.maximizedGroup === side ? null : side);
+  }
+
   /** Update maximize button icons per group based on current maximized state. */
   private renderMaximizeButtons(): void {
-    for (const side of ['left', 'right'] as const) {
+    for (const side of ["left", "right"] as const) {
       const btn = this.maximizeBtns[side];
       if (!btn) continue;
       const isMax = this.maximizedGroup === side;

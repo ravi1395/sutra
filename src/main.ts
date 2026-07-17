@@ -16,7 +16,7 @@ import {
 } from "./split-drop";
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
-import { TerminalManager } from "./terminal";
+import { TerminalManager, type TerminalMaximizeState } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries, turnFileHunkRows } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
@@ -2443,10 +2443,26 @@ problemsHost.append(problemsPanelEl());
 const sessionsHost = $("sessions-panel-host");
 sessionsHost.append(sessionsPanelEl());
 type GraphiteBottomPanel = "terminal" | "problems";
-type GraphiteBottomSnapshot = { drawer: DrawerState; problemsOpen: boolean };
+type GraphiteBottomSnapshot = {
+  drawer: DrawerState;
+  problemsOpen: boolean;
+  terminalMaximize: TerminalMaximizeState;
+};
+type GraphiteHostAccessibilitySnapshot = {
+  role: string | null;
+  ariaLabelledBy: string | null;
+  ariaHidden: string | null;
+  hidden: boolean;
+};
+const GRAPHITE_BOTTOM_PANELS: readonly GraphiteBottomPanel[] = ["terminal", "problems"];
+const terminalHost = $("term-host");
 let graphiteBand: HTMLElement | null = null;
 let graphiteBottomPanel: GraphiteBottomPanel = "terminal";
 let graphiteBottomSnapshot: GraphiteBottomSnapshot | null = null;
+let graphiteHostAccessibilitySnapshot: {
+  terminal: GraphiteHostAccessibilitySnapshot;
+  problems: GraphiteHostAccessibilitySnapshot;
+} | null = null;
 
 function setProblemsHost(on: boolean): void {
   problemsHost.classList.toggle("hidden", !on);
@@ -2458,50 +2474,122 @@ function renderGraphiteBottomPanel(): void {
     const active = tab.dataset.panel === graphiteBottomPanel;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
   });
+  const terminalActive = graphiteBottomPanel === "terminal";
+  terminalHost.hidden = !terminalActive;
+  terminalHost.setAttribute("aria-hidden", String(!terminalActive));
+  problemsHost.hidden = terminalActive;
+  problemsHost.setAttribute("aria-hidden", String(terminalActive));
 }
 
 function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
   graphiteBottomPanel = panel;
+  if (panel === "problems") terminals.setMaximizeState(null);
   setProblemsHost(panel === "problems");
   setTerminal(panel === "terminal");
+}
+
+function focusGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  setGraphiteBottomPanel(panel);
+  graphiteBand?.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)?.focus();
+}
+
+function handleGraphiteBandKeydown(event: KeyboardEvent, panel: GraphiteBottomPanel): void {
+  const index = GRAPHITE_BOTTOM_PANELS.indexOf(panel);
+  let next: GraphiteBottomPanel | null = null;
+  if (event.key === "ArrowRight") next = GRAPHITE_BOTTOM_PANELS[(index + 1) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "ArrowLeft") next = GRAPHITE_BOTTOM_PANELS[(index - 1 + GRAPHITE_BOTTOM_PANELS.length) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "Home") next = GRAPHITE_BOTTOM_PANELS[0];
+  else if (event.key === "End") next = GRAPHITE_BOTTOM_PANELS[GRAPHITE_BOTTOM_PANELS.length - 1];
+  if (!next) return;
+  event.preventDefault();
+  focusGraphiteBottomPanel(next);
+}
+
+function mountGraphitePanelAccessibility(): void {
+  const snapshot = (host: HTMLElement): GraphiteHostAccessibilitySnapshot => ({
+    role: host.getAttribute("role"),
+    ariaLabelledBy: host.getAttribute("aria-labelledby"),
+    ariaHidden: host.getAttribute("aria-hidden"),
+    hidden: host.hasAttribute("hidden"),
+  });
+  graphiteHostAccessibilitySnapshot = {
+    terminal: snapshot(terminalHost),
+    problems: snapshot(problemsHost),
+  };
+  terminalHost.setAttribute("role", "tabpanel");
+  terminalHost.setAttribute("aria-labelledby", "graphite-band-tab-terminal");
+  problemsHost.setAttribute("role", "tabpanel");
+  problemsHost.setAttribute("aria-labelledby", "graphite-band-tab-problems");
+}
+
+function clearGraphitePanelAccessibility(): void {
+  const snapshot = graphiteHostAccessibilitySnapshot;
+  graphiteHostAccessibilitySnapshot = null;
+  if (!snapshot) return;
+  const restore = (host: HTMLElement, state: GraphiteHostAccessibilitySnapshot): void => {
+    for (const [attribute, value] of [
+      ["role", state.role],
+      ["aria-labelledby", state.ariaLabelledBy],
+      ["aria-hidden", state.ariaHidden],
+    ] as const) {
+      if (value === null) host.removeAttribute(attribute);
+      else host.setAttribute(attribute, value);
+    }
+    host.hidden = state.hidden;
+  };
+  restore(terminalHost, snapshot.terminal);
+  restore(problemsHost, snapshot.problems);
 }
 
 function syncGraphiteBottomPanel(): void {
   if (!document.documentElement.classList.contains("view-graphite")) {
     if (graphiteBand) {
       graphiteBand.remove();
+      graphiteBand = null;
+      clearGraphitePanelAccessibility();
       const snapshot = graphiteBottomSnapshot;
       graphiteBottomSnapshot = null;
       if (snapshot) {
+        terminals.setMaximizeState(null);
         drawerState = snapshot.drawer;
         setTerminal(snapshot.drawer.open);
         setProblemsHost(snapshot.problemsOpen);
+        terminals.setMaximizeState(snapshot.terminalMaximize);
       } else {
         termArea.style.flex = drawerState.open ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
         renderTerminalSeam();
       }
     }
-    graphiteBand = null;
     return;
   }
   if (!graphiteBand) {
-    graphiteBottomSnapshot = { drawer: { ...drawerState }, problemsOpen: !problemsHost.classList.contains("hidden") };
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
     const band = document.createElement("div");
     band.className = "graphite-band";
     band.setAttribute("role", "tablist");
-    for (const panel of ["terminal", "problems"] as const) {
+    band.setAttribute("aria-orientation", "horizontal");
+    for (const panel of GRAPHITE_BOTTOM_PANELS) {
       const tab = document.createElement("button");
       tab.className = "graphite-band-tab";
       tab.type = "button";
+      tab.id = `graphite-band-tab-${panel}`;
       tab.dataset.panel = panel;
       tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", panel === "terminal" ? "term-host" : "problems-panel-host");
       tab.textContent = panel === "terminal" ? "Terminal" : "Problems";
       tab.onclick = () => setGraphiteBottomPanel(panel);
+      tab.onkeydown = (event) => handleGraphiteBandKeydown(event, panel);
       band.append(tab);
     }
     graphiteBand = band;
     termArea.prepend(band);
+    mountGraphitePanelAccessibility();
     if (!drawerState.open) termArea.style.flex = "0 0 35px";
   }
   const panel = problemsHost.classList.contains("hidden") ? "terminal" : "problems";
@@ -3199,7 +3287,11 @@ void (async function boot(): Promise<void> {
   drawerState = ui.terminalDrawer;
   uiStateLoaded = true;
   if (graphiteBand) {
-    graphiteBottomSnapshot = { drawer: { ...drawerState }, problemsOpen: !problemsHost.classList.contains("hidden") };
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
   }
   setTerminal(drawerState.open);
 
