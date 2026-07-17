@@ -225,6 +225,7 @@ import {
   terminalSurface,
 } from "./north-seam";
 import { ComposerFileCache } from "./composer-files";
+import { createDomSidebarDrawerHost, createSidebarDrawer } from "./drawer";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -353,7 +354,9 @@ const search = new SearchPanel(
   $<HTMLButtonElement>("search-case"),
   $("search-results"),
 );
-search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+search.onOpenMatch = (path, line) => {
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
+};
 const browserFrame = $<HTMLIFrameElement>("browser-frame");
 const browser = new BrowserPane(
   $("browser-area"),
@@ -728,17 +731,13 @@ editor.confirmCloseTab = (tab) =>
 
 tree.onOpenFile = async (path) => {
   try {
-    await editor.openFile(path);
-    tree.setActive(path);
+    await openSidebarFile(path);
   } catch (e) {
     void alertNative(`Cannot open ${path}: ${e}`);
   }
 };
 tree.onOpenFileInPane = (path, side) => {
-  void editor
-    .openFileInSide(path, side)
-    .then(() => tree.setActive(path))
-    .catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
+  void openSidebarFileInPane(path, side).catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
 };
 
 // Tree context menu actions
@@ -912,10 +911,12 @@ function applyTheme(view: ViewId, theme: ViewVariant): void {
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
   const clamped = clampSettings(next);
-  const viewChanged = settings.view !== clamped.view;
+  const previousView = settings.view;
+  const viewChanged = previousView !== clamped.view;
   settings = clamped;
   applyTheme(settings.view, settings.theme);
   if (viewChanged) {
+    syncSidebarView(previousView, settings.view);
     editor.renderAllTabs();
     syncGraphiteBottomPanel();
     whisperHostCache.reset((host) => host.replaceChildren());
@@ -2059,9 +2060,60 @@ btnOpenEditors.onclick = (e) => {
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
 const vres = $("vresizer");
-function setSidebar(on: boolean): void {
+const treeEl = $("tree");
+const sidebarDrawer = createSidebarDrawer(createDomSidebarDrawerHost({
+  sidebar,
+  tree: treeEl,
+  resizer: vres,
+  overlayParent: $("body"),
+  normalizeFiles: () => {
+    if (searchViewOpen) closeSearchView();
+    outlineView?.setMode("files");
+  },
+}));
+let preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+
+function setDockedSidebar(on: boolean): void {
   sidebar.classList.toggle("hidden", !on);
   vres.classList.toggle("hidden", !on);
+}
+
+function syncSidebarView(previous: ViewId, next: ViewId): void {
+  if (previous !== "north" && next === "north") {
+    preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(false);
+  } else if (previous === "north" && next !== "north") {
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(preNorthSidebarVisible);
+  }
+}
+
+function setSidebar(on: boolean): void {
+  if (settings.view === "north") {
+    if (on) sidebarDrawer.open();
+    else sidebarDrawer.close();
+    return;
+  }
+  setDockedSidebar(on);
+}
+
+async function openSidebarFile(path: string, line?: number): Promise<void> {
+  await editor.openFile(path, line);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
+}
+
+async function openSidebarFileInPane(path: string, side: "left" | "right"): Promise<void> {
+  await editor.openFileInSide(path, side);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
+}
+
+function eventTargetsBlockingOverlay(event: Event): boolean {
+  const target = event.target;
+  return target instanceof Element
+    && target.closest(".palette-overlay,.settings-overlay,.rollback-overlay,.tm-overlay") !== null;
 }
 
 function togglePreview(): void {
@@ -2071,7 +2123,6 @@ function togglePreview(): void {
 }
 
 // ---- search view toggle ----
-const treeEl = $("tree");
 const searchView = $("search-view");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
@@ -2097,6 +2148,13 @@ function closeSearchView(): void {
 
 function toggleSearchView(): void {
   if (searchViewOpen) closeSearchView(); else openSearchView();
+}
+
+function openSidebarSearch(): void {
+  if (settings.view === "north") setSidebar(true);
+  outlineView?.setMode("files");
+  if (!searchViewOpen) openSearchView();
+  search.focus();
 }
 
 // ---- background-poll idle gate ----
@@ -2863,8 +2921,16 @@ window.addEventListener("dragend", clearPaneDropHint);
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
   const mod = isMod(e);
+  const blockedByOverlay = eventTargetsBlockingOverlay(e);
+  if (sidebarDrawer.handleEscape(e, blockedByOverlay)) return;
   // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
-  if (mod && e.code === "KeyN") {
+  if (settings.view === "north" && mod && e.code === "KeyE" && !e.shiftKey && !e.altKey && !e.repeat) {
+    // The open drawer is exempt from the overlay guard so ⌘E always closes it.
+    if (sidebarDrawer.isOpen() || !blockedByOverlay) {
+      e.preventDefault();
+      sidebarDrawer.toggle();
+    }
+  } else if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
     else editor.newUntitled(); // ⌘N New File
@@ -2886,7 +2952,7 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
     setTerminal(!drawerState.open);
-  } else if (mod && e.code === "KeyB") {
+  } else if (mod && e.code === "KeyB" && settings.view !== "north") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
   } else if (mod && e.shiftKey && e.code === "KeyP") {
@@ -2907,8 +2973,7 @@ window.addEventListener("keydown", (e) => {
     togglePreview();
   } else if (mod && e.shiftKey && e.code === "KeyF") {
     e.preventDefault();
-    if (!searchViewOpen) openSearchView();
-    search.focus();
+    openSidebarSearch();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(!drawerState.open);
@@ -3026,7 +3091,9 @@ const actions = {
   toggleTerminal: () => setTerminal(!drawerState.open),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
-  toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
+  toggleSidebar: () => setSidebar(settings.view === "north"
+    ? !sidebarDrawer.isOpen()
+    : sidebar.classList.contains("hidden")),
   newTerminal: () => void terminals.create(),
   increaseFontSize: () => persistSettings(nextFontSettings(settings, 1)),
   decreaseFontSize: () => persistSettings(nextFontSettings(settings, -1)),
@@ -3265,10 +3332,7 @@ const paletteCommands: Command[] = [
   { id: "view-stanza", title: "View: Stanza", run: () => setView("stanza") },
   { id: "view-variant-next", title: "View variant: next", run: nextViewVariant },
   { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
-  { id: "search", title: "Search Folder", run: () => {
-    if (!searchViewOpen) openSearchView();
-    search.focus();
-  }, shortcut: fmtShortcut("F", { shift: true }) },
+  { id: "search", title: "Search Folder", run: openSidebarSearch, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
   { id: "about", title: "About Sutra", run: () => openAbout() },
   { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
@@ -3369,7 +3433,7 @@ outlineView = new OutlineView(
   () => editor.getDocumentSymbols(),
 );
 outlineView.onRevealLine = (path, line) => {
-  void editor.openFile(path, line).then(() => editor.revealLine(line));
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
 };
 
 // Refresh the outline when the active file changes.

@@ -176,3 +176,9 @@ Multi-view W2/T4c North seam. Store and source checks prove producer/consumer wi
 | Date | Version | Criterion | Surface | Evidence | Status |
 |---|---|---|---|---|---|
 | 2026-07-17 | 2.3.3 | MV-4: North trail tabs, hidden-surface pills, and whisper-chip host migrate correctly across North → Classic → North; Classic remains visually unchanged | UI | Behavioral producer/pill/host/root-binding tests in `tests/north-seam.test.ts`; async browser-history tests in `tests/browser.test.ts`; live behavior unobserved | BLOCKED(manual: create/close terminal states and browser history, hide each surface → North pills show live/dormant state and restore via click; switch North → Classic → North → whisper chips migrate without loss; check normal/preview tab trail and Classic parity) |
+
+Multi-view W2/T5 North sidebar drawer. Controller tests prove node-placement and Escape/focus semantics only; native WebView behavior remains a manual gate.
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-17 | 2.3.3 | MV-5: North ⌘E drawer preserves tree state, Search/Outline access, file-open focus, and Classic docked-sidebar parity across view switches | UI | Behavioral controller tests in `tests/drawer.test.ts`; live behavior unobserved | BLOCKED(manual: expand directories → close/reopen with ⌘E and confirm expansion persists; open files from Files/Search/Outline and confirm drawer closes with editor focused; switch North day↔night while open, then North→Classic→North and confirm drawer/docked sidebar restoration; compare Classic against baseline) |

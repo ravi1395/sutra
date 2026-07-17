@@ -161,6 +161,10 @@
   background-color: var(--term-bg);
 }
 
+/* The North drawer host is created before the persisted view loads. Keep that
+   dynamic overlay inert by default; every visible/layout rule remains North-scoped. */
+.north-sidebar-overlay { display: none; }
+
 /* ── W2/T3 North Light sheet paint. Existing hosts stay in their current ownership. ── */
 :root.view-north #titlebar {
   background: var(--bg-0);
@@ -168,9 +172,32 @@
   padding: 0 16px;
 }
 :root.view-north #body {
+  position: relative;
   gap: 10px;
   padding: 0 10px 10px;
   background: var(--bg-0);
+}
+:root.view-north #body > #sidebar,
+:root.view-north #vresizer {
+  display: none;
+}
+:root.view-north .north-sidebar-overlay:not(.hidden) {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 10px;
+  background: var(--scrim);
+  transition: opacity 160ms ease-out;
+}
+:root.view-north .north-sidebar-overlay #sidebar {
+  width: min(340px, calc(100% - 20px));
+  max-width: 100%;
+  min-height: 0;
+  flex: 0 1 340px;
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
 }
 :root.view-north #sidebar,
 :root.view-north #main {
@@ -4282,7 +4309,9 @@ body.app-hidden *::after {
   .tm-modal,
   .rollback-overlay,
   .rollback-dialog,
-  .auto-drawer {
+  .auto-drawer,
+  .north-sidebar-overlay,
+  .north-sidebar-drawer {
     transition: none;
   }
 }
