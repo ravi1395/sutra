@@ -16,6 +16,13 @@
   font-style: normal;
   font-display: swap;
 }
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("/src/assets/fonts/SchibstedGrotesk-Variable.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg-0: #101311; --bg-1: #131614; --bg-2: #0e110f; --bg-3: #161a17; --bg-4: #1f2420;
@@ -71,14 +78,47 @@
   --ansi-bright-cyan: #148f85; --ansi-bright-white: #2a2a24;
 }
 
-/* ── W0/T0d North Light day spike: token proof only; T3 owns sheet/layout paint. ── */
-.view-north {
-  --bg-0: #f7f8fa; --bg-1: #f2f3f5; --bg-2: #fbfcfd;
-  --line: rgba(41, 49, 66, 0.14);
-  --fg: #303745; --fg-dim: #667085; --fg-faint: #98a2b3;
-  --em: #315bd6;
-  --syn-kw: #6246a8; --syn-type: #2f718a; --syn-str: #347a58; --syn-comment: #647082;
-  --term-bg: #202633; --term-fg: #edf1f7;
+/* ── W2/T3 North Light: cool porcelain frame, raised white sheets, one ultramarine signal. ── */
+:root.view-north {
+  --bg-0: #eef1f6; --bg-1: #ffffff; --bg-2: #f8f9fb; --bg-3: #f3f5f8; --bg-4: #e8ecf2;
+  --line: #d6dbe4; --line-menu: #bcc5d4;
+  --fg: #303745; --fg-dim: #667085; --fg-faint: #8992a2; --fg-ghost: #b6bdc8;
+  --term-bg: #171d27; --term-fg: #edf1f7; --term-dim: #aeb8c7; --term-line: #303a4a;
+  --em: #315bd6; --em-dim: #274aa9; --em-wash: rgba(49, 91, 214, 0.09); --em-wash-row: rgba(49, 91, 214, 0.07);
+  --syn-kw: #5c3f9b; --syn-type: #246a83; --syn-str: #27734f; --syn-comment: #667085;
+  --diff-add: #21845b; --diff-mod: #a96516; --diff-del: #c73a3a;
+  --diff-add-wash: rgba(33, 132, 91, 0.12); --diff-del-wash: rgba(199, 58, 58, 0.10);
+  --diff-file-mod: #a96516; --diff-file-add: #21845b; --diff-file-del: #c73a3a;
+  --bg-drawer: #ffffff; --bg-whisper: #f8f9fb;
+  --on-em: #ffffff; --scrim: rgba(31, 40, 55, 0.30); --shadow: rgba(31, 40, 55, 0.12); --panel-bg: #ffffff;
+  --r-lg: 10px; --r-md: 8px; --r-sm: 5px;
+  --ui: "Schibsted Grotesk", system-ui, sans-serif;
+  --ansi-black: #4f5866; --ansi-red: #e06c75; --ansi-green: #58b487;
+  --ansi-yellow: #d69e2e; --ansi-blue: #78a9ff; --ansi-magenta: #b58ae5;
+  --ansi-cyan: #57b7c3; --ansi-white: #d9e0ea;
+  --ansi-bright-black: #7e8999; --ansi-bright-red: #f08088; --ansi-bright-green: #75cb9a;
+  --ansi-bright-yellow: #eab95a; --ansi-bright-blue: #9bbcff; --ansi-bright-magenta: #cfacf3;
+  --ansi-bright-cyan: #7bced7; --ansi-bright-white: #ffffff;
+}
+
+:root.view-north.variant-night {
+  --bg-0: #252a33; --bg-1: #303640; --bg-2: #2a3039; --bg-3: #282e37; --bg-4: #3a424e;
+  --line: #444d5b; --line-menu: #586374;
+  --fg: #edf1f7; --fg-dim: #b1bac8; --fg-faint: #858f9f; --fg-ghost: #626d7b;
+  --term-bg: #161b22; --term-fg: #edf1f7; --term-dim: #b5becb; --term-line: #303a4a;
+  --em: #8da9ff; --em-dim: #6f8fe9; --em-wash: rgba(141, 169, 255, 0.14); --em-wash-row: rgba(141, 169, 255, 0.10);
+  --syn-kw: #c4a7ff; --syn-type: #8fd1e3; --syn-str: #8ad1a2; --syn-comment: #aeb8c7;
+  --diff-add: #63c78e; --diff-mod: #e0ad51; --diff-del: #ee7777;
+  --diff-add-wash: rgba(99, 199, 142, 0.14); --diff-del-wash: rgba(238, 119, 119, 0.13);
+  --diff-file-mod: #e0ad51; --diff-file-add: #63c78e; --diff-file-del: #ee7777;
+  --bg-drawer: #303640; --bg-whisper: #2a3039;
+  --on-em: #161b22; --scrim: rgba(8, 11, 16, 0.58); --shadow: rgba(8, 11, 16, 0.40); --panel-bg: #303640;
+  --ansi-black: #596475; --ansi-red: #f08a91; --ansi-green: #71d39b;
+  --ansi-yellow: #e7ba64; --ansi-blue: #9ab5ff; --ansi-magenta: #d1adf5;
+  --ansi-cyan: #83d3dd; --ansi-white: #dce3ed;
+  --ansi-bright-black: #8995a6; --ansi-bright-red: #ffabb0; --ansi-bright-green: #93e1b4;
+  --ansi-bright-yellow: #f5d07d; --ansi-bright-blue: #b7c9ff; --ansi-bright-magenta: #e1c4fb;
+  --ansi-bright-cyan: #a6e3ea; --ansi-bright-white: #ffffff;
 }
 
 /* ── W1/T1 Graphite: Primer-dark flat plane. ── */
@@ -115,6 +155,111 @@
 :root.view-graphite #term-host .xterm .xterm-viewport,
 :root.view-graphite #term-host .xterm .composition-view {
   background-color: var(--term-bg);
+}
+
+/* ── W2/T3 North Light sheet paint. Existing hosts stay in their current ownership. ── */
+:root.view-north #titlebar {
+  background: var(--bg-0);
+  border-bottom-color: transparent;
+  padding: 0 16px;
+}
+:root.view-north #body {
+  gap: 10px;
+  padding: 0 10px 10px;
+  background: var(--bg-0);
+}
+:root.view-north #sidebar,
+:root.view-north #main {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+}
+:root.view-north #sidebar-header,
+:root.view-north .pane-tabs,
+:root.view-north #whisper-bar,
+:root.view-north #composer-header,
+:root.view-north #diff-header,
+:root.view-north #browser-header {
+  background: var(--bg-2);
+}
+:root.view-north #sidebar-header,
+:root.view-north .pane-tabs,
+:root.view-north #composer-header,
+:root.view-north #diff-header,
+:root.view-north #browser-header {
+  border-color: var(--line);
+}
+:root.view-north .pane-tabs {
+  padding: 0 14px;
+}
+:root.view-north .tab.active {
+  border-bottom-color: var(--em);
+}
+:root.view-north #editor-area,
+:root.view-north #panes,
+:root.view-north .pane,
+:root.view-north .pane-host,
+:root.view-north .editor-shell,
+:root.view-north .code-host,
+:root.view-north .preview-host {
+  background: var(--bg-1);
+}
+:root.view-north #terminal-area {
+  margin: 0 10px 10px;
+  background: var(--term-bg);
+  border: 1px solid var(--term-line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 1px 2px rgba(8, 12, 18, 0.24), 0 4px 16px rgba(8, 12, 18, 0.24);
+  color: var(--term-fg);
+}
+:root.view-north #terminal-seam,
+:root.view-north .term-group-tabs,
+:root.view-north .term-group-body,
+:root.view-north #term-host {
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border-color: var(--term-line);
+}
+:root.view-north .term-tab,
+:root.view-north .term-add,
+:root.view-north .term-maximize {
+  color: var(--term-dim);
+  background: transparent;
+}
+:root.view-north .term-tab.active {
+  color: var(--term-fg);
+  background: var(--em-wash);
+  box-shadow: inset 0 -2px 0 var(--em);
+}
+:root.view-north #composer-pane,
+:root.view-north #diff-pane,
+:root.view-north #browser-area {
+  background: var(--bg-1);
+  border-color: var(--line);
+}
+:root.view-north #composer-pane,
+:root.view-north #diff-pane {
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+}
+:root.view-north #browser-area {
+  margin: 0 10px 10px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+}
+:root.view-north .browser-url-input,
+:root.view-north .browser-btn {
+  background: var(--bg-1);
+  border-color: var(--line);
+}
+:root.view-north .browser-frame {
+  background: var(--bg-1);
 }
 
 /* fixed: box-shadow colors below stay literal rgba(0,0,0,X) black across both themes by convention —

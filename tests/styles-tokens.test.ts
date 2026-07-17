@@ -21,6 +21,8 @@ function extractBlock(source: string, selector: string): string {
 
 const rootBlock = extractBlock(css, ":root {");
 const washiBlock = extractBlock(css, ".theme-washi {");
+const northDayBlock = extractBlock(css, ":root.view-north {");
+const northNightBlock = extractBlock(css, ":root.view-north.variant-night {");
 
 const LEGACY_ALIASES = ["--bg", "--bg-alt", "--bg-bar", "--border", "--accent", "--accent-hi", "--line-soft"];
 
@@ -129,17 +131,66 @@ test("splitter/resizer selectors carry no transition (60fps drag invariant)", ()
 });
 
 test("North day syntax spike meets body contrast against its editor sheet", () => {
-  const northBlock = extractBlock(css, ".view-north {");
-  const background = northBlock.match(/--bg-1:\s*(#[a-f0-9]{6})/i)?.[1];
+  const background = northDayBlock.match(/--bg-1:\s*(#[a-f0-9]{6})/i)?.[1];
   assert.ok(background, "North day must declare --bg-1");
   for (const token of ["--syn-type", "--syn-comment"]) {
-    const foreground = northBlock.match(new RegExp(`${token}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+    const foreground = northDayBlock.match(new RegExp(`${token}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
     assert.ok(foreground, `North day must declare ${token}`);
     assert.ok(
       contrastRatio(foreground, background) >= 4.5,
       `${token} must meet 4.5:1 against --bg-1`,
     );
   }
+});
+
+test("North Light owns complete day/night tokens, contrasts, and terminal depth", () => {
+  const northTokens = [
+    "--bg-0", "--bg-1", "--bg-2", "--bg-3", "--bg-4", "--line", "--line-menu",
+    "--fg", "--fg-dim", "--fg-faint", "--fg-ghost", "--term-bg", "--term-fg", "--term-dim", "--term-line",
+    "--em", "--em-dim", "--em-wash", "--em-wash-row", "--syn-kw", "--syn-type", "--syn-str", "--syn-comment",
+    ...DIFF_TOKENS, ...ANSI_TOKENS,
+  ];
+  const token = (block: string, name: string) => block.match(new RegExp(`${name}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+
+  for (const [name, block] of [["day", northDayBlock], ["night", northNightBlock]] as const) {
+    for (const northToken of northTokens) {
+      assert.ok(block.includes(`${northToken}:`), `North ${name} missing ${northToken}`);
+    }
+    const sheet = token(block, "--bg-1")!;
+    assert.ok(contrastRatio(token(block, "--fg")!, sheet) >= 4.5, `North ${name} ink/sheet must meet 4.5:1`);
+    assert.ok(contrastRatio(token(block, "--fg-dim")!, sheet) >= 4.5, `North ${name} dim/sheet must meet 4.5:1`);
+    assert.ok(contrastRatio(token(block, "--em")!, token(block, "--bg-0")!) >= 4.5, `North ${name} active/frame must meet 4.5:1`);
+    assert.ok(contrastRatio(token(block, "--term-fg")!, token(block, "--term-bg")!) >= 7, `North ${name} terminal must meet 7:1`);
+    for (const statusToken of ["--added", "--modified", "--deleted"]) {
+      assert.ok(!block.includes(`${statusToken}:`), `North ${name} must not revalue ${statusToken}`);
+    }
+  }
+
+  assert.ok(
+    hexLuminance(token(northNightBlock, "--term-bg")!) < hexLuminance(token(northNightBlock, "--bg-1")!),
+    "North night terminal must be darker than the sheet",
+  );
+  assert.ok(
+    hexLuminance(token(northNightBlock, "--term-bg")!) < hexLuminance(token(northNightBlock, "--bg-3")!),
+    "North night terminal must be darker than the raised surface",
+  );
+});
+
+test("North Light scopes Schibsted to UI chrome and all T3 paint", () => {
+  assert.match(css, /font-family:\s*"Schibsted Grotesk";\s*src:\s*url\("\/src\/assets\/fonts\/SchibstedGrotesk-Variable\.woff2"\)/);
+  assert.match(northDayBlock, /--ui:\s*"Schibsted Grotesk", system-ui, sans-serif/);
+  assert.doesNotMatch(northDayBlock, /--(?:mono|editor-font-family):/);
+  assert.doesNotMatch(northNightBlock, /--(?:mono|editor-font-family):/);
+
+  const start = css.indexOf("/* ── W2/T3 North Light sheet paint.");
+  const end = css.indexOf("/* fixed: box-shadow", start);
+  assert.ok(start !== -1 && end !== -1, "North T3 paint section markers missing");
+  const northPaint = css.slice(start, end);
+  assert.doesNotMatch(northPaint, /\n\s*(?:#|\.)[^,{]*\s*(?:,|\{)/, "North T3 paint must not add unscoped selectors");
+  assert.match(northPaint, /:root\.view-north #terminal-area/);
+  assert.match(northPaint, /:root\.view-north #composer-pane/);
+  assert.match(northPaint, /:root\.view-north #diff-pane/);
+  assert.match(northPaint, /:root\.view-north #browser-area/);
 });
 
 test("Graphite owns a complete Git-diff palette without revaluing status tokens", () => {
