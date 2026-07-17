@@ -297,6 +297,9 @@ export class TerminalManager {
   private fontFamily = '"SF Mono", Menlo, monospace';
   private scrollback = 5000;
   private shellPref: string | null = null;
+  private sessionListeners = new Set<() => void>();
+  private sessionNotifications: (() => void)[][] = [];
+  private drainingSessionNotifications = false;
   // Cursor blink is a repaint loop that keeps the compositor awake. Read the OS
   // reduced-motion preference once, and let the window-idle gate pause blink
   // while hidden — WKWebView keeps xterm's blink timer running off-screen where
@@ -371,9 +374,11 @@ export class TerminalManager {
     void onPtyExit((id) => {
       const t = this.terms.find((x) => x.id === id);
       if (t) {
+        const wasAlive = t.alive;
         t.alive = false;
         t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
         this.renderTabs();
+        if (wasAlive) this.notifySessionsChanged();
       }
     });
 
@@ -390,6 +395,33 @@ export class TerminalManager {
 
   get count(): number {
     return this.terms.length;
+  }
+
+  /** Number of sessions whose PTY is still alive. */
+  liveCount(): number {
+    return this.terms.filter((term) => term.alive).length;
+  }
+
+  /** Subscribe to session/liveness transitions; the current state is delivered immediately. */
+  onSessionsChanged(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    listener();
+    return () => this.sessionListeners.delete(listener);
+  }
+
+  private notifySessionsChanged(): void {
+    this.sessionNotifications.push([...this.sessionListeners]);
+    if (this.drainingSessionNotifications) return;
+
+    this.drainingSessionNotifications = true;
+    try {
+      while (this.sessionNotifications.length > 0) {
+        const listeners = this.sessionNotifications.shift()!;
+        for (const listener of listeners) listener();
+      }
+    } finally {
+      this.drainingSessionNotifications = false;
+    }
   }
 
   private focusGroup(side: TerminalGroupSide): void {
@@ -650,9 +682,13 @@ export class TerminalManager {
     // fit() can report 0 before first paint; fall back to a sane size.
     const rows = term.rows || 24;
     const cols = term.cols || 80;
-    await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref).catch((e) =>
-      term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`),
-    );
+    try {
+      await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref);
+    } catch (e) {
+      t.alive = false;
+      term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`);
+    }
+    this.notifySessionsChanged();
     this.activate(t);
   }
 
@@ -792,6 +828,7 @@ export class TerminalManager {
     t.term.dispose();
     t.el.remove();
     this.terms.splice(this.terms.indexOf(t), 1);
+    this.notifySessionsChanged();
     const wasActive = this.active === t;
     const side = groupSideForItem(this.groups, t) ?? "left";
     this.groups = removeItemFromGroups(this.groups, t);
@@ -829,6 +866,7 @@ export class TerminalManager {
     this.bodyHosts.right.innerHTML = "";
     this.renderGroups();
     this.renderTabs();
+    this.notifySessionsChanged();
     if (create) await this.create();
   }
 

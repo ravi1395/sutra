@@ -181,4 +181,9 @@ export class BrowserPane {
   isHidden(): boolean {
     return this.area.classList.contains("hidden");
   }
+
+  /** Whether this pane has loaded at least one browser location. */
+  hasHistory(): boolean {
+    return this.history.length > 0;
+  }
 }

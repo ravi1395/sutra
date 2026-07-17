@@ -30,6 +30,37 @@ test("loadDirect sets src without proxy and fires onProxied", () => {
   assert.equal(proxiedOrigin, "http://127.0.0.1:4310");
 });
 
+test("hasHistory follows direct and proxied loads, and persists while hidden", async () => {
+  const area = fakeEl();
+  const frame = fakeEl();
+  const pane = new BrowserPane(area, frame, fakeEl(), fakeEl(), fakeEl(), fakeEl());
+  assert.equal(pane.hasHistory(), false);
+
+  pane.loadDirect("http://127.0.0.1:4310/preview/x.html");
+  pane.hide();
+  assert.equal(pane.hasHistory(), true);
+
+  const globals = globalThis as typeof globalThis & { window?: Window };
+  const previousWindow = globals.window;
+  globals.window = {
+    __TAURI_INTERNALS__: {
+      invoke: (command: string, args: { target: string }) => {
+        assert.equal(command, "proxy_url");
+        assert.equal(args.target, "http://localhost:3000");
+        return Promise.resolve("http://127.0.0.1:4310/proxy/1");
+      },
+    },
+  } as unknown as Window;
+  try {
+    const proxiedPane = new BrowserPane(fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl());
+    await proxiedPane.open("http://localhost:3000");
+    assert.equal(proxiedPane.hasHistory(), true);
+  } finally {
+    if (previousWindow === undefined) delete globals.window;
+    else globals.window = previousWindow;
+  }
+});
+
 function fakeInput(): any {
   const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
   const classes = new Set<string>();
