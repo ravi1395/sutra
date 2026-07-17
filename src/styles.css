@@ -9,6 +9,13 @@
   font-style: normal;
   font-display: swap;
 }
+@font-face {
+  font-family: "Mona Sans";
+  src: url("/src/assets/fonts/MonaSans-Variable.woff2") format("woff2");
+  font-weight: 400 600;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg-0: #101311; --bg-1: #131614; --bg-2: #0e110f; --bg-3: #161a17; --bg-4: #1f2420;
@@ -18,6 +25,10 @@
   --em: #4ade93; --em-dim: #1f8a63; --em-wash: rgba(74,222,147,0.10); --em-wash-row: rgba(74,222,147,0.08);
   --syn-kw: #5cc99b; --syn-type: #86aedc; --syn-str: #d9b47c; --syn-comment: var(--fg-faint);
   --added: #e3b341; --modified: #4493f8; --deleted: #f0716a;
+  /* Git-diff paint only. App-wide status tokens above remain status-owned. */
+  --diff-add: #e3b341; --diff-mod: #4493f8; --diff-del: #f0716a;
+  --diff-add-wash: rgba(227, 179, 65, 0.12); --diff-del-wash: rgba(240, 113, 106, 0.08);
+  --diff-file-mod: #3c94ff; --diff-file-add: #d4c562; --diff-file-del: #d74e42;
   --bg-drawer: var(--bg-2); --bg-whisper: var(--bg-2);
   --r-lg: 12px; --r-md: 8px; --r-sm: 5px;
   --ui: "Instrument Sans", system-ui, sans-serif;
@@ -70,11 +81,38 @@
   --term-bg: #202633; --term-fg: #edf1f7;
 }
 
+/* ── W1/T1 Graphite: Primer-dark flat plane. ── */
+.view-graphite {
+  --bg-0: #0d1117; --bg-1: #0d1117; --bg-2: #10151c; --bg-3: #161b22; --bg-4: #21262d;
+  --line: #21262d; --line-menu: #30363d;
+  --fg: #e6edf3; --fg-dim: #9198a1; --fg-faint: #6e7681; --fg-ghost: #484f58;
+  --term-bg: #0d1117; --term-fg: #e6edf3;
+  --em: #58a6ff; --em-dim: #388bfd; --em-wash: rgba(88, 166, 255, 0.12); --em-wash-row: rgba(88, 166, 255, 0.08);
+  --syn-kw: #ff7b72; --syn-type: #79c0ff; --syn-str: #a5d6ff; --syn-comment: #8b949e;
+  --diff-add: #3fb950; --diff-mod: #d29922; --diff-del: #f85149;
+  --diff-add-wash: rgba(63, 185, 80, 0.13); --diff-del-wash: rgba(248, 81, 73, 0.13);
+  --diff-file-mod: #d29922; --diff-file-add: #3fb950; --diff-file-del: #f85149;
+  --bg-drawer: #10151c; --bg-whisper: #10151c;
+  --on-em: #0d1117; --scrim: rgba(1, 4, 9, 0.6); --shadow: rgba(1, 4, 9, 0.45); --panel-bg: #161b22;
+  --r-lg: 6px; --r-md: 6px; --r-sm: 3px;
+  --ui: "Mona Sans", system-ui, sans-serif;
+  --ansi-black: #484f58; --ansi-red: #ff7b72; --ansi-green: #3fb950;
+  --ansi-yellow: #d29922; --ansi-blue: #58a6ff; --ansi-magenta: #bc8cff;
+  --ansi-cyan: #39c5cf; --ansi-white: #b1bac4;
+  --ansi-bright-black: #6e7681; --ansi-bright-red: #ffa198; --ansi-bright-green: #56d364;
+  --ansi-bright-yellow: #e3b341; --ansi-bright-blue: #79c0ff; --ansi-bright-magenta: #d2a8ff;
+  --ansi-bright-cyan: #56d4dd; --ansi-bright-white: #f0f6fc;
+}
+
 /* xterm's bundled CSS hard-codes black behind its DOM renderer. Canvas sessions
    receive --term-bg through Terminal.options.theme; this keeps the DOM fallback
    (and IME composition overlay) on that same token without touching Classic. */
 :root.view-north #term-host .xterm .xterm-viewport,
 :root.view-north #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+:root.view-graphite #term-host .xterm .xterm-viewport,
+:root.view-graphite #term-host .xterm .composition-view {
   background-color: var(--term-bg);
 }
 
@@ -1450,9 +1488,8 @@ button:hover {
   background: var(--em);
 }
 
-/* fixed: diff gutter semantics (blue=modified/yellow=added/red=deleted) are a documented CLAUDE.md
-   invariant, fixed in both themes (decisions log #4) — --added/--modified/--deleted are intentionally
-   NOT overridden in .theme-washi */
+/* Git-diff paint is separate from app-wide --added/--modified/--deleted status semantics.
+   Classic keeps the literals below through :root; each view may only re-value --diff-*. */
 /* ---- diff gutter colors ---- */
 .cm-diff-gutter {
   width: 4px;
@@ -1462,13 +1499,13 @@ button:hover {
   cursor: pointer;
 }
 .cm-diff-added {
-  background: var(--added);
+  background: var(--diff-add);
 }
 .cm-diff-modified {
-  background: var(--modified);
+  background: var(--diff-mod);
 }
 .cm-diff-deleted {
-  box-shadow: 0 -2px 0 var(--deleted);
+  box-shadow: 0 -2px 0 var(--diff-del);
 }
 
 /* ---- inline diff lens ---- */
@@ -1509,12 +1546,12 @@ button:hover {
   min-width: max-content;
 }
 .lens-row.old {
-  background: rgba(240, 113, 106, 0.08);
-  color: color-mix(in srgb, var(--deleted) 72%, var(--fg));
+  background: var(--diff-del-wash);
+  color: color-mix(in srgb, var(--diff-del) 72%, var(--fg));
 }
 .lens-row.new {
-  background: rgba(227, 179, 65, 0.12);
-  color: color-mix(in srgb, var(--added) 72%, var(--fg));
+  background: var(--diff-add-wash);
+  color: color-mix(in srgb, var(--diff-add) 72%, var(--fg));
 }
 .lens-footer {
   padding: 6px 10px 8px;
@@ -1626,13 +1663,13 @@ button:hover {
   font-size: 11px;
 }
 .diff-file-status.status-m {
-  color: #3c94ff;
+  color: var(--diff-file-mod);
 }
 .diff-file-status.status-a {
-  color: #d4c562;
+  color: var(--diff-file-add);
 }
 .diff-file-status.status-d {
-  color: #d74e42;
+  color: var(--diff-file-del);
 }
 .diff-file-name {
   flex: 1;
@@ -1674,9 +1711,9 @@ button:hover {
   height: 6px;
   border-radius: 50%;
 }
-.diff-hunk-dot.modified { background: var(--modified); }
-.diff-hunk-dot.added { background: var(--added); }
-.diff-hunk-dot.deleted { background: var(--deleted); }
+.diff-hunk-dot.modified { background: var(--diff-mod); }
+.diff-hunk-dot.added { background: var(--diff-add); }
+.diff-hunk-dot.deleted { background: var(--diff-del); }
 .diff-hunk-empty {
   padding: 4px 8px 4px 28px;
   font-size: 11px;

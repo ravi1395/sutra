@@ -26,6 +26,11 @@ const LEGACY_ALIASES = ["--bg", "--bg-alt", "--bg-bar", "--border", "--accent", 
 
 const NEW_SEMANTIC_TOKENS = ["--on-em", "--scrim", "--shadow", "--panel-bg"];
 
+const DIFF_TOKENS = [
+  "--diff-add", "--diff-mod", "--diff-del", "--diff-add-wash", "--diff-del-wash",
+  "--diff-file-mod", "--diff-file-add", "--diff-file-del",
+];
+
 const ANSI_TOKENS = [
   "--ansi-black", "--ansi-red", "--ansi-green", "--ansi-yellow",
   "--ansi-blue", "--ansi-magenta", "--ansi-cyan", "--ansi-white",
@@ -135,4 +140,52 @@ test("North day syntax spike meets body contrast against its editor sheet", () =
       `${token} must meet 4.5:1 against --bg-1`,
     );
   }
+});
+
+test("Graphite owns a complete Git-diff palette without revaluing status tokens", () => {
+  const graphiteBlock = extractBlock(css, ".view-graphite {");
+  for (const token of DIFF_TOKENS) {
+    assert.ok(graphiteBlock.includes(`${token}:`), `Graphite missing ${token}`);
+  }
+  assert.match(graphiteBlock, /--diff-add:\s*#3fb950/i);
+  assert.match(graphiteBlock, /--diff-mod:\s*#d29922/i);
+  assert.match(graphiteBlock, /--diff-del:\s*#f85149/i);
+  for (const statusToken of ["--added", "--modified", "--deleted"]) {
+    assert.ok(!graphiteBlock.includes(`${statusToken}:`), `Graphite must not revalue ${statusToken}`);
+  }
+});
+
+test("Git-diff selectors consume only diff tokens and Classic values remain pinned", () => {
+  const expectedRootValues: Record<string, string> = {
+    "--diff-add": "#e3b341", "--diff-mod": "#4493f8", "--diff-del": "#f0716a",
+    "--diff-add-wash": "rgba(227, 179, 65, 0.12)", "--diff-del-wash": "rgba(240, 113, 106, 0.08)",
+    "--diff-file-mod": "#3c94ff", "--diff-file-add": "#d4c562", "--diff-file-del": "#d74e42",
+  };
+  for (const [token, value] of Object.entries(expectedRootValues)) {
+    assert.ok(rootBlock.includes(`${token}: ${value}`), `Classic ${token} must preserve ${value}`);
+  }
+  const diffSelectors = [
+    ".cm-diff-added", ".cm-diff-modified", ".cm-diff-deleted", ".lens-row.old", ".lens-row.new",
+    ".diff-file-status.status-m", ".diff-file-status.status-a", ".diff-file-status.status-d",
+    ".diff-hunk-dot.modified", ".diff-hunk-dot.added", ".diff-hunk-dot.deleted",
+  ];
+  for (const selector of diffSelectors) {
+    const block = extractBlock(css, `${selector} {`);
+    assert.match(block, /var\(--diff-/, `${selector} must read a --diff-* token`);
+    assert.doesNotMatch(block, /var\(--(?:added|modified|deleted)\)/, `${selector} must not read status tokens`);
+  }
+});
+
+test("Graphite pinned palette and readable core pairs meet contrast", () => {
+  const graphiteBlock = extractBlock(css, ".view-graphite {");
+  const token = (name: string) => graphiteBlock.match(new RegExp(`${name}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+  assert.strictEqual(token("--bg-1"), "#0d1117");
+  assert.strictEqual(token("--syn-kw"), "#ff7b72");
+  assert.strictEqual(token("--ansi-green"), "#3fb950");
+  const canvas = token("--bg-1")!;
+  for (const foreground of [token("--fg"), token("--fg-dim"), token("--fg")]) {
+    assert.ok(foreground && contrastRatio(foreground, canvas) >= 4.5, `${foreground} must meet 4.5:1 on Graphite canvas`);
+  }
+  const surface = token("--bg-3")!;
+  assert.ok(contrastRatio(token("--fg")!, surface) >= 4.5, "Graphite foreground must meet 4.5:1 on surface");
 });

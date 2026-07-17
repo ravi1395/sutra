@@ -103,11 +103,11 @@ The palette is a near-monochrome ink/paper ramp with a single accent breaking th
 ### Named Rules
 **The One Signal Rule.** Jade is the only saturated color available for UI state. If a new control needs to communicate "active" or "on", it reaches for jade or it reaches for nothing — never a second accent hue.
 
-**The Fixed Diff Rule.** `diff-added` (`#e3b341` amber), `diff-modified` (`#4493f8` blue), `diff-deleted` (`#f0716a` red) are constant across ink and washi. They encode git semantics, not theme mood, and must never be re-themed or reused for unrelated UI state.
+**The Fixed Diff Rule.** Git-diff paint is fixed **within a view**, not across all views: `--diff-add`, `--diff-mod`, and `--diff-del` own gutter, diff-lens, hunk, and diff-file paint. Classic retains its shipped amber/blue/red literals; Graphite (and later views) maps them green/amber/red. App-wide `--added`, `--modified`, and `--deleted` remain status tokens — including diagnostics and invalid syntax — and are never view-revalued.
 
 ## 3. Typography
 
-**UI Font:** Instrument Sans (with system-ui, sans-serif fallback)
+**UI Font:** Instrument Sans (with system-ui, sans-serif fallback). Graphite alone uses bundled Mona Sans for chrome; code, terminal content, and `--mono` remain Spline Sans Mono.
 **Mono Font:** Spline Sans Mono (with ui-monospace, Menlo fallback)
 **Voice Font:** Fraunces italic (with Georgia, serif fallback)
 

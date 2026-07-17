@@ -405,6 +405,10 @@ instantly and persist through Sutra's shared settings store across launches.
 
 The command palette switches between the coupled **Classic**, **North Light**, **Graphite**, and **Stanza** views. Use `View variant: next` to cycle only the variants valid for the active view; the selection persists per the existing single-window settings behavior.
 
+### Graphite
+
+Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git-diff green/amber/red paint, and a locally bundled font license. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime.
+
 | Section | Options |
 |---|---|
 | Editor | Font size (10–24), font family, tab size (2/4/8), word wrap |
