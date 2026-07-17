@@ -225,7 +225,13 @@ import {
   terminalSurface,
 } from "./north-seam";
 import { ComposerFileCache } from "./composer-files";
-import { createDomSidebarDrawerHost, createSidebarDrawer } from "./drawer";
+import {
+  BLOCKING_OVERLAY_SELECTOR,
+  createDomSidebarDrawerHost,
+  createSidebarDrawer,
+  handleSidebarDrawerShortcut,
+  hasActiveBlockingOverlay,
+} from "./drawer";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -2110,12 +2116,6 @@ async function openSidebarFileInPane(path: string, side: "left" | "right"): Prom
   if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
 }
 
-function eventTargetsBlockingOverlay(event: Event): boolean {
-  const target = event.target;
-  return target instanceof Element
-    && target.closest(".palette-overlay,.settings-overlay,.rollback-overlay,.tm-overlay") !== null;
-}
-
 function togglePreview(): void {
   void editor
     .togglePreview()
@@ -2921,16 +2921,23 @@ window.addEventListener("dragend", clearPaneDropHint);
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
   const mod = isMod(e);
-  const blockedByOverlay = eventTargetsBlockingOverlay(e);
-  if (sidebarDrawer.handleEscape(e, blockedByOverlay)) return;
-  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
-  if (settings.view === "north" && mod && e.code === "KeyE" && !e.shiftKey && !e.altKey && !e.repeat) {
-    // The open drawer is exempt from the overlay guard so ⌘E always closes it.
-    if (sidebarDrawer.isOpen() || !blockedByOverlay) {
-      e.preventDefault();
-      sidebarDrawer.toggle();
-    }
-  } else if (mod && e.code === "KeyN") {
+  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S.
+  const blockingOverlayActive = hasActiveBlockingOverlay(
+    document.querySelectorAll<HTMLElement>(BLOCKING_OVERLAY_SELECTOR),
+  );
+  if (handleSidebarDrawerShortcut(sidebarDrawer, {
+    key: e.key,
+    code: e.code,
+    mod,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey,
+    repeat: e.repeat,
+    defaultPrevented: e.defaultPrevented,
+    target: e.target,
+    preventDefault: () => e.preventDefault(),
+    stopPropagation: () => e.stopPropagation(),
+  }, { north: settings.view === "north", blockingOverlayActive })) return;
+  if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
     else editor.newUntitled(); // ⌘N New File

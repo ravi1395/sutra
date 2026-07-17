@@ -17,12 +17,63 @@ export interface SidebarDrawerEscapeEvent {
   stopPropagation(): void;
 }
 
+export interface SidebarDrawerShortcutEvent extends SidebarDrawerEscapeEvent {
+  code: string;
+  mod: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  repeat: boolean;
+  readonly target?: unknown;
+}
+
 export interface SidebarDrawer {
   open(): boolean;
   close(options?: { restoreFocus?: boolean }): boolean;
   toggle(): void;
   isOpen(): boolean;
   handleEscape(event: SidebarDrawerEscapeEvent, blockedByOverlay?: boolean): boolean;
+}
+
+export interface SidebarDrawerShortcutState {
+  north: boolean;
+  blockingOverlayActive: boolean;
+}
+
+export const BLOCKING_OVERLAY_SELECTOR = ".palette-overlay,.settings-overlay,.rollback-overlay,.tm-overlay";
+
+export interface BlockingOverlayHandle {
+  readonly isConnected: boolean;
+  readonly hidden: boolean;
+  readonly inert: boolean;
+  readonly classList: Pick<DOMTokenList, "contains">;
+  getAttribute(name: string): string | null;
+}
+
+/** True only for a mounted, interactive blocking overlay. */
+export function hasActiveBlockingOverlay(overlays: Iterable<BlockingOverlayHandle>): boolean {
+  for (const overlay of overlays) {
+    if (!overlay.isConnected || overlay.hidden || overlay.inert
+        || overlay.classList.contains("hidden") || overlay.getAttribute("aria-hidden") === "true") continue;
+    return true;
+  }
+  return false;
+}
+
+/** Applies drawer shortcut ownership independently of the event's focused target. */
+export function handleSidebarDrawerShortcut(
+  drawer: SidebarDrawer,
+  event: SidebarDrawerShortcutEvent,
+  state: SidebarDrawerShortcutState,
+): boolean {
+  if (event.key === "Escape") {
+    return drawer.handleEscape(event, state.blockingOverlayActive);
+  }
+  if (!state.north || !event.mod || event.code !== "KeyE"
+      || event.shiftKey || event.altKey || event.repeat) return false;
+  if (!drawer.isOpen() && state.blockingOverlayActive) return false;
+  event.preventDefault();
+  drawer.toggle();
+  return true;
 }
 
 export interface DomSidebarDrawerHostOptions {
