@@ -200,6 +200,28 @@
 :root.view-north .tab.active {
   border-bottom-color: var(--em);
 }
+:root.view-north .tab.north-trail-tab {
+  position: relative;
+  border-bottom-color: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+}
+:root.view-north .tab.north-trail-tab:hover { color: var(--fg); }
+:root.view-north .tab.north-trail-tab.active {
+  color: var(--fg);
+  font-weight: 600;
+}
+:root.view-north .tab.north-trail-tab.active::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--em);
+}
 :root.view-north #editor-area,
 :root.view-north #panes,
 :root.view-north .pane,
@@ -2301,6 +2323,9 @@ button:hover {
 }
 
 /* ---- whisper bar ---- */
+#north-seam {
+  display: none;
+}
 #whisper-bar {
   flex: 0 0 27px;
   display: flex;
@@ -2313,6 +2338,60 @@ button:hover {
   border-top: 1px solid var(--line);
   color: var(--fg-faint);
   font-size: 11.5px;
+}
+:root.view-north #whisper-bar {
+  display: none;
+}
+:root.view-north #north-seam {
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 10px 10px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  box-shadow: var(--sheet-shadow);
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+.north-seam-whisper {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.north-surface-pills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.north-surface-pill {
+  border: 1px solid var(--line-menu);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font: inherit;
+  line-height: 18px;
+  padding: 0 7px;
+  cursor: pointer;
+}
+.north-surface-pill:hover {
+  border-color: var(--em);
+  color: var(--em);
+}
+.north-surface-pill.live::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 4px 1px 0;
+  border-radius: 999px;
+  background: var(--em);
 }
 .whisper-left,
 .whisper-right {

@@ -212,6 +212,7 @@ import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
+import { onSurfaces, setSurface, surfacePills, type SurfaceId, type Surfaces } from "./surface-state";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -640,6 +641,14 @@ void onFsChanged((payload) => {
 });
 
 const whisperBar = $("whisper-bar");
+const northSeam = document.createElement("div");
+northSeam.id = "north-seam";
+const northWhisper = document.createElement("div");
+northWhisper.className = "north-seam-whisper";
+const northSurfacePills = document.createElement("div");
+northSurfacePills.className = "north-surface-pills";
+northSeam.append(northWhisper, northSurfacePills);
+whisperBar.before(northSeam);
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -896,6 +905,12 @@ function applySettings(next: UserSettings): void {
   if (viewChanged) {
     editor.renderAllTabs();
     syncGraphiteBottomPanel();
+    lastWhisperSig = "";
+    whisperBar.replaceChildren();
+    northWhisper.replaceChildren();
+    northSurfacePills.replaceChildren();
+    renderWhisperBar();
+    if (latestSurfaces) renderSurfacePills(latestSurfaces);
   }
   terminals.retheme();
   const rootStyle = document.documentElement.style;
@@ -1044,6 +1059,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   // process. Give the new root an integrated terminal immediately; it is ready
   // for the user to launch their selected terminal-native agent there.
   if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
+  syncSurfacesFromUi();
   await recentsPush(dir, basename(dir));
   void loadRecents().then((r) => { recentsCache = r; });
   void refreshGitState(dir);
@@ -1121,6 +1137,11 @@ function renderTerminalSeam(): void {
   terminalSeam.append(chevron, label, rule, kbd);
 }
 
+function syncTerminalSurface(visible = drawerState.open): void {
+  const badge = terminals.liveCount() > 0 ? "live" : terminals.count > 0 ? "dormant" : null;
+  setSurface("terminal", { visible, badge });
+}
+
 function setTerminal(on: boolean): void {
   const isGraphite = document.documentElement.classList.contains("view-graphite");
   if (isGraphite) {
@@ -1142,9 +1163,14 @@ function setTerminal(on: boolean): void {
     // Refit, then focus so keystrokes reach the shell without a manual click.
     else requestAnimationFrame(() => { terminals.refit(); terminals.focusActive(); });
   }
+  syncTerminalSurface(on);
 }
 btnTerm.onclick = () => setTerminal(!drawerState.open);
 terminals.onTabsChanged = renderTerminalSeam;
+terminals.onSessionsChanged(() => {
+  renderTerminalSeam();
+  syncTerminalSurface();
+});
 
 // ---- turn strip (harness v2 → turn-UX rehaul P1) ----
 // Collapsed to a single .turn-summary row (⟲ N turns · agent · relTime [chip])
@@ -1601,6 +1627,16 @@ function ensureComposer(): boolean {
   return true;
 }
 
+function composerHasDraft(): boolean {
+  return [...composerBody.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".cmp-section-input")]
+    .some((input) => input.value.trim().length > 0)
+    || composerBody.querySelector(".cmp-chip") !== null;
+}
+
+function syncComposerSurface(visible = !composerPane.classList.contains("hidden")): void {
+  setSurface("composer", { visible, badge: composerHasDraft() ? "dormant" : null });
+}
+
 function setComposer(on: boolean): void {
   if (on && !ensureComposer()) return; // no workspace open → nothing to compose against
   composerPane.classList.toggle("hidden", !on);
@@ -1608,6 +1644,7 @@ function setComposer(on: boolean): void {
   btnComposer.classList.toggle("on", on);
   if (on) composerPanel?.show();
   else composerPanel?.hide();
+  syncComposerSurface(on);
 }
 btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
 $("composer-close").onclick = () => setComposer(false);
@@ -1814,6 +1851,7 @@ function setDiff(on: boolean): void {
     editor.recomputeDiff();
     void refreshDiffFileList();
   }
+  setSurface("diff", { visible: on, badge: null });
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
@@ -1828,8 +1866,48 @@ function setBrowser(on: boolean): void {
   if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
+  setSurface("browser", { visible: on, badge: browser.hasHistory() ? "dormant" : null });
 }
 btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
+
+function syncSurfacesFromUi(): void {
+  syncTerminalSurface();
+  syncComposerSurface();
+  setSurface("diff", { visible: !diffPane.classList.contains("hidden"), badge: null });
+  setSurface("browser", {
+    visible: !browserArea.classList.contains("hidden"),
+    badge: browser.hasHistory() ? "dormant" : null,
+  });
+}
+
+function surfaceLabel(id: SurfaceId): string {
+  return id === "terminal" ? "Terminal" : id === "browser" ? "Browser" : id === "diff" ? "Diff" : "Composer";
+}
+
+function restoreSurface(id: SurfaceId): void {
+  if (id === "terminal") setTerminal(true);
+  else if (id === "browser") setBrowser(true);
+  else if (id === "diff") setDiff(true);
+  else setComposer(true);
+}
+
+function renderSurfacePills(all: Surfaces): void {
+  northSurfacePills.replaceChildren();
+  for (const pill of surfacePills(all)) {
+    const button = document.createElement("button");
+    button.className = "north-surface-pill" + (pill.live ? " live" : "");
+    button.type = "button";
+    button.textContent = surfaceLabel(pill.id);
+    button.onclick = () => restoreSurface(pill.id);
+    northSurfacePills.append(button);
+  }
+}
+
+let latestSurfaces: Surfaces | null = null;
+onSurfaces((all) => {
+  latestSurfaces = all;
+  renderSurfacePills(all);
+});
 
 // ---- open-editors switcher ----
 // Toolbar button → .menu-card dropdown listing every open tab across panes;
@@ -2636,6 +2714,10 @@ async function viewChangedPath(path: string): Promise<void> {
 }
 
 let lastWhisperSig = "";
+function chipHost(): HTMLElement {
+  return document.documentElement.classList.contains("view-north") ? northSeam : whisperBar;
+}
+
 function renderWhisperBar(): void {
   const dirty = editor.tabs.some((tab) => tab.dirty);
   const activePath = editor.active?.path ?? null;
@@ -2651,7 +2733,9 @@ function renderWhisperBar(): void {
   if (sig === lastWhisperSig) return;
   lastWhisperSig = sig;
 
-  whisperBar.innerHTML = "";
+  const host = chipHost();
+  const contentHost = host === northSeam ? northWhisper : host;
+  contentHost.replaceChildren();
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
@@ -2676,7 +2760,7 @@ function renderWhisperBar(): void {
   // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
   // hidden, with no session), multi-session aggregate strip.
   const dbgChip = debugSession.active ? [debugChipEl()] : [];
-  whisperBar.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
+  contentHost.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -3293,6 +3377,7 @@ void (async function boot(): Promise<void> {
     };
   }
   setTerminal(drawerState.open);
+  syncSurfacesFromUi();
 
   // One-shot on upgrade: port pre-migration recents/trustedRoots into the
   // backend, then seed the trusted set from folders already in recents so

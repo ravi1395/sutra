@@ -1072,9 +1072,12 @@ export class Pane {
   renderTabs(): void {
     this.tabsEl.innerHTML = "";
     const graphite = document.documentElement.classList.contains("view-graphite");
+    const north = document.documentElement.classList.contains("view-north");
     if (this.previewSource) {
       const el = document.createElement("div");
-      el.className = graphite ? "tab active preview-tab graphite-tab" : "tab active preview-tab";
+      el.className = graphite
+        ? "tab active preview-tab graphite-tab"
+        : north ? "tab active preview-tab north-trail-tab" : "tab active preview-tab";
       const name = document.createElement("span");
       name.textContent = previewTabName(this.previewSource.name);
       const close = document.createElement("button");
@@ -1092,7 +1095,9 @@ export class Pane {
       const el = document.createElement("div");
       el.className = graphite
         ? "tab graphite-tab" + (tab === this.active ? " active" : "")
-        : "tab" + (tab === this.active ? " active" : "");
+        : north
+          ? "tab north-trail-tab" + (tab === this.active ? " active" : "")
+          : "tab" + (tab === this.active ? " active" : "");
       el.addEventListener("pointerdown", (e) => {
         if ((e.target as Element).closest(".tab-close")) return;
         beginSplitPointerDrag({
