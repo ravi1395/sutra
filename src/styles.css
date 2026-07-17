@@ -70,6 +70,14 @@
   --term-bg: #202633; --term-fg: #edf1f7;
 }
 
+/* xterm's bundled CSS hard-codes black behind its DOM renderer. Canvas sessions
+   receive --term-bg through Terminal.options.theme; this keeps the DOM fallback
+   (and IME composition overlay) on that same token without touching Classic. */
+:root.view-north #term-host .xterm .xterm-viewport,
+:root.view-north #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+
 /* fixed: box-shadow colors below stay literal rgba(0,0,0,X) black across both themes by convention —
    ambient elevation shadows read as dark regardless of surface theme (standard UI practice); the two
    new motion surfaces (palette, tag-manager modal) opt into the themed var(--shadow) instead. */

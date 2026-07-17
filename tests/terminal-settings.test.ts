@@ -100,3 +100,12 @@ test("terminal.ts sources its xterm theme from CSS tokens, not inline hex", () =
   assert.match(terminalTs, /theme: buildTermTheme\(\)/);
   assert.match(terminalTs, /onThemeChange\(\(\) => retheme\(this\.terms\)\)/);
 });
+
+test("North routes xterm's DOM renderer backdrop through --term-bg without changing Classic", () => {
+  const css = readFileSync("src/styles.css", "utf8");
+  assert.match(
+    css,
+    /:root\.view-north #term-host \.xterm \.xterm-viewport,\s*:root\.view-north #term-host \.xterm \.composition-view\s*\{\s*background-color:\s*var\(--term-bg\);\s*\}/,
+  );
+  assert.doesNotMatch(css, /(?:^|\n)(?!:root\.view-north)[^{]*\.xterm-viewport\s*\{\s*background-color:\s*var\(--term-bg\);/);
+});
