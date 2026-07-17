@@ -94,6 +94,7 @@ import {
   listFiles,
   langWorkspaceSymbols,
   type AgentTrackingStatus,
+  type RollbackResult,
   type TestStatus,
   type Turn,
   type TurnFileContent,
@@ -105,6 +106,7 @@ import {
   firstViewableAgentChange,
   getTurns,
   hunkDiagBadgeEl,
+  isRollbackable,
   launchTurnTest,
   markRolledBack,
   mergeChangedFiles,
@@ -232,6 +234,7 @@ import {
   handleSidebarDrawerShortcut,
   hasActiveBlockingOverlay,
 } from "./drawer";
+import { createTurnActions } from "./turn-actions";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -1246,6 +1249,121 @@ function openTurnDropdown(root: string): void {
 // unit-testable without a DOM.
 let diffScope: DiffScope = { kind: "workspace" };
 
+type TurnActionTarget = { root: string; turn: Turn; turns: Turn[] };
+
+function currentTurnActionTarget(turnId: number): TurnActionTarget | null {
+  const root = currentRoot;
+  if (!root || !Number.isInteger(turnId)) return null;
+  const turns = getTurns(root);
+  const turn = turns.find((candidate) => candidate.id === turnId);
+  if (!turn || turn.closedAt == null || turn.boundarySource === "rollback") return null;
+  return { root, turn, turns };
+}
+
+function openTurnReviewDiff(turnId: number): void {
+  const target = currentTurnActionTarget(turnId);
+  if (!target) return;
+  const next = enterTurnScope(diffScope, target.turn);
+  if (next === diffScope) return;
+  diffScope = next;
+  diffViewer.invalidate();
+  closeTurnDropdown();
+  // setDiff owns the one file-list refresh; this also opens the pane for the
+  // future ledger caller without duplicating its existing refresh path.
+  setDiff(true);
+}
+
+function openTurnRollback(turnId: number): Promise<void> {
+  const target = currentTurnActionTarget(turnId);
+  if (!target || !isRollbackable(target.turn, target.turns)) {
+    return Promise.reject(new Error("Turn is no longer available to roll back in this workspace."));
+  }
+  const { root, turn, turns } = target;
+  const existing = new Set(document.querySelectorAll<HTMLElement>(".rollback-overlay"));
+  return new Promise<void>((resolve, reject) => {
+    let applied = false;
+    let settled = false;
+    let observer: MutationObserver | null = null;
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      observer?.disconnect();
+      if (error) reject(error); else resolve();
+    };
+    try {
+      openRollbackDialog(root, turn, {
+        turns,
+        onApply: async (paths) => {
+          applied = false;
+          const result = await applyTurnRollback(root, turn.id, paths);
+          applied = result.failed.length === 0;
+          return result;
+        },
+        getDiskHashes: async (resolvedRoot, paths) =>
+          Object.fromEntries(
+            (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
+          ) as Record<string, string>,
+      });
+      const overlay = [...document.querySelectorAll<HTMLElement>(".rollback-overlay")]
+        .find((candidate) => !existing.has(candidate));
+      if (!overlay) return settle(new Error("Rollback dialog did not open."));
+      observer = new MutationObserver(() => {
+        if (!overlay.isConnected) settle(applied ? undefined : new Error("Rollback cancelled."));
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      if (!overlay.isConnected) settle(new Error("Rollback cancelled."));
+    } catch (error) {
+      settle(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+async function applyTurnRollback(root: string, turnId: number, paths: string[]): Promise<RollbackResult> {
+  let target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Turn is no longer available to roll back in this workspace.");
+  }
+  // The rolled-back turn and any newer turn's code state is about to be
+  // replaced — cancel their in-flight test runs BEFORE restoring so a
+  // long-running suite cannot record a result against replaced code.
+  await cancelTurnTestsFrom(root, turnId);
+  target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Workspace or turn state changed before rollback was applied.");
+  }
+  const { turn } = target;
+  const result = await turnRollback(root, rollbackTargetId(turn), paths);
+  // A whole-turn disposition requires every file in the clicked turn to have
+  // restored. Metadata failure must not make an already-applied Git rollback
+  // look retryable, so it remains best-effort and visibly logged.
+  if (turn.files.length > 0 && turn.files.every((file) => result.restored.includes(file.path))) {
+    await queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"))
+      .catch((error) => console.warn("Task rollback review update failed", error));
+  }
+  markRolledBack(root, turn.id);
+  try {
+    replaceTurns(root, await turnList(root));
+  } catch (error) {
+    console.warn("turnList refresh after rollback failed", error);
+  }
+  if (currentRoot === root) {
+    if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
+    diffViewer.invalidate();
+    await refreshDiffFileList();
+  }
+  return result;
+}
+
+function refreshTurnActionConsumers(): void {
+  if (currentRoot) renderTurnStrip(currentRoot);
+}
+
+const turnActions = createTurnActions({
+  openReviewDiff: openTurnReviewDiff,
+  rollbackTurn: openTurnRollback,
+  refresh: refreshTurnActionConsumers,
+});
+
 // Last render's turn-strip key (see turnStripRenderKey); root-prefixed so a
 // root switch always compares unequal even if the new root's turn shape
 // happens to coincide with the old one's.
@@ -1289,49 +1407,8 @@ function renderTurnStrip(root: string): void {
   const turns = getTurns(root);
 
   const onRollback = (turn: Turn) => {
-    openRollbackDialog(root, turn, {
-      turns,
-      onApply: async (paths) => {
-        // The rolled-back turn and any newer turn's code state is about to be
-        // replaced — cancel their in-flight test runs BEFORE restoring so a
-        // long-running suite can't finish against a tree that no longer
-        // matches what it was testing and get recorded as that turn's result.
-        await cancelTurnTestsFrom(root, turn.id);
-        const res = await turnRollback(root, rollbackTargetId(turn), paths);
-        // A turn has a rolled-back review disposition only when every file in
-        // that turn was restored. A partial rollback leaves it unresolved for
-        // later explicit review rather than claiming a false whole-turn result.
-        if (turn.files.length > 0 && turn.files.every((file) => res.restored.includes(file.path))) {
-          void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"));
-        }
-        // turn_poll is consume-once and never re-delivers a closed turn, so
-        // rolled_back (set server-side on the manifest) would otherwise never
-        // reach turnsByRoot — re-fetch the full list so the strip reflects it
-        // immediately instead of showing a stale live Rollback button.
-        // Optimistically flag the rolled-back turn locally FIRST so the strip
-        // disables its Rollback button even if the authoritative turnList
-        // re-fetch below throws — otherwise an IPC failure would leave a live
-        // button that re-applies into a false-success no-op. A successful
-        // turnList overwrites this with the server truth.
-        markRolledBack(root, turn.id);
-        try {
-          replaceTurns(root, await turnList(root));
-        } catch (e) {
-          console.warn("turnList refresh after rollback failed", e);
-        }
-        // A rollback fired from the breadcrumb just emptied the turn it was
-        // reviewing — fall back to the normal working-tree view rather than
-        // keep the pane scoped to a now-rolled-back snapshot.
-        if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
-        diffViewer.invalidate();
-        void refreshDiffFileList();
-        return res;
-      },
-      getDiskHashes: async (r, ps) =>
-        Object.fromEntries(
-          (await turnDiskHashes(r, ps)).filter(([, hash]) => hash != null),
-        ) as Record<string, string>,
-    });
+    if (currentRoot !== root) return;
+    void turnActions.rollback(turn.id).catch(() => {});
   };
 
   // Resolve the scope BEFORE computing the render key: a vanished turn falls
@@ -1375,13 +1452,8 @@ function renderTurnStrip(root: string): void {
     return;
   }
   const onSelectTurn = (turn: Turn) => {
-    const next = enterTurnScope(diffScope, turn);
-    if (next === diffScope) return; // open (unclosed) turn: ignored
-    diffScope = next;
-    diffViewer.invalidate(); // mode switch: drop the normal onExpand/onAccept closures
-    closeTurnDropdown();
-    renderTurnStrip(root);
-    void refreshDiffFileList();
+    if (currentRoot !== root) return;
+    turnActions.reviewDiff(turn.id);
   };
   // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
   // rollback can itself be undone; they aren't a real agent turn and are
@@ -1714,6 +1786,7 @@ btnTasks.setAttribute("aria-label", "Toggle tasks");
 btnTasks.innerHTML = icon("check", 17);
 $("view-tools").insertBefore(btnTasks, $("btn-menu"));
 const activeWorktreeSetups = new Map<string, { root: string; taskId: string; automationId: string }>();
+let latestTasks: readonly Task[] = [];
 const tasksPanel = mountTasksPanel({
   container: tasksPane,
   getRoot: () => currentRoot,
@@ -1871,7 +1944,8 @@ const tasksPanel = mountTasksPanel({
   }),
   onTasksChanged: (entries) => {
     const root = currentRoot;
-    if (root) annotations.setTaskContext(entries.filter((task) => task.root === root), annotationsAttach, annotationsDeliver, annotationsDetach);
+    latestTasks = root ? entries.filter((task) => task.root === root) : [];
+    annotations.setTaskContext(latestTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
   },
 });
 let tasksAgentRefreshTimer: number | undefined;
