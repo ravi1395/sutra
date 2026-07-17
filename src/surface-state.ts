@@ -26,13 +26,30 @@ let surfaces: Surfaces = freezeSurfaces({
 });
 
 const listeners = new Set<SurfacesListener>();
+const notifications: { surfaces: Surfaces; listeners: SurfacesListener[] }[] = [];
+let draining = false;
+
+function notify(next: Surfaces): void {
+  notifications.push({ surfaces: next, listeners: [...listeners] });
+  if (draining) return;
+
+  draining = true;
+  try {
+    while (notifications.length > 0) {
+      const notification = notifications.shift()!;
+      for (const listener of notification.listeners) listener(notification.surfaces);
+    }
+  } finally {
+    draining = false;
+  }
+}
 
 export function setSurface(id: SurfaceId, state: SurfaceState): void {
   const previous = surfaces[id];
   if (previous.visible === state.visible && previous.badge === state.badge) return;
 
   surfaces = freezeSurfaces({ ...surfaces, [id]: { visible: state.visible, badge: state.badge } });
-  for (const listener of listeners) listener(surfaces);
+  notify(surfaces);
 }
 
 export function onSurfaces(listener: SurfacesListener): () => void {

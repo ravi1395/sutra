@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { onSurfaces, setSurface, surfacePills, type SurfaceId, type Surfaces } from "../src/surface-state";
+import { onSurfaces, setSurface, surfacePills, type SurfaceId, type SurfaceState, type Surfaces } from "../src/surface-state";
 
 const ids: readonly SurfaceId[] = ["terminal", "browser", "diff", "composer"];
 
@@ -60,4 +60,31 @@ test("unsubscribe stops delivery", () => {
   setSurface("diff", { visible: false, badge: "live" });
 
   assert.equal(deliveries, 2);
+});
+
+test("reentrant updates preserve transition order per listener", () => {
+  resetSurfaces();
+  const a: [SurfaceState["badge"], SurfaceState["badge"]][] = [];
+  const b: [SurfaceState["badge"], SurfaceState["badge"]][] = [];
+  let reentered = false;
+  const snapshot = (surfaces: Surfaces): [SurfaceState["badge"], SurfaceState["badge"]] =>
+    [surfaces.terminal.badge, surfaces.browser.badge];
+  const unsubscribeA = onSurfaces((surfaces) => {
+    a.push(snapshot(surfaces));
+    if (!reentered && surfaces.terminal.badge === "live" && surfaces.browser.badge === null) {
+      reentered = true;
+      setSurface("browser", { visible: false, badge: "dormant" });
+    }
+  });
+  const unsubscribeB = onSurfaces((surfaces) => b.push(snapshot(surfaces)));
+  a.length = 0;
+  b.length = 0;
+
+  setSurface("terminal", { visible: false, badge: "live" });
+
+  assert.deepEqual(a, [["live", null], ["live", "dormant"]]);
+  assert.deepEqual(b, [["live", null], ["live", "dormant"]]);
+  unsubscribeA();
+  unsubscribeB();
+  resetSurfaces();
 });
