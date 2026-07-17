@@ -72,7 +72,8 @@ export function handleSidebarDrawerShortcut(
       || event.shiftKey || event.altKey || event.repeat) return false;
   if (!drawer.isOpen() && state.blockingOverlayActive) return false;
   event.preventDefault();
-  drawer.toggle();
+  if (drawer.isOpen() && state.blockingOverlayActive) drawer.close({ restoreFocus: false });
+  else drawer.toggle();
   return true;
 }
 

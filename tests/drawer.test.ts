@@ -113,9 +113,20 @@ test("open drawer leaves Escape to an active overlay over an editor target", () 
   assert.deepEqual(events, ["move", "tree"]);
 });
 
-test("open drawer lets Cmd+E close through an active overlay", () => {
-  const { drawer, events } = fixture(() => null);
+test("active-overlay Cmd+E closes drawer without displacing overlay focus", () => {
+  let active: FocusHandle;
+  const prior: FocusHandle = {
+    isConnected: true,
+    focus: () => { active = prior; },
+  };
+  const overlayFocus: FocusHandle = {
+    isConnected: true,
+    focus: () => { active = overlayFocus; },
+  };
+  active = prior;
+  const { drawer, events } = fixture(() => active);
   drawer.open();
+  overlayFocus.focus();
   let prevented = 0;
   const handled = handleSidebarDrawerShortcut(drawer, {
     key: "e",
@@ -132,8 +143,35 @@ test("open drawer lets Cmd+E close through an active overlay", () => {
 
   assert.equal(handled, true);
   assert.equal(drawer.isOpen(), false);
+  assert.equal(active, overlayFocus);
   assert.equal(prevented, 1);
   assert.deepEqual(events, ["move", "tree", "restore"]);
+});
+
+test("Cmd+E close without an overlay restores captured focus", () => {
+  let focused = 0;
+  const prior: FocusHandle = {
+    isConnected: true,
+    focus: () => { focused += 1; },
+  };
+  const { drawer } = fixture(() => prior);
+  drawer.open();
+  const handled = handleSidebarDrawerShortcut(drawer, {
+    key: "e",
+    code: "KeyE",
+    mod: true,
+    shiftKey: false,
+    altKey: false,
+    repeat: false,
+    defaultPrevented: false,
+    target: "editor",
+    preventDefault: () => {},
+    stopPropagation: () => {},
+  }, { north: true, blockingOverlayActive: false });
+
+  assert.equal(handled, true);
+  assert.equal(drawer.isOpen(), false);
+  assert.equal(focused, 1);
 });
 
 test("blocking overlay presence ignores disconnected, hidden, and inert retained nodes", () => {
