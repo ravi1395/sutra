@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import { openRollbackDialog, resolveRollbackChecklist, rollbackChecklist, setRollbackEditor } from "../src/rollback-dialog";
+import { createTurnActions, waitForRollbackAction } from "../src/turn-actions";
 import type { RollbackResult, Turn, TurnFileEntry } from "../src/ipc";
 import type { EditorManager } from "../src/editor";
 
@@ -440,6 +441,134 @@ test("openRollbackDialog: apply proceeds when re-resolved rows are unchanged", a
     await flush();
 
     assert.deepEqual(applied, ["a.ts"]);
+  } finally {
+    restore();
+  }
+});
+
+test("rollback action lifecycle: apply success closes before resolving and refreshes once", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    let refreshes = 0;
+    const actions = createTurnActions({
+      openReviewDiff: () => {},
+      rollbackTurn: () => waitForRollbackAction((lifecycle) => {
+        openRollbackDialog("/r", turns[0], {
+          turns,
+          onApply: async (paths) => ({ restored: paths, failed: [] }),
+          getDiskHashes: async () => ({ "a.ts": "h1" }),
+          lifecycle,
+        });
+      }),
+      refresh: () => { refreshes += 1; },
+    });
+
+    const pending = actions.rollback(1);
+    const overlay = body.children[body.children.length - 1];
+    await flush();
+    await flush();
+    findByText(overlay, "Apply rollback")!.onclick?.();
+    await pending;
+
+    assert.equal(overlay.removed, true, "success must close before the action resolves");
+    assert.equal(refreshes, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("rollback action lifecycle: cancel rejects once and never refreshes", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    let refreshes = 0;
+    const actions = createTurnActions({
+      openReviewDiff: () => {},
+      rollbackTurn: () => waitForRollbackAction((lifecycle) => {
+        openRollbackDialog("/r", turns[0], {
+          turns,
+          onApply: async (paths) => ({ restored: paths, failed: [] }),
+          getDiskHashes: async () => ({ "a.ts": "h1" }),
+          lifecycle,
+        });
+      }),
+      refresh: () => { refreshes += 1; },
+    });
+
+    const pending = actions.rollback(1);
+    const overlay = body.children[body.children.length - 1];
+    findByText(overlay, "Cancel")!.onclick?.();
+    await assert.rejects(pending, /cancelled/i);
+    findByText(overlay, "Cancel")!.onclick?.();
+
+    assert.equal(overlay.removed, true);
+    assert.equal(refreshes, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("rollback action lifecycle: apply rejection settles while preserving the visible dialog error", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    let refreshes = 0;
+    const actions = createTurnActions({
+      openReviewDiff: () => {},
+      rollbackTurn: () => waitForRollbackAction((lifecycle) => {
+        openRollbackDialog("/r", turns[0], {
+          turns,
+          onApply: async () => { throw new Error("apply failed"); },
+          getDiskHashes: async () => ({ "a.ts": "h1" }),
+          lifecycle,
+        });
+      }),
+      refresh: () => { refreshes += 1; },
+    });
+
+    const pending = actions.rollback(1);
+    const overlay = body.children[body.children.length - 1];
+    await flush();
+    await flush();
+    findByText(overlay, "Apply rollback")!.onclick?.();
+    await assert.rejects(pending, /apply failed/);
+
+    assert.equal(overlay.removed, false, "dialog must remain open to show the error");
+    assert.match(findByClass(overlay, "rollback-failures")!.textContent, /apply failed/);
+    findByText(overlay, "Cancel")!.onclick?.();
+    assert.equal(refreshes, 0, "late removal after failure must not refresh");
+  } finally {
+    restore();
+  }
+});
+
+test("rollback action lifecycle: checklist rejection settles while preserving the visible dialog error", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    let refreshes = 0;
+    const actions = createTurnActions({
+      openReviewDiff: () => {},
+      rollbackTurn: () => waitForRollbackAction((lifecycle) => {
+        openRollbackDialog("/r", turns[0], {
+          turns,
+          onApply: async (paths) => ({ restored: paths, failed: [] }),
+          getDiskHashes: async () => { throw new Error("checklist failed"); },
+          lifecycle,
+        });
+      }),
+      refresh: () => { refreshes += 1; },
+    });
+
+    const pending = actions.rollback(1);
+    const overlay = body.children[body.children.length - 1];
+    await assert.rejects(pending, /checklist failed/);
+
+    assert.equal(overlay.removed, false, "dialog must remain open to show the load error");
+    assert.match(findByClass(overlay, "rollback-error")!.textContent, /checklist failed/);
+    findByText(overlay, "Cancel")!.onclick?.();
+    assert.equal(refreshes, 0, "late removal after failure must not refresh");
   } finally {
     restore();
   }

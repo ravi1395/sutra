@@ -234,7 +234,7 @@ import {
   handleSidebarDrawerShortcut,
   hasActiveBlockingOverlay,
 } from "./drawer";
-import { createTurnActions } from "./turn-actions";
+import { createTurnActions, waitForRollbackAction } from "./turn-actions";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -1279,42 +1279,24 @@ function openTurnRollback(turnId: number): Promise<void> {
     return Promise.reject(new Error("Turn is no longer available to roll back in this workspace."));
   }
   const { root, turn, turns } = target;
-  const existing = new Set(document.querySelectorAll<HTMLElement>(".rollback-overlay"));
-  return new Promise<void>((resolve, reject) => {
-    let applied = false;
-    let settled = false;
-    let observer: MutationObserver | null = null;
-    const settle = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      observer?.disconnect();
-      if (error) reject(error); else resolve();
-    };
-    try {
-      openRollbackDialog(root, turn, {
-        turns,
-        onApply: async (paths) => {
-          applied = false;
+  return waitForRollbackAction((lifecycle) => {
+    openRollbackDialog(root, turn, {
+      turns,
+      onApply: async (paths) => {
+        try {
           const result = await applyTurnRollback(root, turn.id, paths);
-          applied = result.failed.length === 0;
           return result;
-        },
-        getDiskHashes: async (resolvedRoot, paths) =>
-          Object.fromEntries(
-            (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
-          ) as Record<string, string>,
-      });
-      const overlay = [...document.querySelectorAll<HTMLElement>(".rollback-overlay")]
-        .find((candidate) => !existing.has(candidate));
-      if (!overlay) return settle(new Error("Rollback dialog did not open."));
-      observer = new MutationObserver(() => {
-        if (!overlay.isConnected) settle(applied ? undefined : new Error("Rollback cancelled."));
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-      if (!overlay.isConnected) settle(new Error("Rollback cancelled."));
-    } catch (error) {
-      settle(error instanceof Error ? error : new Error(String(error)));
-    }
+        } catch (error) {
+          lifecycle.failed(error);
+          throw error;
+        }
+      },
+      getDiskHashes: async (resolvedRoot, paths) =>
+        Object.fromEntries(
+          (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
+        ) as Record<string, string>,
+      lifecycle,
+    });
   });
 }
 
