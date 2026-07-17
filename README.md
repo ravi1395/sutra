@@ -401,6 +401,10 @@ size cap), and `unsafe` (pre-edit content was never capturable).
 Open with the titlebar Settings button, **⌘,**, or "Settings" in the command palette. Changes apply
 instantly and persist in `localStorage` across launches.
 
+### View switching
+
+The command palette switches between the coupled **Classic**, **North Light**, **Graphite**, and **Stanza** views. Use `View variant: next` to cycle only the variants valid for the active view; the selection persists per the existing single-window settings behavior.
+
 | Section | Options |
 |---|---|
 | Editor | Font size (10–24), font family, tab size (2/4/8), word wrap |

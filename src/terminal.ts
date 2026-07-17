@@ -37,13 +37,13 @@ interface Term {
   cwd: string | null; // Spawn-time cwd (session.cwd) — used to resolve relative file links
 }
 
-/** Build the live xterm theme from ink/washi CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
+/** Build the live xterm theme from CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
 export function buildTermTheme(): ITheme {
   return {
-    background: cssVar("--bg-2", D.background),
-    foreground: cssVar("--fg", D.foreground),
-    cursor: cssVar("--fg", D.cursor),
-    cursorAccent: cssVar("--bg-2", D.cursorAccent),
+    background: cssVar("--term-bg", D.background),
+    foreground: cssVar("--term-fg", D.foreground),
+    cursor: cssVar("--term-fg", D.cursor),
+    cursorAccent: cssVar("--term-bg", D.cursorAccent),
     selectionBackground: cssVar("--em-wash", D.selectionBackground),
     black: cssVar("--ansi-black", D.black),
     red: cssVar("--ansi-red", D.red),
@@ -379,6 +379,11 @@ export class TerminalManager {
     // live session on ink/washi toggle. A terminal spawned after a toggle already reads
     // current tokens at construction, so it never needs a catch-up call here.
     onThemeChange(() => retheme(this.terms));
+  }
+
+  /** Re-theme all live sessions after an explicit settings class transaction. */
+  retheme(): void {
+    retheme(this.terms);
   }
 
   get count(): number {

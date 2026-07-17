@@ -176,11 +176,15 @@ import {
 } from "./workspace";
 import {
   DEFAULT_SETTINGS,
+  VIEW_VARIANTS,
   clampSettings,
   isTestAutoRunEnabled,
   loadSettings,
   nextFontSettings,
   saveSettings,
+  viewClasses,
+  type ViewId,
+  type ViewVariant,
   type UserSettings,
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
@@ -872,15 +876,22 @@ async function restoreWorkspaceTabs(root: string): Promise<void> {
   }
 }
 
-// Apply the active theme by toggling the washi class on the document root.
-function applyTheme(theme: "ink" | "washi"): void {
-  document.documentElement.classList.toggle("theme-washi", theme === "washi");
+const VIEW_CLASS_NAMES = [
+  "view-north", "view-graphite", "view-stanza", "theme-washi", "theme-light", "variant-night", "variant-dawn",
+];
+
+// Replace every view/variant marker as one synchronous root-class transaction.
+function applyTheme(view: ViewId, theme: ViewVariant): void {
+  const root = document.documentElement;
+  root.classList.remove(...VIEW_CLASS_NAMES);
+  root.classList.add(...viewClasses(view, theme));
 }
 
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
   settings = clampSettings(next);
-  applyTheme(settings.theme);
+  applyTheme(settings.view, settings.theme);
+  terminals.retheme();
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
   rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
@@ -2946,6 +2957,11 @@ const paletteCommands: Command[] = [
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
   { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
+  { id: "view-classic", title: "View: Classic", run: () => setView("classic") },
+  { id: "view-north", title: "View: North Light", run: () => setView("north") },
+  { id: "view-graphite", title: "View: Graphite", run: () => setView("graphite") },
+  { id: "view-stanza", title: "View: Stanza", run: () => setView("stanza") },
+  { id: "view-variant-next", title: "View variant: next", run: nextViewVariant },
   { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
   { id: "search", title: "Search Folder", run: () => {
     if (!searchViewOpen) openSearchView();
@@ -2962,6 +2978,16 @@ const paletteCommands: Command[] = [
   { id: "debug-step-out", title: "Debug: Step Out", run: () => void debugSession.stepOut(), shortcut: "⇧F11" },
   { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop(), shortcut: "⇧F5" },
 ];
+
+function setView(view: ViewId): void {
+  persistSettings({ ...settings, view, theme: VIEW_VARIANTS[view][0] });
+}
+
+function nextViewVariant(): void {
+  const variants = VIEW_VARIANTS[settings.view];
+  const current = variants.indexOf(settings.theme);
+  persistSettings({ ...settings, theme: variants[(current + 1) % variants.length] });
+}
 
 function recentPaletteCommands(): Command[] {
   // mountPalette's builder must stay synchronous — read the cached snapshot
