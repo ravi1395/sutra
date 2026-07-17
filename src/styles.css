@@ -60,6 +60,16 @@
   --ansi-bright-cyan: #148f85; --ansi-bright-white: #2a2a24;
 }
 
+/* ── W0/T0d North Light day spike: token proof only; T3 owns sheet/layout paint. ── */
+.view-north {
+  --bg-1: #f2f3f5; --bg-2: #fbfcfd;
+  --line: rgba(41, 49, 66, 0.14);
+  --fg: #303745; --fg-dim: #667085; --fg-faint: #98a2b3;
+  --em: #315bd6;
+  --syn-kw: #6246a8; --syn-type: #337a96; --syn-str: #347a58; --syn-comment: #7c8798;
+  --term-bg: #202633; --term-fg: #edf1f7;
+}
+
 /* fixed: box-shadow colors below stay literal rgba(0,0,0,X) black across both themes by convention —
    ambient elevation shadows read as dark regardless of surface theme (standard UI practice); the two
    new motion surfaces (palette, tag-manager modal) opt into the themed var(--shadow) instead. */
