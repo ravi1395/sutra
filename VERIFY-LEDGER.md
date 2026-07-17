@@ -5,7 +5,7 @@ Multi-view W0 (T0, branch `codex/v233-multiview`). Unit/build proof covers setti
 
 | Date | Version | Criterion | Surface | Evidence | Status |
 |---|---|---|---|---|---|
-| 2026-07-17 | 2.3.3 | MV-0: three rapid palette switches end with exactly the selected view classes; no console errors; return to Classic has parity screenshot | UI | BLOCKED: Mac is locked, so no live palette/modal/class observation or Classic parity screenshot was possible. Palette/modal color proof is deferred to T0d; T0 contains no non-Classic paint. | BLOCKED |
+| 2026-07-17 | 2.3.3 | MV-0: three rapid palette switches end with exactly the selected view classes; modal offers only valid view/variant pairs and modal switch is equivalent to palette apply/save; no console errors; return to Classic has parity screenshot | UI | BLOCKED: Mac is locked, so no live palette/modal/class observation or Classic parity screenshot was possible. Palette/modal color proof is deferred to T0d; T0 contains no non-Classic paint. | BLOCKED |
 
 Agent control plane T1–W3 (commit `bc08a8f`, branch v2.3.0). Logic gated PASS by adversarial Opus review; the rows below are the live-GUI criteria the review could not verify — drive each in `npm run tauri dev` on a trusted Git project and record what you observe.
 

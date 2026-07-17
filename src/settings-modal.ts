@@ -7,8 +7,11 @@ import {
   SHELLS,
   SCROLLBACK_OPTIONS,
   TAB_SIZES,
+  VIEW_VARIANTS,
   isTestAutoRunEnabled,
   setTestAutoRunEnabled,
+  type ViewId,
+  type ViewVariant,
   type UserSettings,
 } from "./settings";
 import { hookInstall, hookStatus } from "./ipc";
@@ -35,6 +38,23 @@ let openOverlay: HTMLElement | null = null;
 
 // Quiet-window choices shown in the Harness section (clamp in settings.ts still applies).
 const QUIET_WINDOW_OPTIONS: readonly number[] = [5000, 10000, 20000, 30000];
+
+const VIEW_LABELS: Record<ViewId, string> = {
+  classic: "Classic",
+  north: "North Light",
+  graphite: "Graphite",
+  stanza: "Stanza",
+};
+
+const VARIANT_LABELS: Record<ViewVariant, string> = {
+  ink: "Ink",
+  washi: "Washi",
+  day: "Day",
+  night: "Night",
+  dark: "Dark",
+  dusk: "Dusk",
+  dawn: "Dawn",
+};
 
 // Codex has no hook installer; users paste this into ~/.codex/config.toml (spec: documented notify snippet).
 const CODEX_NOTIFY_SNIPPET = `# ~/.codex/config.toml
@@ -191,16 +211,34 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     );
   }
 
-  // Behavior section: session restore, agent tracking, autosave, light-mode toggles.
+  // Behavior section: session restore, agent tracking, autosave, and view selection.
   function renderBehavior(): void {
     const s = deps.get();
-    content.replaceChildren(
+    const views = Object.keys(VIEW_VARIANTS) as ViewId[];
+    const variants = VIEW_VARIANTS[s.view];
+    // settings.ts clamps before modal state reaches here; retain a safe display
+    // fallback so this UI never renders an invalid persisted pair.
+    const theme = variants.includes(s.theme) ? s.theme : variants[0];
+    const viewSelect = select(views, s.view, (view) => VIEW_LABELS[view], (view) => {
+      patch({ view, theme: VIEW_VARIANTS[view][0] });
+    });
+    viewSelect.setAttribute("aria-label", "View");
+
+    const children: HTMLElement[] = [
       head("Behavior"),
       row("Restore session on launch", toggle(s.restoreSession, (v) => patch({ restoreSession: v }))),
       row("AI agent tracking", toggle(s.agentTracking, (v) => patch({ agentTracking: v }))),
       row("Autosave on focus loss", toggle(s.autosaveOnBlur, (v) => patch({ autosaveOnBlur: v }))),
-      row("Light mode", toggle(s.theme === "washi", (v) => patch({ theme: v ? "washi" : "ink" }))),
-    );
+      row("View", viewSelect),
+    ];
+    if (variants.length > 1) {
+      const variantSelect = select(variants, theme, (variant) => VARIANT_LABELS[variant], (variant) => {
+        patch({ theme: variant });
+      });
+      variantSelect.setAttribute("aria-label", "Variant");
+      children.push(row("Variant", variantSelect));
+    }
+    content.replaceChildren(...children);
   }
 
   // Harness section: diagnostics toggle, turn quiet window, per-root test auto-run,
