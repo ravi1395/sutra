@@ -212,7 +212,17 @@ import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
-import { onSurfaces, setSurface, surfacePills, type SurfaceId, type Surfaces } from "./surface-state";
+import { onSurfaces, setSurface, type SurfaceId, type Surfaces } from "./surface-state";
+import {
+  ChipHostCache,
+  ComposerSurfaceBinding,
+  browserSurface,
+  composerSurface,
+  diffSurface,
+  restorableSurfacePills,
+  terminalSurface,
+} from "./north-seam";
+import { ComposerFileCache } from "./composer-files";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -649,6 +659,7 @@ const northSurfacePills = document.createElement("div");
 northSurfacePills.className = "north-surface-pills";
 northSeam.append(northWhisper, northSurfacePills);
 whisperBar.before(northSeam);
+const whisperHostCache = new ChipHostCache(whisperBar, northWhisper);
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -905,9 +916,7 @@ function applySettings(next: UserSettings): void {
   if (viewChanged) {
     editor.renderAllTabs();
     syncGraphiteBottomPanel();
-    lastWhisperSig = "";
-    whisperBar.replaceChildren();
-    northWhisper.replaceChildren();
+    whisperHostCache.reset((host) => host.replaceChildren());
     northSurfacePills.replaceChildren();
     renderWhisperBar();
     if (latestSurfaces) renderSurfacePills(latestSurfaces);
@@ -1020,6 +1029,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    resetComposerForWorkspace();
     // Invalidate the previous root's symbols at the switch boundary; the
     // backend builds off-thread and generation-gates late completions.
     void langIndexBuild(dir).catch(() => {});
@@ -1138,8 +1148,7 @@ function renderTerminalSeam(): void {
 }
 
 function syncTerminalSurface(visible = drawerState.open): void {
-  const badge = terminals.liveCount() > 0 ? "live" : terminals.count > 0 ? "dormant" : null;
-  setSurface("terminal", { visible, badge });
+  setSurface("terminal", terminalSurface(visible, terminals.count, terminals.liveCount()));
 }
 
 function setTerminal(on: boolean): void {
@@ -1581,7 +1590,6 @@ const btnComposer = $("btn-composer");
 
 // Recursive file walk for the composer's @file autocomplete (cached per root).
 const COMPOSER_SKIP = new Set(["node_modules", ".git", "dist", ".cache", "build", "target", ".next"]);
-let composerFileCache: string[] | null = null;
 async function walkComposerFiles(dir: string, depth: number): Promise<string[]> {
   if (depth <= 0) return [];
   const entries = await listDir(dir).catch(() => []);
@@ -1593,10 +1601,7 @@ async function walkComposerFiles(dir: string, depth: number): Promise<string[]> 
   }
   return out;
 }
-async function getComposerFiles(root: string): Promise<string[]> {
-  if (!composerFileCache) composerFileCache = await walkComposerFiles(root, 4);
-  return composerFileCache;
-}
+const composerFileCache = new ComposerFileCache((root) => walkComposerFiles(root, 4));
 
 const LANG_BY_EXT: Record<string, string> = {
   ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", rs: "rust",
@@ -1611,30 +1616,52 @@ function composerSelection(): { path: string | null; text: string; line: number;
 
 let composerPanel: ReturnType<typeof mountComposer> | null = null;
 let composerMountedRoot: string | null = null;
-function ensureComposer(): boolean {
-  if (!currentRoot) return false;
-  if (composerPanel && composerMountedRoot === currentRoot) return true;
+const composerSurfaceBinding = new ComposerSurfaceBinding();
+
+function disposeComposerPanel(): void {
+  composerSurfaceBinding.clear();
   composerPanel?.dispose();
-  composerFileCache = null;
-  composerMountedRoot = currentRoot;
-  composerPanel = mountComposer({
-    root: currentRoot,
+  composerPanel = null;
+  composerMountedRoot = null;
+  composerFileCache.clear();
+}
+
+function ensureComposer(): boolean {
+  const root = currentRoot;
+  if (!root) return false;
+  if (composerPanel && composerMountedRoot === root) return true;
+  disposeComposerPanel();
+  const mounted = mountComposer({
+    root,
     trusted: false, // composer.ts re-checks localStorage trust
     container: composerBody,
-    getFiles: () => getComposerFiles(currentRoot as string),
+    getFiles: () => composerFileCache.get(root),
     getSelection: composerSelection,
   });
+  composerPanel = mounted;
+  composerMountedRoot = root;
+  composerSurfaceBinding.bind(
+    root,
+    mounted,
+    () => composerPanel === mounted && !composerPane.classList.contains("hidden"),
+    (ownedRoot, state) => {
+      if (currentRoot === ownedRoot && composerPanel === mounted) setSurface("composer", state);
+    },
+  );
   return true;
 }
 
-function composerHasDraft(): boolean {
-  return [...composerBody.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".cmp-section-input")]
-    .some((input) => input.value.trim().length > 0)
-    || composerBody.querySelector(".cmp-chip") !== null;
+function resetComposerForWorkspace(): void {
+  disposeComposerPanel();
+  if (!composerPane.classList.contains("hidden")) ensureComposer();
+  else setSurface("composer", composerSurface(false, false));
 }
 
 function syncComposerSurface(visible = !composerPane.classList.contains("hidden")): void {
-  setSurface("composer", { visible, badge: composerHasDraft() ? "dormant" : null });
+  const hasDraft = composerPanel !== null
+    && composerMountedRoot === currentRoot
+    && composerPanel.hasDraft();
+  setSurface("composer", composerSurface(visible, hasDraft));
 }
 
 function setComposer(on: boolean): void {
@@ -1851,7 +1878,7 @@ function setDiff(on: boolean): void {
     editor.recomputeDiff();
     void refreshDiffFileList();
   }
-  setSurface("diff", { visible: on, badge: null });
+  setSurface("diff", diffSurface(on));
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
@@ -1866,39 +1893,42 @@ function setBrowser(on: boolean): void {
   if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
-  setSurface("browser", { visible: on, badge: browser.hasHistory() ? "dormant" : null });
+  setSurface("browser", browserSurface(on, browser.hasHistory()));
 }
 btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
+
+function syncBrowserSurface(): void {
+  setSurface("browser", browserSurface(!browserArea.classList.contains("hidden"), browser.hasHistory()));
+}
+
+browser.onHistoryChanged(() => syncBrowserSurface());
 
 function syncSurfacesFromUi(): void {
   syncTerminalSurface();
   syncComposerSurface();
-  setSurface("diff", { visible: !diffPane.classList.contains("hidden"), badge: null });
-  setSurface("browser", {
-    visible: !browserArea.classList.contains("hidden"),
-    badge: browser.hasHistory() ? "dormant" : null,
-  });
+  setSurface("diff", diffSurface(!diffPane.classList.contains("hidden")));
+  syncBrowserSurface();
 }
 
 function surfaceLabel(id: SurfaceId): string {
   return id === "terminal" ? "Terminal" : id === "browser" ? "Browser" : id === "diff" ? "Diff" : "Composer";
 }
 
-function restoreSurface(id: SurfaceId): void {
-  if (id === "terminal") setTerminal(true);
-  else if (id === "browser") setBrowser(true);
-  else if (id === "diff") setDiff(true);
-  else setComposer(true);
-}
+const surfaceRestorers = {
+  terminal: () => setTerminal(true),
+  browser: () => setBrowser(true),
+  diff: () => setDiff(true),
+  composer: () => setComposer(true),
+};
 
 function renderSurfacePills(all: Surfaces): void {
   northSurfacePills.replaceChildren();
-  for (const pill of surfacePills(all)) {
+  for (const pill of restorableSurfacePills(all, surfaceRestorers)) {
     const button = document.createElement("button");
     button.className = "north-surface-pill" + (pill.live ? " live" : "");
     button.type = "button";
     button.textContent = surfaceLabel(pill.id);
-    button.onclick = () => restoreSurface(pill.id);
+    button.onclick = pill.restore;
     northSurfacePills.append(button);
   }
 }
@@ -2713,9 +2743,8 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-let lastWhisperSig = "";
 function chipHost(): HTMLElement {
-  return document.documentElement.classList.contains("view-north") ? northSeam : whisperBar;
+  return whisperHostCache.host(document.documentElement.classList.contains("view-north"));
 }
 
 function renderWhisperBar(): void {
@@ -2730,12 +2759,10 @@ function renderWhisperBar(): void {
   // of the signature too — an active→inactive flip with identical leftover text must
   // still trigger the rebuild that drops it from the DOM.
   const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${debugSession.active}:${debugChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
-  if (sig === lastWhisperSig) return;
-  lastWhisperSig = sig;
+  if (!whisperHostCache.shouldRender(sig)) return;
 
   const host = chipHost();
-  const contentHost = host === northSeam ? northWhisper : host;
-  contentHost.replaceChildren();
+  host.replaceChildren();
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
@@ -2760,7 +2787,7 @@ function renderWhisperBar(): void {
   // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
   // hidden, with no session), multi-session aggregate strip.
   const dbgChip = debugSession.active ? [debugChipEl()] : [];
-  contentHost.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
+  host.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */

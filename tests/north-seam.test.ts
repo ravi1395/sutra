@@ -1,70 +1,156 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { ComposerFileCache } from "../src/composer-files";
+import type { SurfaceId, Surfaces } from "../src/surface-state";
+import {
+  ChipHostCache,
+  ComposerSurfaceBinding,
+  DraftStateSignal,
+  browserSurface,
+  composerSurface,
+  diffSurface,
+  restorableSurfacePills,
+  terminalSurface,
+} from "../src/north-seam";
 
-function functionBody(source: string, signature: string): string {
-  const start = source.indexOf(signature);
-  assert.ok(start >= 0, `${signature} must exist`);
-  const open = source.indexOf("{", start);
-  assert.ok(open >= 0, `${signature} must have a body`);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth += 1;
-    else if (source[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(open + 1, i);
-    }
-  }
-  assert.fail(`${signature} body must close`);
+function surfaces(overrides: Partial<Record<SurfaceId, { visible: boolean; badge: "live" | "dormant" | null }>> = {}): Surfaces {
+  return {
+    terminal: overrides.terminal ?? { visible: false, badge: null },
+    browser: overrides.browser ?? { visible: false, badge: null },
+    diff: overrides.diff ?? { visible: false, badge: null },
+    composer: overrides.composer ?? { visible: false, badge: null },
+  };
 }
 
-test("surface state is produced only at the established visibility seams", () => {
-  const main = readFileSync("src/main.ts", "utf8");
-
-  assert.match(functionBody(main, "function setTerminal(on: boolean): void"), /syncTerminalSurface\(on\)/);
-  assert.match(functionBody(main, "function setComposer(on: boolean): void"), /syncComposerSurface\(on\)/);
-  assert.match(functionBody(main, "function setDiff(on: boolean): void"), /setSurface\("diff", \{ visible: on, badge: null \}\)/);
-  assert.match(functionBody(main, "function setBrowser(on: boolean): void"), /browser\.hasHistory\(\)/);
-  assert.match(main, /terminals\.onSessionsChanged\(\(\) => \{[\s\S]*?syncTerminalSurface\(\);[\s\S]*?\}\);/);
-  assert.match(functionBody(main, "async function openWorkspace(dir: string, explicit = false): Promise<void>"), /syncSurfacesFromUi\(\)/);
+test("surface producers model live, dormant, visible, and empty transitions", () => {
+  assert.deepEqual(terminalSurface(false, 0, 0), { visible: false, badge: null });
+  assert.deepEqual(terminalSurface(false, 1, 0), { visible: false, badge: "dormant" });
+  assert.deepEqual(terminalSurface(false, 2, 1), { visible: false, badge: "live" });
+  assert.deepEqual(terminalSurface(true, 2, 1), { visible: true, badge: "live" });
+  assert.deepEqual(browserSurface(false, false), { visible: false, badge: null });
+  assert.deepEqual(browserSurface(false, true), { visible: false, badge: "dormant" });
+  assert.deepEqual(composerSurface(false, true), { visible: false, badge: "dormant" });
+  assert.deepEqual(composerSurface(false, false), { visible: false, badge: null });
+  assert.deepEqual(diffSurface(true), { visible: true, badge: null });
 });
 
-test("North pills derive from the shared store and restore existing setters", () => {
-  const main = readFileSync("src/main.ts", "utf8");
-  const render = functionBody(main, "function renderSurfacePills(all: Surfaces): void");
-  const restore = functionBody(main, "function restoreSurface(id: SurfaceId): void");
+test("pill restoration delegates exactly once to the existing surface setter", () => {
+  const calls: SurfaceId[] = [];
+  const restorers = {
+    terminal: () => calls.push("terminal"),
+    browser: () => calls.push("browser"),
+    diff: () => calls.push("diff"),
+    composer: () => calls.push("composer"),
+  };
+  const pills = restorableSurfacePills(surfaces({
+    terminal: { visible: false, badge: "live" },
+    browser: { visible: false, badge: "dormant" },
+    composer: { visible: true, badge: "dormant" },
+  }), restorers);
 
-  assert.match(render, /surfacePills\(all\)/);
-  assert.match(render, /button\.onclick = \(\) => restoreSurface\(pill\.id\)/);
-  assert.match(restore, /setTerminal\(true\)/);
-  assert.match(restore, /setBrowser\(true\)/);
-  assert.match(restore, /setDiff\(true\)/);
-  assert.match(restore, /setComposer\(true\)/);
+  assert.deepEqual(pills.map(({ id, live }) => ({ id, live })), [
+    { id: "terminal", live: true },
+    { id: "browser", live: false },
+  ]);
+  pills[0].restore();
+  pills[1].restore();
+  assert.deepEqual(calls, ["terminal", "browser"]);
 });
 
-test("view changes move whisper chips between the classic host and North seam", () => {
-  const main = readFileSync("src/main.ts", "utf8");
-  const apply = functionBody(main, "function applySettings(next: UserSettings): void");
-  const whisper = functionBody(main, "function renderWhisperBar(): void");
+test("chip host migration clears both real hosts and invalidates the render cache", () => {
+  const classic = { children: ["classic-old"] };
+  const north = { children: ["north-old"] };
+  const cache = new ChipHostCache(classic, north);
 
-  assert.match(apply, /lastWhisperSig = ""/);
-  assert.match(apply, /whisperBar\.replaceChildren\(\)/);
-  assert.match(apply, /northWhisper\.replaceChildren\(\)/);
-  assert.match(apply, /renderWhisperBar\(\)/);
-  assert.match(whisper, /const host = chipHost\(\)/);
-  assert.match(whisper, /host === northSeam \? northWhisper : host/);
+  assert.equal(cache.host(false), classic);
+  assert.equal(cache.host(true), north);
+  assert.equal(cache.shouldRender("same"), true);
+  assert.equal(cache.shouldRender("same"), false);
+
+  cache.reset((host) => { host.children = []; });
+  assert.deepEqual(classic.children, []);
+  assert.deepEqual(north.children, []);
+  assert.equal(cache.shouldRender("same"), true);
 });
 
-test("North trail classes leave Graphite and Classic tab branches intact", () => {
-  const editor = readFileSync("src/editor.ts", "utf8");
+test("draft signal follows isEmptyDraftContent semantics across hydrate, change, and clear", () => {
+  const signal = new DraftStateSignal();
+  const seen: boolean[] = [];
+  const unsubscribe = signal.onChanged((hasDraft) => seen.push(hasDraft));
+
+  signal.update({ task: "  " }, 0);
+  signal.update({ task: "saved async draft" }, 0);
+  signal.update({}, 1);
+  signal.update({}, 0);
+  unsubscribe();
+  signal.update({ task: "ignored after unsubscribe" }, 0);
+
+  assert.deepEqual(seen, [false, true, false]);
+});
+
+test("composer binding switches roots with one listener and rejects late old-root hydration", () => {
+  class Source {
+    readonly signal = new DraftStateSignal();
+    hasDraft = () => this.signal.hasDraft();
+    onDraftChanged = (listener: (hasDraft: boolean) => void) => this.signal.onChanged(listener);
+    listenerCount = () => this.signal.listenerCount();
+  }
+  const a = new Source();
+  const b = new Source();
+  const binding = new ComposerSurfaceBinding();
+  const seen: Array<{ root: string; badge: string | null }> = [];
+
+  binding.bind("/a", a, () => false, (root, state) => seen.push({ root, badge: state.badge }));
+  assert.equal(a.listenerCount(), 1);
+  binding.bind("/b", b, () => false, (root, state) => seen.push({ root, badge: state.badge }));
+  assert.equal(a.listenerCount(), 0);
+  assert.equal(b.listenerCount(), 1);
+
+  a.signal.update({ task: "late a hydration" }, 0);
+  b.signal.update({ task: "b hydration" }, 0);
+  b.signal.update({}, 0);
+  binding.clear();
+  assert.equal(b.listenerCount(), 0);
+  assert.deepEqual(seen, [
+    { root: "/a", badge: null },
+    { root: "/b", badge: null },
+    { root: "/b", badge: "dormant" },
+    { root: "/b", badge: null },
+  ]);
+});
+
+test("composer file cache cannot let an old-root completion replace the current root", async () => {
+  const pending = new Map<string, (files: string[]) => void>();
+  const cache = new ComposerFileCache((root) => new Promise((resolve) => pending.set(root, resolve)));
+
+  const oldFiles = cache.get("/old");
+  cache.clear();
+  const currentFiles = cache.get("/current");
+  pending.get("/old")!(["/old/stale.ts"]);
+  pending.get("/current")!(["/current/live.ts"]);
+
+  assert.deepEqual(await oldFiles, ["/old/stale.ts"]);
+  assert.deepEqual(await currentFiles, ["/current/live.ts"]);
+  assert.equal(cache.get("/current"), currentFiles);
+});
+
+test("main keeps only irreducible wiring while North CSS stays scoped", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const composer = readFileSync("src/composer.ts", "utf8");
   const css = readFileSync("src/styles.css", "utf8");
 
-  assert.match(editor, /const north = document\.documentElement\.classList\.contains\("view-north"\)/);
-  assert.match(editor, /"tab active preview-tab north-trail-tab"/);
-  assert.match(editor, /"tab north-trail-tab"/);
-  assert.match(editor, /"tab active preview-tab graphite-tab"/);
-  assert.match(editor, /"tab graphite-tab"/);
-  assert.match(css, /:root\.view-north \.tab\.north-trail-tab\.active::before/);
-  assert.match(css, /:root\.view-north #north-seam/);
-  assert.match(css, /:root\.view-north #whisper-bar \{\s*display: none;/);
+  assert.match(main, /browser\.onHistoryChanged\(/);
+  assert.match(main, /composerSurfaceBinding\.bind\(/);
+  assert.match(main, /currentRoot = dir;\s*resetComposerForWorkspace\(\)/);
+  assert.match(main, /const host = chipHost\(\);\s*host\.replaceChildren\(\)/);
+  assert.match(composer, /function applyDraft[\s\S]*?draftState\.update\(text, chips\.length\)/);
+  assert.match(composer, /function autosave[\s\S]*?draftState\.update\(text, chips\.length\)/);
+  assert.match(composer, /hasDraft: \(\) => draftState\.hasDraft\(\)/);
+  assert.match(composer, /onDraftChanged: \(listener\) => draftState\.onChanged\(listener\)/);
+  assert.match(composer, /disposed \|\| generation !== fileCompletionGeneration/);
+  assert.match(css, /#north-seam\s*\{\s*display: none;/);
+  assert.doesNotMatch(css, /\n\.north-(?:seam|surface)/);
+  assert.match(css, /:root\.view-north \.north-surface-pill\.live::before\s*\{[^}]*animation:/s);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*:root\.view-north \.north-surface-pill\.live::before\s*\{[^}]*animation: none;/);
 });

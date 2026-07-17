@@ -2323,6 +2323,7 @@ button:hover {
 }
 
 /* ---- whisper bar ---- */
+/* Sanctioned base rule: the host is always mounted, so Classic must hide it before any view class exists. */
 #north-seam {
   display: none;
 }
@@ -2357,7 +2358,7 @@ button:hover {
   color: var(--fg-faint);
   font-size: 11.5px;
 }
-.north-seam-whisper {
+:root.view-north .north-seam-whisper {
   display: flex;
   flex: 1;
   align-items: center;
@@ -2365,12 +2366,12 @@ button:hover {
   gap: 12px;
   min-width: 0;
 }
-.north-surface-pills {
+:root.view-north .north-surface-pills {
   display: flex;
   align-items: center;
   gap: 5px;
 }
-.north-surface-pill {
+:root.view-north .north-surface-pill {
   border: 1px solid var(--line-menu);
   border-radius: 999px;
   background: var(--bg-1);
@@ -2380,11 +2381,11 @@ button:hover {
   padding: 0 7px;
   cursor: pointer;
 }
-.north-surface-pill:hover {
+:root.view-north .north-surface-pill:hover {
   border-color: var(--em);
   color: var(--em);
 }
-.north-surface-pill.live::before {
+:root.view-north .north-surface-pill.live::before {
   content: "";
   display: inline-block;
   width: 5px;
@@ -2392,6 +2393,18 @@ button:hover {
   margin: 0 4px 1px 0;
   border-radius: 999px;
   background: var(--em);
+  animation: north-surface-live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes north-surface-live-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root.view-north .north-surface-pill.live::before {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 .whisper-left,
 .whisper-right {

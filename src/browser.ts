@@ -14,6 +14,13 @@ export class BrowserPane {
   private history: string[] = [];
   private historyIdx = -1;
   private pendingSrc = "";
+  private openGeneration = 0;
+  private readonly historyListeners = new Set<(hasHistory: boolean) => void>();
+  private readonly historyNotifications: Array<{
+    hasHistory: boolean;
+    listeners: Array<(hasHistory: boolean) => void>;
+  }> = [];
+  private drainingHistoryNotifications = false;
   private defaultPlaceholder = "";
   onProxied?: (origin: string) => void;
 
@@ -50,34 +57,48 @@ export class BrowserPane {
 
   // Normalize URL, route through proxy, and load it in the iframe. If no scheme, prefix http://.
   async open(url: string): Promise<void> {
+    const generation = ++this.openGeneration;
     let normalized = url.trim();
     if (!normalized.match(/^[a-z][a-z0-9+.-]*:/i)) {
       normalized = `http://${normalized}`;
     }
     const proxied = await proxyUrl(normalized);
+    if (generation !== this.openGeneration) return;
     const origin = new URL(proxied).origin;
-    this.onProxied?.(origin);
-    this.frame.src = proxied;
-    this.urlInput.value = normalized; // show the real URL, not the proxy URL
-    // Push to local history if not already the last entry.
-    if (this.history[this.historyIdx] !== normalized) {
-      this.history.splice(this.historyIdx + 1);
-      this.history.push(normalized);
-      this.historyIdx = this.history.length - 1;
-    }
+    this.commitLocation(normalized, proxied, origin);
   }
 
   // Load an already-trusted preview-server URL directly (no proxy, agent already
   // injected by preview_server). Used for agent/file HTML renders.
   loadDirect(url: string): void {
+    this.openGeneration += 1;
     const origin = new URL(url).origin;
+    this.commitLocation(url, url, origin);
+  }
+
+  private commitLocation(displayUrl: string, src: string, origin: string): void {
     this.onProxied?.(origin);
-    this.frame.src = url;
-    this.urlInput.value = url;
-    if (this.history[this.historyIdx] !== url) {
-      this.history.splice(this.historyIdx + 1);
-      this.history.push(url);
-      this.historyIdx = this.history.length - 1;
+    if (this.isHidden()) this.pendingSrc = src;
+    else this.frame.src = src;
+    this.urlInput.value = displayUrl;
+    if (this.history[this.historyIdx] === displayUrl) return;
+    this.history.splice(this.historyIdx + 1);
+    this.history.push(displayUrl);
+    this.historyIdx = this.history.length - 1;
+    this.publishHistoryChanged();
+  }
+
+  private publishHistoryChanged(): void {
+    this.historyNotifications.push({ hasHistory: this.hasHistory(), listeners: [...this.historyListeners] });
+    if (this.drainingHistoryNotifications) return;
+    this.drainingHistoryNotifications = true;
+    try {
+      while (this.historyNotifications.length > 0) {
+        const notification = this.historyNotifications.shift()!;
+        for (const listener of notification.listeners) listener(notification.hasHistory);
+      }
+    } finally {
+      this.drainingHistoryNotifications = false;
     }
   }
 
@@ -172,8 +193,10 @@ export class BrowserPane {
   // Hide the pane; stash the current src so the page stops running, restore from maximized first.
   hide(): void {
     if (this.maximized) this.restore();
-    this.pendingSrc = this.frame.src;
-    this.frame.src = "";
+    if (!this.isHidden()) {
+      this.pendingSrc = this.frame.src;
+      this.frame.src = "";
+    }
     this.area.classList.add("hidden");
   }
 
@@ -185,5 +208,12 @@ export class BrowserPane {
   /** Whether this pane has loaded at least one browser location. */
   hasHistory(): boolean {
     return this.history.length > 0;
+  }
+
+  /** Subscribe to committed navigation history; failed and superseded opens do not publish. */
+  onHistoryChanged(listener: (hasHistory: boolean) => void): () => void {
+    this.historyListeners.add(listener);
+    listener(this.hasHistory());
+    return () => this.historyListeners.delete(listener);
   }
 }
