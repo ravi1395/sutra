@@ -71,7 +71,7 @@ Sutra is an instrument, not a platform: a dense cockpit of small, precise contro
 - Two themes, one token set: `:root` (ink) and `.theme-washi` override the same variable names, never introduce parallel ones.
 - Small type scale (9.5–15px) built for chrome density, not marketing hierarchy.
 - Classic Ink/Washi uses one accent color, used as a signal, not a decoration.
-- Flat at rest; shadow appears only on floating/overlay surfaces.
+- Flat at rest in Classic and Graphite; North Light is the sole in-flow sheet exception, using only its day/night elevation tokens.
 - Icon-glyph and pill controls throughout — there is no marketing-style "primary CTA button".
 
 ## 2. Colors
@@ -111,17 +111,17 @@ The Classic Ink/Washi palette is a near-monochrome ink/paper ramp with a single 
 
 ## 3. Typography
 
-**UI Font:** Instrument Sans (with system-ui, sans-serif fallback). North Light uses bundled Schibsted Grotesk for chrome and Graphite uses bundled Mona Sans; code, terminal content, and `--mono` remain Spline Sans Mono.
-**Mono Font:** Spline Sans Mono (with ui-monospace, Menlo fallback)
+**UI Font:** Instrument Sans (with system-ui, sans-serif fallback). North Light uses bundled Schibsted Grotesk for chrome and Graphite uses bundled Mona Sans. Views re-value only `--ui`; `--mono`, persisted `editorFontFamily`, and persisted `terminalFontFamily` remain untouched and user-configurable.
+**Mono Font:** The shipped editor default is Spline Sans Mono (with ui-monospace, Menlo fallback); terminal typography follows its separate persisted setting.
 **Voice Font:** Fraunces italic (with Georgia, serif fallback)
 
-**Character:** A geometric-humanist sans carries all chrome at a deliberately small base size (13px); a monospace variable font carries code and terminal content; an italic serif is held in reserve for rare voice moments (empty states, taglines) where the tool briefly speaks instead of just displaying.
+**Character:** A geometric-humanist sans carries all chrome at a deliberately small base size (13px); editor and terminal content retain their selected monospace settings; an italic serif is held in reserve for rare voice moments (empty states, taglines) where the tool briefly speaks instead of just displaying.
 
 ### Hierarchy
 - **Chrome label** (400–600 weight, 9.5–11px): section labels, badges, kbd hints, metadata (menu-head, auto-lab, gitbar-section).
 - **Body/control** (400–500 weight, 12–13px, the base): button text, menu rows, pill labels — the majority of the UI lives here.
 - **Emphasis** (500 weight, 12.5–14.5px): wordmark, active row names, current-branch label.
-- **Mono/code** (400 weight, terminal default size): editor and terminal content via Spline Sans Mono.
+- **Mono/code** (400 weight, terminal default size): editor and terminal content use their persisted font settings; the shipped editor default is Spline Sans Mono.
 - **Voice** (400 italic, Fraunces): reserved, sparing use only — not part of the control chrome scale.
 
 ### Named Rules
@@ -129,14 +129,14 @@ The Classic Ink/Washi palette is a near-monochrome ink/paper ramp with a single 
 
 ## 4. Elevation
 
-Flat by default. Ink and washi surfaces carry no ambient shadow at rest — depth is conveyed by the bg-0→bg-4 tonal step, not by blur. Shadow exists only as a structural signal that a surface is floating above the layout: dropdowns, popovers, and modals. Shadow color stays literal black (`rgba(0,0,0,X)`) in both themes by convention rather than re-deriving per-theme — a deliberate exception to the token system, not an oversight.
+Flat by default. Classic and Graphite surfaces carry no ambient shadow at rest — depth is conveyed by the bg-0→bg-4 tonal step, not by blur. Shadow exists only as a structural signal that a surface is floating above the layout: dropdowns, popovers, and modals. North Light is the sole intentional exception: its in-flow sheets use only the day/night `--sheet-shadow` token, and its terminal may use `--term-shadow`. Shadow color stays literal black (`rgba(0,0,0,X)`) in Classic/Graphite by convention rather than re-deriving per-theme.
 
 ### Shadow Vocabulary
 - **Dropdown** (`box-shadow: 0 4px 12px rgba(0,0,0,0.3)`): gitbar and lightweight dropdown menus.
 - **Floating panel** (`box-shadow: 0 10px 28px rgba(0,0,0,0.45)`): automation drawer, deeper popovers that sit further above the surface.
 
 ### Named Rules
-**The Floating-Only Rule.** Shadow appears exclusively on elements that are `position: absolute/fixed` above the base layout. A shadow on a static, in-flow panel is a bug, not a style choice.
+**The Floating-Only Rule.** In Classic and Graphite, shadow appears exclusively on elements that are `position: absolute/fixed` above the base layout. North Light alone may elevate its static sheets through `--sheet-shadow` and its terminal through `--term-shadow`; any other in-flow shadow is a bug.
 
 ## 5. Components
 

@@ -91,6 +91,8 @@
   --diff-file-mod: #a96516; --diff-file-add: #21845b; --diff-file-del: #c73a3a;
   --bg-drawer: #ffffff; --bg-whisper: #f8f9fb;
   --on-em: #ffffff; --scrim: rgba(31, 40, 55, 0.30); --shadow: rgba(31, 40, 55, 0.12); --panel-bg: #ffffff;
+  --sheet-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+  --term-shadow: 0 1px 2px rgba(8, 12, 18, 0.24), 0 4px 16px rgba(8, 12, 18, 0.24);
   --r-lg: 10px; --r-md: 8px; --r-sm: 5px;
   --ui: "Schibsted Grotesk", system-ui, sans-serif;
   --ansi-black: #4f5866; --ansi-red: #e06c75; --ansi-green: #58b487;
@@ -113,6 +115,8 @@
   --diff-file-mod: #e0ad51; --diff-file-add: #63c78e; --diff-file-del: #ee7777;
   --bg-drawer: #303640; --bg-whisper: #2a3039;
   --on-em: #161b22; --scrim: rgba(8, 11, 16, 0.58); --shadow: rgba(8, 11, 16, 0.40); --panel-bg: #303640;
+  --sheet-shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 22px rgba(0, 0, 0, 0.35);
+  --term-shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 22px rgba(0, 0, 0, 0.35);
   --ansi-black: #596475; --ansi-red: #f08a91; --ansi-green: #71d39b;
   --ansi-yellow: #e7ba64; --ansi-blue: #9ab5ff; --ansi-magenta: #d1adf5;
   --ansi-cyan: #83d3dd; --ansi-white: #dce3ed;
@@ -173,7 +177,7 @@
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+  box-shadow: var(--sheet-shadow);
 }
 :root.view-north #sidebar-header,
 :root.view-north .pane-tabs,
@@ -210,7 +214,7 @@
   background: var(--term-bg);
   border: 1px solid var(--term-line);
   border-radius: var(--r-lg);
-  box-shadow: 0 1px 2px rgba(8, 12, 18, 0.24), 0 4px 16px rgba(8, 12, 18, 0.24);
+  box-shadow: var(--term-shadow);
   color: var(--term-fg);
 }
 :root.view-north #terminal-seam,
@@ -244,14 +248,14 @@
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+  box-shadow: var(--sheet-shadow);
 }
 :root.view-north #browser-area {
   margin: 0 10px 10px 0;
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+  box-shadow: var(--sheet-shadow);
 }
 :root.view-north .browser-url-input,
 :root.view-north .browser-btn {

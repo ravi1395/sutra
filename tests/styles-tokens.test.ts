@@ -19,6 +19,16 @@ function extractBlock(source: string, selector: string): string {
   return source.slice(braceOpen + 1, braceClose);
 }
 
+function extractLastBlock(source: string, selector: string): string {
+  const start = source.lastIndexOf(selector);
+  assert.ok(start !== -1, `selector ${selector} not found in styles.css`);
+  const braceOpen = source.indexOf("{", start);
+  assert.ok(braceOpen !== -1, `no opening brace for ${selector}`);
+  const braceClose = source.indexOf("}", braceOpen);
+  assert.ok(braceClose !== -1, `no closing brace for ${selector}`);
+  return source.slice(braceOpen + 1, braceClose);
+}
+
 const rootBlock = extractBlock(css, ":root {");
 const washiBlock = extractBlock(css, ".theme-washi {");
 const northDayBlock = extractBlock(css, ":root.view-north {");
@@ -62,6 +72,26 @@ function hexLuminance(hex: string): number {
 function contrastRatio(foreground: string, background: string): number {
   const [lighter, darker] = [hexLuminance(foreground), hexLuminance(background)].sort((a, b) => b - a);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+function topLevelSelectorPreludes(source: string): string[] {
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  const preludes: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const character of withoutComments) {
+    if (character === "{") {
+      if (depth === 0) preludes.push(current.trim());
+      depth += 1;
+      current = "";
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) current = "";
+    } else if (depth === 0) {
+      current += character;
+    }
+  }
+  return preludes.filter(Boolean);
 }
 
 test("zero legacy-alias var() consumers remain anywhere in styles.css", () => {
@@ -147,7 +177,7 @@ test("North Light owns complete day/night tokens, contrasts, and terminal depth"
   const northTokens = [
     "--bg-0", "--bg-1", "--bg-2", "--bg-3", "--bg-4", "--line", "--line-menu",
     "--fg", "--fg-dim", "--fg-faint", "--fg-ghost", "--term-bg", "--term-fg", "--term-dim", "--term-line",
-    "--em", "--em-dim", "--em-wash", "--em-wash-row", "--syn-kw", "--syn-type", "--syn-str", "--syn-comment",
+    "--em", "--em-dim", "--em-wash", "--em-wash-row", "--sheet-shadow", "--term-shadow", "--syn-kw", "--syn-type", "--syn-str", "--syn-comment",
     ...DIFF_TOKENS, ...ANSI_TOKENS,
   ];
   const token = (block: string, name: string) => block.match(new RegExp(`${name}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
@@ -176,7 +206,30 @@ test("North Light owns complete day/night tokens, contrasts, and terminal depth"
   );
 });
 
-test("North Light scopes Schibsted to UI chrome and all T3 paint", () => {
+test("North Light pins its day/night palette and elevation tokens", () => {
+  const day: Record<string, string> = {
+    "--bg-0": "#eef1f6", "--bg-1": "#ffffff", "--fg": "#303745", "--fg-dim": "#667085",
+    "--em": "#315bd6", "--term-bg": "#171d27", "--term-fg": "#edf1f7",
+    "--diff-add": "#21845b", "--diff-mod": "#a96516", "--diff-del": "#c73a3a",
+  };
+  const night: Record<string, string> = {
+    "--bg-0": "#252a33", "--bg-1": "#303640", "--fg": "#edf1f7", "--fg-dim": "#b1bac8",
+    "--em": "#8da9ff", "--term-bg": "#161b22", "--term-fg": "#edf1f7",
+    "--diff-add": "#63c78e", "--diff-mod": "#e0ad51", "--diff-del": "#ee7777",
+  };
+  for (const [name, value] of Object.entries(day)) {
+    assert.match(northDayBlock, new RegExp(`${name}:\\s*${value}`, "i"), `North day ${name} drifted`);
+  }
+  for (const [name, value] of Object.entries(night)) {
+    assert.match(northNightBlock, new RegExp(`${name}:\\s*${value}`, "i"), `North night ${name} drifted`);
+  }
+  assert.match(northDayBlock, /--sheet-shadow:\s*0 1px 2px rgba\(31, 40, 55, 0\.05\), 0 4px 16px rgba\(31, 40, 55, 0\.06\)/);
+  assert.match(northNightBlock, /--sheet-shadow:\s*0 1px 2px rgba\(0, 0, 0, 0\.30\), 0 6px 22px rgba\(0, 0, 0, 0\.35\)/);
+  assert.match(northDayBlock, /--term-shadow:\s*0 1px 2px rgba\(8, 12, 18, 0\.24\), 0 4px 16px rgba\(8, 12, 18, 0\.24\)/);
+  assert.match(northNightBlock, /--term-shadow:\s*0 1px 2px rgba\(0, 0, 0, 0\.30\), 0 6px 22px rgba\(0, 0, 0, 0\.35\)/);
+});
+
+test("North Light scopes Schibsted to UI chrome and every T3 paint selector", () => {
   assert.match(css, /font-family:\s*"Schibsted Grotesk";\s*src:\s*url\("\/src\/assets\/fonts\/SchibstedGrotesk-Variable\.woff2"\)/);
   assert.match(northDayBlock, /--ui:\s*"Schibsted Grotesk", system-ui, sans-serif/);
   assert.doesNotMatch(northDayBlock, /--(?:mono|editor-font-family):/);
@@ -186,7 +239,17 @@ test("North Light scopes Schibsted to UI chrome and all T3 paint", () => {
   const end = css.indexOf("/* fixed: box-shadow", start);
   assert.ok(start !== -1 && end !== -1, "North T3 paint section markers missing");
   const northPaint = css.slice(start, end);
-  assert.doesNotMatch(northPaint, /\n\s*(?:#|\.)[^,{]*\s*(?:,|\{)/, "North T3 paint must not add unscoped selectors");
+  const selectors = topLevelSelectorPreludes(northPaint).flatMap((prelude) => prelude.split(",").map((selector) => selector.trim()));
+  assert.ok(selectors.length > 0, "North T3 paint must contain selectors");
+  for (const selector of selectors) {
+    assert.match(selector, /^:root\.view-north(?:\s|$)/, `North T3 selector is not exactly view-scoped: ${selector}`);
+  }
+  assert.match(northPaint, /box-shadow:\s*var\(--sheet-shadow\)/);
+  assert.match(northPaint, /box-shadow:\s*var\(--term-shadow\)/);
+  for (const selector of [":root.view-north #sidebar,", ":root.view-north #composer-pane,", ":root.view-north #browser-area {"]) {
+    assert.match(extractLastBlock(css, selector), /box-shadow:\s*var\(--sheet-shadow\)/, `${selector} must use the sheet elevation token`);
+  }
+  assert.match(extractBlock(css, ":root.view-north #terminal-area {"), /box-shadow:\s*var\(--term-shadow\)/);
   assert.match(northPaint, /:root\.view-north #terminal-area/);
   assert.match(northPaint, /:root\.view-north #composer-pane/);
   assert.match(northPaint, /:root\.view-north #diff-pane/);
