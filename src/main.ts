@@ -1122,7 +1122,9 @@ function renderTerminalSeam(): void {
 }
 
 function setTerminal(on: boolean): void {
-  if (document.documentElement.classList.contains("view-graphite")) {
+  const isGraphite = document.documentElement.classList.contains("view-graphite");
+  if (isGraphite) {
+    if (!on) terminals.setMaximizeState(null);
     graphiteBottomPanel = on ? "terminal" : "problems";
     setProblemsHost(!on);
   }
@@ -1132,7 +1134,7 @@ function setTerminal(on: boolean): void {
   btnTerm.classList.toggle("on", on);
   termArea.style.flex = on
     ? `0 1 ${drawerState.heightPx}px`
-    : document.documentElement.classList.contains("view-graphite") ? "0 0 35px" : "0 0 30px";
+    : isGraphite ? "0 0 35px" : "0 0 30px";
   renderTerminalSeam();
   renderGraphiteBottomPanel();
   if (on) {
@@ -2484,9 +2486,6 @@ function renderGraphiteBottomPanel(): void {
 }
 
 function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
-  graphiteBottomPanel = panel;
-  if (panel === "problems") terminals.setMaximizeState(null);
-  setProblemsHost(panel === "problems");
   setTerminal(panel === "terminal");
 }
 

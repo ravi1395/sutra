@@ -12,6 +12,22 @@ const ANSI_FIELDS = [
 ] as const;
 const BASE_FIELDS = ["background", "foreground", "cursor", "selectionBackground"] as const;
 
+function functionBody(source: string, signature: string): string {
+  const start = source.indexOf(signature);
+  assert.ok(start >= 0, `${signature} must exist`);
+  const open = source.indexOf("{", start);
+  assert.ok(open >= 0, `${signature} must have a body`);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  assert.fail(`${signature} body must close`);
+}
+
 test("loadDrawerState defaults and clamps", () => {
   assert.deepEqual(loadDrawerState(null), { open: false, heightPx: 280 });
   assert.deepEqual(loadDrawerState('{"open":true,"heightPx":50}'), { open: true, heightPx: 280 });
@@ -130,6 +146,28 @@ test("terminal maximize state round-trips through the public owner API", () => {
   assert.equal(leftClasses.contains("hidden"), false);
   assert.equal(areaStyle.flex, "0 1 320px");
   assert.equal(refits, 3);
+});
+
+test("Graphite terminal close callers normalize maximize through setTerminal", () => {
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const setTerminalBody = functionBody(mainTs, "function setTerminal(on: boolean): void");
+  const graphiteGuard = functionBody(setTerminalBody, "if (isGraphite)");
+  const setPanelBody = functionBody(mainTs, "function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void");
+
+  assert.match(graphiteGuard, /if \(!on\) terminals\.setMaximizeState\(null\);/);
+  assert.ok(
+    graphiteGuard.indexOf("terminals.setMaximizeState(null)") < graphiteGuard.indexOf("setProblemsHost(!on)"),
+    "Graphite close must normalize maximize before selecting Problems",
+  );
+  assert.doesNotMatch(setPanelBody, /setMaximizeState\(null\)/);
+  assert.doesNotMatch(setPanelBody, /setProblemsHost\(/);
+  assert.match(setPanelBody, /setTerminal\(panel === "terminal"\);/);
+
+  assert.match(mainTs, /terminalSeam\.onclick = \(\) => setTerminal\(true\);/);
+  assert.match(mainTs, /btnTerm\.onclick = \(\) => setTerminal\(!drawerState\.open\);/);
+  assert.match(mainTs, /else if \(mod && e\.code === "KeyJ"\) \{\s*e\.preventDefault\(\);\s*setTerminal\(!drawerState\.open\);/);
+  assert.match(mainTs, /else if \(e\.ctrlKey && e\.key === "`"\) \{\s*e\.preventDefault\(\);\s*setTerminal\(!drawerState\.open\);/);
+  assert.match(mainTs, /toggleTerminal: \(\) => setTerminal\(!drawerState\.open\),/);
 });
 
 test("onThemeChange no-ops outside a DOM instead of throwing", () => {
