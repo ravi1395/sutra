@@ -279,8 +279,8 @@
   background: transparent;
   border: 0;
 }
-:root.view-north .ledger-turn-summary:hover,
-:root.view-north .ledger-turn-summary:focus-visible {
+:root.view-north button.ledger-turn-summary:hover,
+:root.view-north button.ledger-turn-summary:focus-visible {
   background: var(--em-wash-row);
 }
 :root.view-north .ledger-turn-id {

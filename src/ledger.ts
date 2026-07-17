@@ -1,6 +1,6 @@
 import { isRollbackable } from "./agent-tracking";
 import type { Turn } from "./ipc";
-import { turnReviewState, type Task, type TurnReviewState } from "./tasks";
+import { taskOwnerForTurn, turnReviewState, type Task, type TurnReviewState } from "./tasks";
 import type { TurnActions } from "./turn-actions";
 
 export type LedgerPhase = "running" | "closed" | "rolled_back";
@@ -52,7 +52,7 @@ export function ledgerRenderModel(
   return [...realTurns]
     .sort((a, b) => b.id - a.id)
     .map((turn) => {
-      const owner = tasks.find((task) => task.root === turn.root && task.turnIds.includes(turn.id));
+      const owner = taskOwnerForTurn(tasks, turn.root, turn.id);
       const phase: LedgerPhase = turn.rolledBack
         ? "rolled_back"
         : turn.boundarySource === "open" || turn.closedAt == null
@@ -67,7 +67,7 @@ export function ledgerRenderModel(
         fileNames: turn.files.map((file) => fileName(file.path)),
         testState: turn.testStatus?.state ?? "not_run",
         reviewState: owner ? turnReviewState(owner, turn.id) : null,
-        canReviewDiff: phase !== "running",
+        canReviewDiff: phase === "closed",
         canRollback: phase === "closed" && isRollbackable(turn, [...turns]),
       };
     });
@@ -95,7 +95,7 @@ function currentRealTurn(guards: LedgerGuards, root: string, turnId: number): { 
   if (guards.currentRoot() !== root) return null;
   const turns = guards.turnsForRoot(root);
   const turn = turns.find((candidate) => candidate.id === turnId);
-  if (!turn || turn.boundarySource === "rollback" || turn.boundarySource === "open" || turn.closedAt == null) return null;
+  if (!turn || turn.rolledBack || turn.boundarySource === "rollback" || turn.boundarySource === "open" || turn.closedAt == null) return null;
   return { turn, turns };
 }
 
@@ -137,15 +137,20 @@ export function mountLedger(host: HTMLElement, actions: TurnActions, guards: Led
     for (const row of rows) {
       const article = element("article", `ledger-turn ledger-${row.phase}${row.struck ? " ledger-struck" : ""}`);
       article.setAttribute("role", "listitem");
-      const summary = element("button", "ledger-turn-summary");
-      summary.type = "button";
-      summary.setAttribute("aria-expanded", String(row.expanded));
+      const toggleable = row.phase !== "running";
+      const summary: HTMLElement = toggleable
+        ? element("button", "ledger-turn-summary")
+        : element("div", "ledger-turn-summary");
+      if (toggleable) {
+        (summary as HTMLButtonElement).type = "button";
+        summary.setAttribute("aria-expanded", String(row.expanded));
+      }
       summary.append(
         element("span", "ledger-turn-id", `Turn ${row.turnId}`),
         element("span", "ledger-phase", row.phase.replace("_", " ")),
         element("span", "ledger-chevron", row.expanded ? "⌄" : "›"),
       );
-      if (row.phase === "running") {
+      if (!toggleable) {
         summary.setAttribute("aria-label", `Turn ${row.turnId}, running`);
       } else {
         const captured = { root: row.root, turnId: row.turnId };

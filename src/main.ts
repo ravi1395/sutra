@@ -1262,7 +1262,7 @@ function currentTurnActionTarget(turnId: number): TurnActionTarget | null {
   if (!root || !Number.isInteger(turnId)) return null;
   const turns = getTurns(root);
   const turn = turns.find((candidate) => candidate.id === turnId);
-  if (!turn || turn.closedAt == null || turn.boundarySource === "rollback") return null;
+  if (!turn || turn.rolledBack || turn.closedAt == null || turn.boundarySource === "open" || turn.boundarySource === "rollback") return null;
   return { root, turn, turns };
 }
 
@@ -1418,7 +1418,7 @@ function renderTurnStrip(root: string): void {
   let scopedTurn: Turn | undefined;
   if (diffScope.kind === "turn") {
     const scopedTurnId = diffScope.turnId;
-    scopedTurn = turns.find((t) => t.id === scopedTurnId);
+    scopedTurn = turns.find((t) => t.id === scopedTurnId && !t.rolledBack);
     if (!scopedTurn) {
       // Turn vanished from the local cache (shouldn't happen) — fall back
       // defensively instead of rendering a breadcrumb for nothing.
