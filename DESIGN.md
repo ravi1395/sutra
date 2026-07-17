@@ -70,16 +70,16 @@ Sutra is an instrument, not a platform: a dense cockpit of small, precise contro
 **Key Characteristics:**
 - Two themes, one token set: `:root` (ink) and `.theme-washi` override the same variable names, never introduce parallel ones.
 - Small type scale (9.5–15px) built for chrome density, not marketing hierarchy.
-- One accent color, used as a signal, not a decoration.
+- Classic Ink/Washi uses one accent color, used as a signal, not a decoration.
 - Flat at rest; shadow appears only on floating/overlay surfaces.
 - Icon-glyph and pill controls throughout — there is no marketing-style "primary CTA button".
 
 ## 2. Colors
 
-The palette is a near-monochrome ink/paper ramp with a single accent breaking through, plus a fixed three-color diff vocabulary that never changes with theme.
+The Classic Ink/Washi palette is a near-monochrome ink/paper ramp with a single accent breaking through, plus a fixed three-color diff vocabulary that never changes between those variants.
 
 ### Primary
-- **Jade Signal** (`#4ade93` ink / `#0f8a5f` washi): the one accent. Active glyph state, focused pill/tab, git-add hue, pulse dots, accent glow. Used sparingly — its rarity is what makes it legible as "this is active" rather than ambient color.
+- **Jade Signal** (`#4ade93` ink / `#0f8a5f` washi): Classic's one accent. Active glyph state, focused pill/tab, git-add hue, pulse dots, accent glow. Used sparingly — its rarity is what makes it legible as "this is active" rather than ambient color.
 
 ### Neutral — Ink theme (dark, default)
 - **Void** (`#101311`): base app background.
@@ -101,7 +101,9 @@ The palette is a near-monochrome ink/paper ramp with a single accent breaking th
 - **Washi Jade** (`#0f8a5f`): accent, deepened for AA contrast against the paper background — never reuse the ink theme's brighter jade on washi.
 
 ### Named Rules
-**The One Signal Rule.** Jade is the only saturated color available for UI state. If a new control needs to communicate "active" or "on", it reaches for jade or it reaches for nothing — never a second accent hue.
+**The One Signal Rule (Classic Ink/Washi).** Jade is the only saturated color available for Classic UI state. If a Classic control needs to communicate "active" or "on", it reaches for jade or it reaches for nothing — never a second accent hue.
+
+**Graphite Signal Rule.** Graphite maps the same `--em*` active/action vocabulary to one Primer blue signal (`#58a6ff`; pressed `#388bfd`). Its green/amber/red diff tokens and syntax colors remain semantic content paint, never alternate active signals.
 
 **The Fixed Diff Rule.** Git-diff paint is fixed **within a view**, not across all views: `--diff-add`, `--diff-mod`, and `--diff-del` own gutter, diff-lens, hunk, and diff-file paint. Classic retains its shipped amber/blue/red literals; Graphite (and later views) maps them green/amber/red. App-wide `--added`, `--modified`, and `--deleted` remain status tokens — including diagnostics and invalid syntax — and are never view-revalued.
 
@@ -169,13 +171,13 @@ Every control is small, dense, and icon- or label-led — there is no large mark
 ### Do:
 - **Do** keep ink and washi on one token set — a new color must be added as a variable pair in both `:root` and `.theme-washi`, never hardcoded per-theme.
 - **Do** keep the type scale inside 9.5–15px for all UI chrome; let mono/terminal content set its own size independently.
-- **Do** reserve jade (`#4ade93` / `#0f8a5f`) for active/on/signal state only — one accent, used sparingly.
+- **Do** reserve Classic jade (`#4ade93` / `#0f8a5f`) for active/on/signal state only; Graphite follows its separate one-blue-signal rule.
 - **Do** keep shadows literal black and reserved for floating/overlay surfaces only.
 - **Do** favor icon-glyph and pill controls consistent with the existing dense, instrumented chrome; a new control should look like it belongs next to `.glyph`/`.sbtn`, not like an imported design-system button.
 
 ### Don't:
 - **Don't** build toward an Electron/VS Code-clone look — no heavy multi-panel chrome, no extension-marketplace visual language, no sprawling top-level menu bloat.
-- **Don't** introduce a second saturated accent color alongside jade; if two states need to be distinguished, use the existing diff palette or a neutral tonal step, not a new hue.
-- **Don't** use `border-left` as a colored accent stripe for "current"/"active" rows — use the jade wash background (`--em-wash-row`) the codebase already uses.
+- **Don't** introduce a second saturated active accent within a view; Classic uses jade and Graphite uses Primer blue. Use diff colors only for git semantics, or a neutral tonal step for non-active distinctions.
+- **Don't** use `border-left` as a colored accent stripe for "current"/"active" rows — use the view-scoped signal wash (`--em-wash-row`; jade in Classic, Primer blue in Graphite).
 - **Don't** add card-style elevation/shadow to static, in-flow panels; flat is the resting state everywhere except dropdowns and popovers.
 - **Don't** reach for Fraunces/voice type for UI chrome — it is reserved for rare, deliberate voice moments, not headings or labels.

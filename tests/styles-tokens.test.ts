@@ -153,6 +153,10 @@ test("Graphite owns a complete Git-diff palette without revaluing status tokens"
   for (const statusToken of ["--added", "--modified", "--deleted"]) {
     assert.ok(!graphiteBlock.includes(`${statusToken}:`), `Graphite must not revalue ${statusToken}`);
   }
+  assert.match(graphiteBlock, /--em:\s*#58a6ff/i, "Graphite active/action signal must be Primer blue");
+  assert.match(graphiteBlock, /--em-dim:\s*#388bfd/i, "Graphite pressed signal must remain Primer blue");
+  assert.match(graphiteBlock, /--em-wash:\s*rgba\(88, 166, 255, 0\.12\)/i);
+  assert.match(graphiteBlock, /--em-wash-row:\s*rgba\(88, 166, 255, 0\.08\)/i);
 });
 
 test("Git-diff selectors consume only diff tokens and Classic values remain pinned", () => {
@@ -183,9 +187,13 @@ test("Graphite pinned palette and readable core pairs meet contrast", () => {
   assert.strictEqual(token("--syn-kw"), "#ff7b72");
   assert.strictEqual(token("--ansi-green"), "#3fb950");
   const canvas = token("--bg-1")!;
-  for (const foreground of [token("--fg"), token("--fg-dim"), token("--fg")]) {
-    assert.ok(foreground && contrastRatio(foreground, canvas) >= 4.5, `${foreground} must meet 4.5:1 on Graphite canvas`);
-  }
+  const foreground = token("--fg")!;
+  const muted = token("--fg-dim")!;
+  assert.ok(contrastRatio(foreground, canvas) >= 4.5, "Graphite foreground must meet 4.5:1 on canvas");
+  assert.ok(contrastRatio(muted, canvas) >= 4.5, "Graphite muted text must meet 4.5:1 on canvas");
   const surface = token("--bg-3")!;
-  assert.ok(contrastRatio(token("--fg")!, surface) >= 4.5, "Graphite foreground must meet 4.5:1 on surface");
+  assert.ok(
+    contrastRatio(foreground, surface) >= 4.5,
+    "Graphite foreground and tab labels must meet 4.5:1 on surface",
+  );
 });
