@@ -3,71 +3,112 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { TerminalManager } from "../src/terminal";
 
+type Session = { alive: boolean; spawnPending: boolean; term: { write(message: string): void } };
 type TerminalFixture = TerminalManager & {
-  terms: { alive: boolean }[];
+  terms: Session[];
+  finishSpawn(term: Session, succeeded: boolean, error?: unknown): void;
+  markExited(term: Session): void;
+  removeSession(term: Session): boolean;
+  resetSessions(): void;
   notifySessionsChanged(): void;
 };
 
-function terminalFixture(alive: boolean[]): TerminalFixture {
+function session(pending = true): Session {
+  return { alive: false, spawnPending: pending, term: { write() {} } };
+}
+
+function terminalFixture(sessions: Session[] = []): TerminalFixture {
   return Object.assign(Object.create(TerminalManager.prototype), {
-    terms: alive.map((alive) => ({ alive })),
+    terms: sessions,
     sessionListeners: new Set<() => void>(),
-    sessionNotifications: [] as (() => void)[][],
+    sessionNotifications: [],
     drainingSessionNotifications: false,
+    sessionSnapshotOverride: null,
+    renderTabs: () => {},
   }) as TerminalFixture;
 }
 
-function functionBody(source: string, signature: string): string {
-  const start = source.indexOf(signature);
-  assert.ok(start >= 0, `${signature} must exist`);
-  const open = source.indexOf("{", start);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth += 1;
-    else if (source[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(open + 1, i);
-    }
-  }
-  assert.fail(`${signature} body must close`);
-}
+const state = (manager: TerminalManager): [number, number] => [manager.count, manager.liveCount()];
 
-test("liveCount counts create/live, exited, and failed terminal sessions", () => {
-  const manager = terminalFixture([]);
-  assert.equal(manager.liveCount(), 0);
+test("pending spawn is dormant until success and failure never becomes live", () => {
+  const pending = session();
+  const manager = terminalFixture([pending]);
+  const received: [number, number][] = [];
+  const unsubscribe = manager.onSessionsChanged(() => received.push(state(manager)));
+  assert.deepEqual(received, [[1, 0]]);
 
-  manager.terms.push({ alive: true });
-  assert.equal(manager.liveCount(), 1);
+  manager.finishSpawn(pending, true);
+  assert.deepEqual(received, [[1, 0], [1, 1]]);
 
-  manager.terms[0].alive = false;
-  manager.terms.push({ alive: false });
-  assert.equal(manager.liveCount(), 0);
-  assert.equal(manager.count, 2);
+  const failed = session();
+  manager.terms.push(failed);
+  manager.finishSpawn(failed, false, "failed");
+  assert.equal(failed.alive, false);
+  assert.deepEqual(received, [[1, 0], [1, 1], [2, 1]]);
+  unsubscribe();
 });
 
-test("onSessionsChanged is immediate, unsubscribable, and independent of tab renders", () => {
-  const manager = terminalFixture([true]);
-  let deliveries = 0;
-  const unsubscribe = manager.onSessionsChanged(() => { deliveries += 1; });
-  manager.notifySessionsChanged();
+test("reentrant reset preserves terminal lifecycle snapshots per listener", () => {
+  const manager = terminalFixture();
+  const a: [number, number][] = [];
+  const b: [number, number][] = [];
+  const immediate: [number, number][] = [];
+  let reset = false;
+  let unsubscribeC: (() => void) | undefined;
+  const unsubscribeA = manager.onSessionsChanged(() => {
+    a.push(state(manager));
+    if (!reset && manager.liveCount() === 1) {
+      reset = true;
+      manager.resetSessions();
+      unsubscribeC = manager.onSessionsChanged(() => immediate.push(state(manager)));
+    }
+  });
+  const unsubscribeB = manager.onSessionsChanged(() => b.push(state(manager)));
+  a.length = 0;
+  b.length = 0;
+
+  const pending = session();
+  manager.terms.push(pending);
+  manager.finishSpawn(pending, true);
+
+  assert.deepEqual(a, [[1, 1], [0, 0]]);
+  assert.deepEqual(b, [[1, 1], [0, 0]]);
+  assert.deepEqual(immediate, [[0, 0]]);
+  unsubscribeA();
+  unsubscribeB();
+  unsubscribeC?.();
+});
+
+test("exit, close, reset, and unsubscribe publish exactly once without render noise", () => {
+  const live = session(false);
+  live.alive = true;
+  const manager = terminalFixture([live]);
+  const received: [number, number][] = [];
+  const unsubscribe = manager.onSessionsChanged(() => received.push(state(manager)));
+  received.length = 0;
+
+  manager.markExited(live);
+  manager.markExited(live);
+  manager.removeSession(live);
+  manager.terms.push(session());
+  manager.resetSessions();
   unsubscribe();
   manager.notifySessionsChanged();
 
-  assert.equal(deliveries, 2);
-  assert.doesNotMatch(functionBody(readFileSync("src/terminal.ts", "utf8"), "private renderTabs(): void"), /notifySessionsChanged/);
+  assert.deepEqual(received, [[1, 0], [0, 0], [0, 0]]);
+  assert.doesNotMatch(readFileSync("src/terminal.ts", "utf8").slice(readFileSync("src/terminal.ts", "utf8").indexOf("private renderTabs(): void")), /notifySessionsChanged/);
 });
 
-test("terminal lifecycle publishes create, exit, spawn-failure, close, and reset transitions", () => {
-  const source = readFileSync("src/terminal.ts", "utf8");
-  const create = functionBody(source, "async create(sideArg?: TerminalGroupSide, cwd?: string): Promise<void>");
-  const close = functionBody(source, "close(t: Term): void");
-  const reset = functionBody(source, "async reset(cwd: string | null, create: boolean): Promise<void>");
+test("late spawn success after close or reset is ignored", () => {
+  const closed = session();
+  const manager = terminalFixture([closed]);
+  manager.removeSession(closed);
+  manager.finishSpawn(closed, true);
+  assert.deepEqual(state(manager), [0, 0]);
 
-  assert.match(create, /this\.terms\.push\(t\);/);
-  assert.match(create, /await ptySpawn\(id, cwd \?\? this\.cwd, rows, cols, this\.shellPref\);/);
-  assert.match(create, /catch \(e\) \{\s*t\.alive = false;[\s\S]*?\}/);
-  assert.match(create, /this\.notifySessionsChanged\(\);\s*this\.activate\(t\);/);
-  assert.match(source, /onPtyExit\([\s\S]*?const wasAlive = t\.alive;[\s\S]*?t\.alive = false;[\s\S]*?if \(wasAlive\) this\.notifySessionsChanged\(\);/);
-  assert.match(close, /this\.terms\.splice\(this\.terms\.indexOf\(t\), 1\);\s*this\.notifySessionsChanged\(\);/);
-  assert.match(reset, /this\.terms = \[\];[\s\S]*?this\.notifySessionsChanged\(\);\s*if \(create\) await this\.create\(\);/);
+  const reset = session();
+  manager.terms.push(reset);
+  manager.resetSessions();
+  manager.finishSpawn(reset, true);
+  assert.deepEqual(state(manager), [0, 0]);
 });

@@ -33,11 +33,15 @@ interface Term {
   el: HTMLElement;
   title: string;
   alive: boolean;
+  spawnPending: boolean;
   agentAttached: boolean;
   cmdHistory: string[]; // Recent commands for autocomplete
   currentInput: string; // Current line being typed
   cwd: string | null; // Spawn-time cwd (session.cwd) — used to resolve relative file links
 }
+
+type SessionSnapshot = { count: number; liveCount: number };
+type SessionNotification = SessionSnapshot & { listeners: (() => void)[] };
 
 /** Build the live xterm theme from CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
 export function buildTermTheme(): ITheme {
@@ -298,8 +302,9 @@ export class TerminalManager {
   private scrollback = 5000;
   private shellPref: string | null = null;
   private sessionListeners = new Set<() => void>();
-  private sessionNotifications: (() => void)[][] = [];
+  private sessionNotifications: SessionNotification[] = [];
   private drainingSessionNotifications = false;
+  private sessionSnapshotOverride: SessionSnapshot | null = null;
   // Cursor blink is a repaint loop that keeps the compositor awake. Read the OS
   // reduced-motion preference once, and let the window-idle gate pause blink
   // while hidden — WKWebView keeps xterm's blink timer running off-screen where
@@ -373,13 +378,7 @@ export class TerminalManager {
     });
     void onPtyExit((id) => {
       const t = this.terms.find((x) => x.id === id);
-      if (t) {
-        const wasAlive = t.alive;
-        t.alive = false;
-        t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
-        this.renderTabs();
-        if (wasAlive) this.notifySessionsChanged();
-      }
+      if (t) this.markExited(t);
     });
 
     // Single subscription for the (singleton) manager, not one per terminal: re-theme every
@@ -394,34 +393,84 @@ export class TerminalManager {
   }
 
   get count(): number {
-    return this.terms.length;
+    return this.sessionSnapshotOverride?.count ?? this.terms.length;
   }
 
   /** Number of sessions whose PTY is still alive. */
   liveCount(): number {
-    return this.terms.filter((term) => term.alive).length;
+    return this.sessionSnapshotOverride?.liveCount ?? this.actualSessionSnapshot().liveCount;
   }
 
-  /** Subscribe to session/liveness transitions; the current state is delivered immediately. */
+  /** Subscribe to session/liveness transitions; current state is immediate and listener changes apply next transition. */
   onSessionsChanged(listener: () => void): () => void {
     this.sessionListeners.add(listener);
-    listener();
+    this.withSessionSnapshot(this.actualSessionSnapshot(), listener);
     return () => this.sessionListeners.delete(listener);
   }
 
   private notifySessionsChanged(): void {
-    this.sessionNotifications.push([...this.sessionListeners]);
+    this.sessionNotifications.push({ ...this.actualSessionSnapshot(), listeners: [...this.sessionListeners] });
     if (this.drainingSessionNotifications) return;
 
     this.drainingSessionNotifications = true;
     try {
       while (this.sessionNotifications.length > 0) {
-        const listeners = this.sessionNotifications.shift()!;
-        for (const listener of listeners) listener();
+        const notification = this.sessionNotifications.shift()!;
+        for (const listener of notification.listeners) {
+          this.withSessionSnapshot(notification, listener);
+        }
       }
     } finally {
       this.drainingSessionNotifications = false;
     }
+  }
+
+  private actualSessionSnapshot(): SessionSnapshot {
+    return { count: this.terms.length, liveCount: this.terms.filter((term) => term.alive).length };
+  }
+
+  private withSessionSnapshot(snapshot: SessionSnapshot, listener: () => void): void {
+    const previous = this.sessionSnapshotOverride;
+    this.sessionSnapshotOverride = snapshot;
+    try {
+      listener();
+    } finally {
+      this.sessionSnapshotOverride = previous;
+    }
+  }
+
+  private finishSpawn(t: Term, succeeded: boolean, error?: unknown): void {
+    if (!t.spawnPending || !this.terms.includes(t)) return;
+    t.spawnPending = false;
+    t.alive = succeeded;
+    if (!succeeded) t.term.write(`\r\n\x1b[31mfailed to start shell: ${error}\x1b[0m\r\n`);
+    this.notifySessionsChanged();
+  }
+
+  private markExited(t: Term): void {
+    if (!this.terms.includes(t) || (!t.alive && !t.spawnPending)) return;
+    t.alive = false;
+    t.spawnPending = false;
+    t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+    this.renderTabs();
+    this.notifySessionsChanged();
+  }
+
+  private removeSession(t: Term): boolean {
+    const index = this.terms.indexOf(t);
+    if (index < 0) return false;
+    t.spawnPending = false;
+    this.terms.splice(index, 1);
+    this.notifySessionsChanged();
+    return true;
+  }
+
+  private resetSessions(): void {
+    for (const term of this.terms) term.spawnPending = false;
+    this.terms = [];
+    this.active = null;
+    this.seq = 0;
+    this.notifySessionsChanged();
   }
 
   private focusGroup(side: TerminalGroupSide): void {
@@ -520,7 +569,7 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, agentAttached: false, cmdHistory: [], currentInput: "", cwd: sessionCwd };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: false, spawnPending: true, agentAttached: false, cmdHistory: [], currentInput: "", cwd: sessionCwd };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
@@ -684,12 +733,11 @@ export class TerminalManager {
     const cols = term.cols || 80;
     try {
       await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref);
+      this.finishSpawn(t, true);
     } catch (e) {
-      t.alive = false;
-      term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`);
+      this.finishSpawn(t, false, e);
     }
-    this.notifySessionsChanged();
-    this.activate(t);
+    if (this.terms.includes(t)) this.activate(t);
   }
 
   /** Strict busy check for one terminal (kernel foreground-pgrp; errors read as idle). */
@@ -827,8 +875,7 @@ export class TerminalManager {
     void ptyKill(t.id).catch(() => {});
     t.term.dispose();
     t.el.remove();
-    this.terms.splice(this.terms.indexOf(t), 1);
-    this.notifySessionsChanged();
+    this.removeSession(t);
     const wasActive = this.active === t;
     const side = groupSideForItem(this.groups, t) ?? "left";
     this.groups = removeItemFromGroups(this.groups, t);
@@ -855,9 +902,6 @@ export class TerminalManager {
       t.term.dispose();
       t.el.remove();
     }
-    this.terms = [];
-    this.active = null;
-    this.seq = 0;
     this.cwd = cwd;
     this.groups = { left: [], right: [] };
     this.activeByGroup = { left: null, right: null };
@@ -866,7 +910,7 @@ export class TerminalManager {
     this.bodyHosts.right.innerHTML = "";
     this.renderGroups();
     this.renderTabs();
-    this.notifySessionsChanged();
+    this.resetSessions();
     if (create) await this.create();
   }
 
@@ -1008,7 +1052,7 @@ export class TerminalManager {
           });
         });
         const label = document.createElement("span");
-        label.textContent = t.title + (t.alive ? "" : " (exited)");
+        label.textContent = t.title + (t.alive || t.spawnPending ? "" : " (exited)");
         tab.onclick = () => this.activate(t);
         if (t === this.activeByGroup[side]) {
           const ti = document.createElement("span");
