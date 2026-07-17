@@ -130,3 +130,53 @@ export class ComposerSurfaceBinding {
     unsubscribe?.();
   }
 }
+
+export interface PersistedDraftContent {
+  text: Record<string, string>;
+  chips: readonly unknown[];
+}
+
+type PersistedDraftLoad = PersistedDraftContent | null | PromiseLike<PersistedDraftContent | null>;
+
+/** Probes hidden-workspace draft state without mounting composer UI. */
+export class HiddenComposerSurfaceHydrator {
+  private generation = 0;
+  private root: string | null = null;
+  private currentHasDraft = false;
+
+  constructor(
+    private readonly load: (root: string) => PersistedDraftLoad,
+    private readonly publish: (root: string, state: SurfaceState) => void,
+  ) {}
+
+  hydrate(root: string): void {
+    const generation = ++this.generation;
+    this.root = root;
+    this.currentHasDraft = false;
+    const complete = (draft: PersistedDraftContent | null): void => {
+      if (generation !== this.generation || this.root !== root) return;
+      this.currentHasDraft = draft !== null && !isEmptyDraftContent(draft.text, draft.chips.length);
+      this.publish(root, composerSurface(false, this.currentHasDraft));
+    };
+    try {
+      const draft = this.load(root);
+      if (draft && typeof (draft as PromiseLike<PersistedDraftContent | null>).then === "function") {
+        void Promise.resolve(draft).then(complete, () => complete(null));
+      } else {
+        complete(draft as PersistedDraftContent | null);
+      }
+    } catch {
+      complete(null);
+    }
+  }
+
+  hasDraft(root: string): boolean {
+    return this.root === root && this.currentHasDraft;
+  }
+
+  clear(): void {
+    this.generation += 1;
+    this.root = null;
+    this.currentHasDraft = false;
+  }
+}

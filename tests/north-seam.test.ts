@@ -7,6 +7,7 @@ import {
   ChipHostCache,
   ComposerSurfaceBinding,
   DraftStateSignal,
+  HiddenComposerSurfaceHydrator,
   browserSurface,
   composerSurface,
   diffSurface,
@@ -120,6 +121,77 @@ test("composer binding switches roots with one listener and rejects late old-roo
   ]);
 });
 
+test("hidden composer cold hydration publishes a persisted draft as dormant", () => {
+  const seen: Array<{ root: string; badge: string | null }> = [];
+  const hydrator = new HiddenComposerSurfaceHydrator(
+    () => ({ text: { task: "persisted" }, chips: [] }),
+    (root, state) => seen.push({ root, badge: state.badge }),
+  );
+
+  hydrator.hydrate("/cold");
+
+  assert.equal(hydrator.hasDraft("/cold"), true);
+  assert.deepEqual(seen, [{ root: "/cold", badge: "dormant" }]);
+});
+
+test("hidden composer rapid root switch accepts only the latest out-of-order load", async () => {
+  const pending = new Map<string, (draft: { text: Record<string, string>; chips: [] }) => void>();
+  const seen: string[] = [];
+  const hydrator = new HiddenComposerSurfaceHydrator(
+    (root) => new Promise((resolve) => pending.set(root, resolve)),
+    (root) => seen.push(root),
+  );
+
+  hydrator.hydrate("/a");
+  hydrator.hydrate("/b");
+  pending.get("/b")!({ text: { task: "b" }, chips: [] });
+  await Promise.resolve();
+  pending.get("/a")!({ text: { task: "a" }, chips: [] });
+  await Promise.resolve();
+
+  assert.equal(hydrator.hasDraft("/a"), false);
+  assert.equal(hydrator.hasDraft("/b"), true);
+  assert.deepEqual(seen, ["/b"]);
+});
+
+test("hidden composer empty or failed target resolves to no badge", async () => {
+  const badges: Array<string | null> = [];
+  const empty = new HiddenComposerSurfaceHydrator(
+    () => ({ text: { task: "  " }, chips: [] }),
+    (_root, state) => badges.push(state.badge),
+  );
+  empty.hydrate("/empty");
+
+  const failed = new HiddenComposerSurfaceHydrator(
+    () => Promise.reject(new Error("storage unavailable")),
+    (_root, state) => badges.push(state.badge),
+  );
+  failed.hydrate("/failed");
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(empty.hasDraft("/empty"), false);
+  assert.equal(failed.hasDraft("/failed"), false);
+  assert.deepEqual(badges, [null, null]);
+});
+
+test("clearing hidden composer ownership ignores a disposed completion", async () => {
+  let resolve!: (draft: { text: Record<string, string>; chips: [] }) => void;
+  const seen: string[] = [];
+  const hydrator = new HiddenComposerSurfaceHydrator(
+    () => new Promise((done) => { resolve = done; }),
+    (root) => seen.push(root),
+  );
+
+  hydrator.hydrate("/disposed");
+  hydrator.clear();
+  resolve({ text: { task: "stale" }, chips: [] });
+  await Promise.resolve();
+
+  assert.equal(hydrator.hasDraft("/disposed"), false);
+  assert.deepEqual(seen, []);
+});
+
 test("composer file cache cannot let an old-root completion replace the current root", async () => {
   const pending = new Map<string, (files: string[]) => void>();
   const cache = new ComposerFileCache((root) => new Promise((resolve) => pending.set(root, resolve)));
@@ -142,6 +214,8 @@ test("main keeps only irreducible wiring while North CSS stays scoped", () => {
 
   assert.match(main, /browser\.onHistoryChanged\(/);
   assert.match(main, /composerSurfaceBinding\.bind\(/);
+  assert.match(main, /hiddenComposerSurface\.hydrate\(root\)/);
+  assert.match(main, /hiddenComposerSurface\.hasDraft\(currentRoot\)/);
   assert.match(main, /currentRoot = dir;\s*resetComposerForWorkspace\(\)/);
   assert.match(main, /const host = chipHost\(\);\s*host\.replaceChildren\(\)/);
   assert.match(composer, /function applyDraft[\s\S]*?draftState\.update\(text, chips\.length\)/);

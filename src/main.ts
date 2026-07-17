@@ -189,6 +189,7 @@ import {
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
+import { loadDraft } from "./composer-store";
 import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
 import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
@@ -216,6 +217,7 @@ import { onSurfaces, setSurface, type SurfaceId, type Surfaces } from "./surface
 import {
   ChipHostCache,
   ComposerSurfaceBinding,
+  HiddenComposerSurfaceHydrator,
   browserSurface,
   composerSurface,
   diffSurface,
@@ -1617,9 +1619,18 @@ function composerSelection(): { path: string | null; text: string; line: number;
 let composerPanel: ReturnType<typeof mountComposer> | null = null;
 let composerMountedRoot: string | null = null;
 const composerSurfaceBinding = new ComposerSurfaceBinding();
+const hiddenComposerSurface = new HiddenComposerSurfaceHydrator(
+  (root) => loadDraft(root),
+  (ownedRoot, state) => {
+    if (currentRoot === ownedRoot && composerPanel === null && composerPane.classList.contains("hidden")) {
+      setSurface("composer", state);
+    }
+  },
+);
 
 function disposeComposerPanel(): void {
   composerSurfaceBinding.clear();
+  hiddenComposerSurface.clear();
   composerPanel?.dispose();
   composerPanel = null;
   composerMountedRoot = null;
@@ -1652,15 +1663,20 @@ function ensureComposer(): boolean {
 }
 
 function resetComposerForWorkspace(): void {
+  const root = currentRoot;
   disposeComposerPanel();
   if (!composerPane.classList.contains("hidden")) ensureComposer();
-  else setSurface("composer", composerSurface(false, false));
+  else {
+    setSurface("composer", composerSurface(false, false));
+    if (root) hiddenComposerSurface.hydrate(root);
+  }
 }
 
 function syncComposerSurface(visible = !composerPane.classList.contains("hidden")): void {
   const hasDraft = composerPanel !== null
     && composerMountedRoot === currentRoot
-    && composerPanel.hasDraft();
+    ? composerPanel.hasDraft()
+    : currentRoot !== null && hiddenComposerSurface.hasDraft(currentRoot);
   setSurface("composer", composerSurface(visible, hasDraft));
 }
 
