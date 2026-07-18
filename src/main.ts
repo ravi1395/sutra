@@ -6,7 +6,7 @@ import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
+import { FileTree, OutlineView, sidebarSections, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -933,6 +933,9 @@ function applySettings(next: UserSettings): void {
     editor.renderAllTabs();
     syncGraphiteBottomPanel();
     syncRoomTablist();
+    // Leaving stanza never calls roomRouter.enterRoom (no room change fires), so the
+    // shelf needs its own sync here to restore exclusive Files<->Outline on exit.
+    syncShelfMode();
     whisperHostCache.reset((host) => host.replaceChildren());
     northSurfacePills.replaceChildren();
     renderWhisperBar();
@@ -2283,6 +2286,10 @@ function syncRoomTablist(): void {
   renderRoomTablist();
 }
 roomRouter.onRoomChange(() => renderRoomTablist());
+// Shelf activates/deactivates on every room change within stanza (Write <-> the rest);
+// entering/leaving stanza itself is handled separately in applySettings (no room
+// change fires there — leaving stanza never calls roomRouter.enterRoom).
+roomRouter.onRoomChange(() => syncShelfMode());
 // Run-room pulse rides the existing session-liveness notifications — no new polling.
 terminals.onSessionsChanged(() => renderRoomTablist());
 
@@ -2309,8 +2316,20 @@ const searchView = $("search-view");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
 let searchIconHtml = "";
+// Set true only while the stanza Write-room shelf (T8b) is active — see
+// syncShelfMode below. Declared here (ahead of its assignment site) because
+// openSearchView/closeSearchView close over it; both only ever run after full
+// module init, by which point syncShelfMode has already been defined.
+let shelfActive = false;
 
 function openSearchView(): void {
+  // Shelf mode already co-displays Files/Outline/Search — opening search here
+  // must not collapse it back to the exclusive Files<->Outline toggle (D-item
+  // 3 of T8b); just focus the always-visible search section instead.
+  if (shelfActive) {
+    search.focus();
+    return;
+  }
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
@@ -2321,6 +2340,7 @@ function openSearchView(): void {
 }
 
 function closeSearchView(): void {
+  if (shelfActive) return; // nothing to collapse — search stays co-displayed
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
@@ -2329,12 +2349,13 @@ function closeSearchView(): void {
 }
 
 function toggleSearchView(): void {
+  if (shelfActive) return; // toggle button is hidden in shelf mode; defensive no-op
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
 function openSidebarSearch(): void {
   if (settings.view === "north") setSidebar(true);
-  outlineView?.setMode("files");
+  if (!shelfActive) outlineView?.setMode("files");
   if (!searchViewOpen) openSearchView();
   search.focus();
 }
@@ -3673,6 +3694,44 @@ editor.onDocChanged = () => {
   const activePath = editor.active?.path;
   if (activePath) notifyDocChanged(activePath);
 };
+
+// ---- W3/T8b: stanza Write-room shelf ----
+// Stacked co-display of Files + Outline + Search, active only in stanza's Write
+// room (D11). Reuses the exact FileTree/OutlineView/SearchPanel DOM nodes —
+// treeEl, outlineView.panelEl and searchView — never clones or rebuilds them;
+// the only new DOM is one small label header per section, reparented beside
+// each node in the order sidebarSections("stacked") defines.
+const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline", search: "Search" };
+const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl, search: searchView };
+const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section) => {
+  const label = document.createElement("div");
+  label.className = "shelf-label hidden";
+  label.textContent = SHELF_SECTION_LABEL[section];
+  SHELF_SECTION_EL[section].before(label);
+  return label;
+});
+
+/** Toggle the stanza Write-room shelf on/off: stacked Files/Outline/Search
+ *  co-display vs. the existing exclusive Files<->Outline sidebar. Called on
+ *  every stanza room change (write <-> run/review/web) and on every view
+ *  change (entering/leaving stanza). Idempotent — no-op if already in the
+ *  target state, so it's safe to call from both triggers unconditionally. */
+function syncShelfMode(): void {
+  const active = settings.view === "stanza" && roomRouter.currentRoom() === "write";
+  if (active === shelfActive) return;
+  shelfActive = active;
+  sidebar.classList.toggle("shelf-active", active);
+  for (const label of shelfLabels) label.classList.toggle("hidden", !active);
+  btnSearchToggle.classList.toggle("hidden", active);
+  if (active) {
+    outlineView.setMode("stacked");
+    searchView.classList.remove("hidden");
+  } else {
+    if (searchViewOpen) closeSearchView();
+    else searchView.classList.add("hidden");
+    outlineView.setMode("files");
+  }
+}
 
 // Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
 // by the same state notification the strip uses. Wired here (not beside the strip near

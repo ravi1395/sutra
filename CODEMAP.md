@@ -29,6 +29,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
   - North sidebar drawer controller, DOM host placement, focus/Escape behavior, and guarded shortcut handling. The ledger shortcut is ignored while this drawer or a blocking overlay is open.
 - `src/rooms.ts`
   - Pure stanza room router: fixed surface presets per room applied through injected setters (throw-isolated per call, primary focus last), current-room memory, and change subscription. No app-module imports; `main.ts` owns the tablist DOM, ⌘1–4 routing, and badge refresh.
+  - Write-room shelf: `main.ts`'s `syncShelfMode` (driven by `roomRouter.onRoomChange` and view changes) toggles `OutlineView.setMode("stacked")` in `src/tree.ts`, co-displaying the same file tree/outline/search DOM nodes instead of the exclusive Files↔Outline toggle. `tree.ts`'s `sidebarSections(mode)` is the pure render-model seam (`tests/shelf.test.ts`).
 - `src/editor.ts`, `src/terminal.ts`, `src/browser.ts`, `src/diff.ts`, `src/composer.ts`, `src/annotations.ts`
   - Existing primary content surfaces. View changes restyle or relocate hosts without changing their content ownership.
 - `src/ipc.ts`
@@ -80,6 +81,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - `tests/tasks.test.ts` pins deterministic owner mutation and durable task review round trips.
 - `tests/agent-tracking.test.ts` pins rollback eligibility, scope transitions, turn cache/test state, and turn-strip behavior.
 - `tests/rooms.test.ts` pins the room-router seam: full-preset application order, same-room re-entry, run-preset shape, write default, and per-setter throw isolation.
+- `tests/shelf.test.ts` pins the Write-room shelf's pure render model: `sidebarSections("stacked")` returns files/outline/search in display order.
 - `tests/drawer.test.ts`, `tests/north-seam.test.ts`, and settings/style source checks protect North-only placement and Classic/other-view isolation.
 - Unit/static proof does not clear native layout/action behavior. `VERIFY-LEDGER.md` MV-6 remains BLOCKED until the manual `npm run tauri dev` script is observed.
 

@@ -4658,3 +4658,33 @@ body.app-hidden *::after {
     transform: none;
   }
 }
+
+/* ── W3/T8b Stanza shelf: stacked Files/Outline/Search co-display (Write room). ──
+   No new tree/outline/search instances: #tree, .outline-content and #search-view
+   are the exact nodes OutlineView/SearchPanel already own. shelf-active only
+   resizes them into even thirds and reveals the three label headers (new DOM,
+   plain text, no new instances) main.ts reparented beside each section. */
+:root.view-stanza #sidebar.shelf-active #tree,
+:root.view-stanza #sidebar.shelf-active .outline-content {
+  flex: 1 1 0;
+  min-height: 64px;
+  overflow: auto;
+}
+:root.view-stanza #sidebar.shelf-active #search-view {
+  flex: 1 1 0;
+  min-height: 64px;
+}
+:root.view-stanza .shelf-label {
+  flex: 0 0 auto;
+  padding: 6px 14px 4px;
+  border-top: 1px solid var(--line);
+  font-family: var(--ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+:root.view-stanza .shelf-label:first-of-type {
+  border-top: none;
+}

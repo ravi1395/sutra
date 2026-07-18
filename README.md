@@ -421,6 +421,12 @@ Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git
 | Shortcuts | Read-only keyboard shortcut reference |
 | About | App description, version, reset all settings |
 
+### Stanza
+
+Stanza organizes the window into four **rooms** — Write, Run, Review, Web — switched via the room tablist or **⌘1**–**⌘4**; entering a room applies its fixed surface preset (sidebar, terminal, diff, browser).
+
+The Write room's sidebar shows a **shelf**: Files, Outline, and Search stacked as three labeled sections instead of the usual exclusive Files↔Outline toggle. All three reuse the same file tree, outline panel, and search view Sutra always had — nothing is duplicated — so navigating the outline or running a search never hides the file tree. **⇧⌘F** in the Write room just focuses the always-visible Search section; outside the Write room (including other Stanza rooms) it keeps the normal behavior of opening the exclusive search view, without switching rooms. Leaving the Write room, or leaving Stanza entirely, restores the ordinary exclusive Files↔Outline sidebar.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |

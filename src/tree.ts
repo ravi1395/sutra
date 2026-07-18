@@ -789,6 +789,18 @@ function cssEscape(s: string): string {
 // Reuses the same tree-row/tree-icon/tree-label CSS classes as FileTree.
 // ---------------------------------------------------------------------------
 
+export type SidebarMode = "files" | "outline" | "stacked";
+
+/** Pure render model for OutlineView.setMode: which labeled sections a sidebar
+ *  mode shows, in display order. "stacked" is the stanza Write-room shelf
+ *  (T8b) — Files, Outline and Search co-displayed; "files"/"outline" are the
+ *  existing single-section exclusive modes. No DOM here — main.ts drives the
+ *  actual shelf DOM from this order so the two never drift apart. */
+export function sidebarSections(mode: SidebarMode): readonly string[] {
+  if (mode === "stacked") return ["files", "outline", "search"];
+  return [mode];
+}
+
 /**
  * Outline sidebar view — renders the DocumentSymbol tree for the active file.
  * Handles the Files/Outline toggle and delegates navigation to the editor.
@@ -798,7 +810,7 @@ export class OutlineView {
   private contentEl: HTMLElement;
   private filesBtn: HTMLButtonElement;
   private outlineBtn: HTMLButtonElement;
-  private mode: "files" | "outline" = "files";
+  private mode: "files" | "outline" | "stacked" = "files";
   private symbols: DocumentSymbol[] = [];
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -837,24 +849,36 @@ export class OutlineView {
     treeEl.after(this.contentEl);
   }
 
-  /** Switch between "files" and "outline" modes. */
-  setMode(mode: "files" | "outline"): void {
+  /** Outline panel DOM node — exposed (read-only) so the stanza Write-room shelf
+   *  (T8b) can insert a label beside it and reparent it into the shelf layout
+   *  without cloning or re-instantiating the outline. */
+  get panelEl(): HTMLElement {
+    return this.contentEl;
+  }
+
+  /** Switch between "files"/"outline" (mutually exclusive) and "stacked" (both
+   *  Files and Outline shown together — the stanza Write-room shelf, T8b). In
+   *  stacked mode the Files/Outline toggle bar is redundant (nothing to switch
+   *  between) and hides; the file tree and outline panel co-display instead. */
+  setMode(mode: "files" | "outline" | "stacked"): void {
     this.mode = mode;
+    const stacked = mode === "stacked";
+    this.toggleBar.classList.toggle("hidden", stacked);
     this.filesBtn.classList.toggle("active", mode === "files");
     this.outlineBtn.classList.toggle("active", mode === "outline");
     this.treeEl.classList.toggle("hidden", mode === "outline");
     this.contentEl.classList.toggle("hidden", mode === "files");
-    if (mode === "outline") void this.refresh();
+    if (mode === "outline" || stacked) void this.refresh();
   }
 
   /** Notify the outline that the active file changed; refresh if visible. */
   onActiveFileChanged(): void {
-    if (this.mode === "outline") void this.refresh();
+    if (this.mode === "outline" || this.mode === "stacked") void this.refresh();
   }
 
   /** Debounce outline refresh after doc changes (called from editor update listener). */
   scheduleRefresh(): void {
-    if (this.mode !== "outline") return;
+    if (this.mode !== "outline" && this.mode !== "stacked") return;
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
