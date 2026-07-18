@@ -4685,6 +4685,6 @@ body.app-hidden *::after {
   text-transform: uppercase;
   color: var(--fg-faint);
 }
-:root.view-stanza .shelf-label:first-of-type {
+:root.view-stanza .shelf-label-first {
   border-top: none;
 }

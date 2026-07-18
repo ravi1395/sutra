@@ -3703,9 +3703,9 @@ editor.onDocChanged = () => {
 // each node in the order sidebarSections("stacked") defines.
 const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline", search: "Search" };
 const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl, search: searchView };
-const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section) => {
+const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section, index) => {
   const label = document.createElement("div");
-  label.className = "shelf-label hidden";
+  label.className = index === 0 ? "shelf-label shelf-label-first hidden" : "shelf-label hidden";
   label.textContent = SHELF_SECTION_LABEL[section];
   SHELF_SECTION_EL[section].before(label);
   return label;
