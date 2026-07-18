@@ -23,6 +23,13 @@
   font-style: normal;
   font-display: swap;
 }
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/src/assets/fonts/HankenGrotesk-Variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg-0: #101311; --bg-1: #131614; --bg-2: #0e110f; --bg-3: #161a17; --bg-4: #1f2420;
@@ -149,6 +156,54 @@
   --ansi-bright-cyan: #56d4dd; --ansi-bright-white: #f0f6fc;
 }
 
+/* ── W3/T8a Stanza palette: petrol dusk / sea-glass dawn, one verdigris signal. ──
+   All literals derived from design/views/stanza.html oklch values (converted to
+   sRGB hex) and contrast-tuned; every core pair measured ≥4.5:1 (terminal ≥7:1). */
+:root.view-stanza {
+  --bg-0: #0b1a1d; --bg-1: #071417; --bg-2: #0b1a1d; --bg-3: #112124; --bg-4: #18282c;
+  --line: #233337; --line-menu: #32464a;
+  --fg: #dce7e7; --fg-dim: #8fa3a4; --fg-faint: #728486; --fg-ghost: #5b6d6f;
+  --term-bg: #071417; --term-fg: #dce7e7;
+  --em: #63ccc0; --em-dim: #009b8f; --em-wash: rgba(99, 204, 192, 0.12); --em-wash-row: rgba(99, 204, 192, 0.08);
+  --syn-kw: #e39e86; --syn-type: #90b5dc; --syn-str: #99c68f; --syn-comment: #708385;
+  --diff-add: #62c37a; --diff-mod: #e7b643; --diff-del: #f66d67;
+  --diff-add-wash: rgba(98, 195, 122, 0.12); --diff-del-wash: rgba(246, 109, 103, 0.08);
+  --diff-file-mod: #e7b643; --diff-file-add: #62c37a; --diff-file-del: #f66d67;
+  --bg-drawer: #0b1a1d; --bg-whisper: #0b1a1d;
+  --on-em: #071417; --scrim: rgba(7, 20, 23, 0.6); --shadow: rgba(7, 20, 23, 0.45); --panel-bg: #112124;
+  --r-lg: 10px; --r-md: 8px; --r-sm: 5px;
+  --ui: "Hanken Grotesk", system-ui, sans-serif;
+  --ansi-black: #2c3b3e; --ansi-red: #f66d67; --ansi-green: #62c37a;
+  --ansi-yellow: #e7b643; --ansi-blue: #6dabdf; --ansi-magenta: #b88fe6;
+  --ansi-cyan: #3ebfc6; --ansi-white: #cfdada;
+  --ansi-bright-black: #4c5b5f; --ansi-bright-red: #ff8e86; --ansi-bright-green: #7cdd93;
+  --ansi-bright-yellow: #f9d46b; --ansi-bright-blue: #8cc4f4; --ansi-bright-magenta: #d0aafc;
+  --ansi-bright-cyan: #6bd8de; --ansi-bright-white: #f5f9f9;
+}
+
+/* Stanza Dawn: same rooms in sea-glass morning light. Deep-teal signal darkened
+   past the mock's #007570 (4.70:1 on its own wash) to hold ≥5:1 on paper + wash;
+   terminal keeps a dark teal well like North day. */
+:root.view-stanza.variant-dawn {
+  --bg-0: #e8f3f2; --bg-1: #f9fdfc; --bg-2: #e8f3f2; --bg-3: #f6fbfb; --bg-4: #d3e1e0;
+  --line: #c6d7d6; --line-menu: #97a9a8;
+  --fg: #0e2830; --fg-dim: #476065; --fg-faint: #536b6f; --fg-ghost: #5f767a;
+  --term-bg: #001415; --term-fg: #e9f0f0;
+  --em: #00706b; --em-dim: #005955; --em-wash: rgba(0, 112, 107, 0.10); --em-wash-row: rgba(0, 112, 107, 0.08);
+  --syn-kw: #9a4729; --syn-type: #32618e; --syn-str: #357339; --syn-comment: #5f767a;
+  --diff-add: #007f35; --diff-mod: #936500; --diff-del: #c9302d;
+  --diff-add-wash: rgba(0, 127, 53, 0.12); --diff-del-wash: rgba(201, 48, 45, 0.10);
+  --diff-file-mod: #936500; --diff-file-add: #007f35; --diff-file-del: #c9302d;
+  --bg-drawer: #e8f3f2; --bg-whisper: #e8f3f2;
+  --on-em: #ffffff; --scrim: rgba(14, 40, 48, 0.30); --shadow: rgba(14, 40, 48, 0.12); --panel-bg: #f6fbfb;
+  --ansi-black: #364548; --ansi-red: #d9544b; --ansi-green: #399d57;
+  --ansi-yellow: #ca9d33; --ansi-blue: #3e8cc9; --ansi-magenta: #9a6ec9;
+  --ansi-cyan: #1c989e; --ansi-white: #c5d0d0;
+  --ansi-bright-black: #57676a; --ansi-bright-red: #f9786c; --ansi-bright-green: #69c27e;
+  --ansi-bright-yellow: #e2c162; --ansi-bright-blue: #73b1e6; --ansi-bright-magenta: #bc97e8;
+  --ansi-bright-cyan: #5dbcc1; --ansi-bright-white: #f2f6f6;
+}
+
 /* xterm's bundled CSS hard-codes black behind its DOM renderer. Canvas sessions
    receive --term-bg through Terminal.options.theme; this keeps the DOM fallback
    (and IME composition overlay) on that same token without touching Classic. */
@@ -158,6 +213,10 @@
 }
 :root.view-graphite #term-host .xterm .xterm-viewport,
 :root.view-graphite #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+:root.view-stanza #term-host .xterm .xterm-viewport,
+:root.view-stanza #term-host .xterm .composition-view {
   background-color: var(--term-bg);
 }
 
