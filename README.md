@@ -65,8 +65,10 @@ Three regions, resizable by dragging the splitters:
 The top bar contains a **workspace switcher**, git status, and editor/terminal
 tools. A minimal native macOS **Edit** menu
 provides standard cut, copy, paste, undo, redo, and select-all responders.
-Graphite palette with a single emerald accent; fonts (Hanken Grotesk UI +
-Spline Sans Mono code) are vendored locally — no runtime font network request.
+Classic's ink/washi palette uses a single jade accent; fonts (Instrument Sans
+UI + Spline Sans Mono code) are vendored locally — no runtime font network
+request. Three additional coupled views (North Light, Graphite, Stanza) are
+available; see [View switching](#view-switching) below.
 
 ## Features
 
@@ -407,11 +409,13 @@ The command palette switches between the coupled **Classic**, **North Light**, *
 
 ### North Light
 
-North Light adds a right-side **Ledger** rail for agent turns. It opens by default for the session and toggles with **⌘L** while the North sidebar drawer and blocking overlays are closed. Running turns stay expanded; closed turns can be expanded to inspect file names, test state, and linked-task review disposition. Closed real turns reuse the existing exact-turn **Review diff** and guarded **Rollback** actions. The rail deliberately shows no line-count deltas and does not appear in Classic, Graphite, or Stanza.
+North Light is a porcelain/slate (day/night) view built from floating in-flow sheets rather than flat panels. Open files trail across the tab bar as **trail tabs**; hiding a surface (Terminal, Browser, Diff, Composer) collapses it into a restorable **surface pill** in the whisper strip instead of just disappearing. The sidebar can pop out into an overlay **drawer** — **⌘E** opens/closes it (Esc, an outside click, or opening a file also closes it); the docked Classic/Graphite/Stanza sidebar is unaffected.
+
+North Light also adds a right-side **Ledger** rail for agent turns. It opens by default for the session and toggles with **⌘L** while the North sidebar drawer and blocking overlays are closed. Running turns stay expanded; closed turns can be expanded to inspect file names, test state, and linked-task review disposition. Closed real turns reuse the existing exact-turn **Review diff** and guarded **Rollback** actions. The rail deliberately shows no line-count deltas and does not appear in Classic, Graphite, or Stanza.
 
 ### Graphite
 
-Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git-diff green/amber/red paint, and a locally bundled font license. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime. Its v1 structure uses flat file-tree `M`/`A`/`D` badges, GitHub-style underline editor tabs, and a Terminal/Problems band that reuses the existing Problems panel.
+Graphite is a Primer-dark flat-plane view: a single Primer blue accent (`#58a6ff`) marks active/on state, Mona Sans carries the chrome, hairline seams replace shadowed panels, and diff paint reads Git-diff green/amber/red. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime. Its v1 structure uses flat file-tree `M`/`A`/`D` badges, GitHub-style underline editor tabs, and a Terminal/Problems band that reuses the existing Problems panel.
 
 | Section | Options |
 |---|---|
@@ -423,7 +427,7 @@ Graphite is a Primer-dark flat-plane view: Mona Sans chrome, hairline seams, Git
 
 ### Stanza
 
-Stanza organizes the window into four **rooms** — Write, Run, Review, Web — switched via the room tablist or **⌘1**–**⌘4**; entering a room applies its fixed surface preset (sidebar, terminal, diff, browser).
+Stanza organizes the window into four **rooms** — Write, Run, Review, Web — switched via the **hearth strip** room tablist or **⌘1**–**⌘4**; entering a room applies its fixed surface preset (sidebar, terminal, diff, browser). The hearth strip pulses a live dot on Run while a terminal session is active and shows a dot on Review while a linked turn awaits review. Stanza ships **dusk** (dark, petrol/verdigris) and **dawn** (light, sea-glass) variants and uses the bundled **Hanken Grotesk** for chrome; editor and terminal content keep their configured monospace face.
 
 The Write room's sidebar shows a **shelf**: Files, Outline, and Search stacked as three labeled sections instead of the usual exclusive Files↔Outline toggle. All three reuse the same file tree, outline panel, and search view Sutra always had — nothing is duplicated — so navigating the outline or running a search never hides the file tree. **⇧⌘F** in the Write room just focuses the always-visible Search section; outside the Write room (including other Stanza rooms) it keeps the normal behavior of opening the exclusive search view, without switching rooms. Leaving the Write room, or leaving Stanza entirely, restores the ordinary exclusive Files↔Outline sidebar.
 

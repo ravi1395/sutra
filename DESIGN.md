@@ -105,13 +105,15 @@ The Classic Ink/Washi palette is a near-monochrome ink/paper ramp with a single 
 
 **Graphite Signal Rule.** Graphite maps the same `--em*` active/action vocabulary to one Primer blue signal (`#58a6ff`; pressed `#388bfd`). Its green/amber/red diff tokens and syntax colors remain semantic content paint, never alternate active signals.
 
-**North Light Signal Rule.** North maps `--em*` to one ultramarine signal; its green/amber/red diff tokens and syntax colors remain semantic content paint, never alternate active signals.
+**North Light Signal Rule.** North maps `--em*` to one ultramarine signal (day `#315bd6`; night `#8da9ff`); its green/amber/red diff tokens and syntax colors remain semantic content paint, never alternate active signals.
 
-**The Fixed Diff Rule.** Git-diff paint is fixed **within a view**, not across all views: `--diff-add`, `--diff-mod`, and `--diff-del` own gutter, diff-lens, hunk, and diff-file paint. Classic retains its shipped amber/blue/red literals; Graphite (and later views) maps them green/amber/red. App-wide `--added`, `--modified`, and `--deleted` remain status tokens — including diagnostics and invalid syntax — and are never view-revalued.
+**Stanza Signal Rule.** Stanza maps `--em*` to one verdigris/teal signal (dusk `#63ccc0`; dawn, deepened for paper contrast, `#00706b`); its green/amber/red diff tokens and syntax colors remain semantic content paint, never alternate active signals.
+
+**The Fixed Diff Rule.** Git-diff paint is fixed **within a view**, not across all views: `--diff-add`, `--diff-mod`, and `--diff-del` own gutter, diff-lens, hunk, and diff-file paint. Classic retains its shipped amber/blue/red literals; Graphite, North Light, and Stanza each map them to their own green/amber/red triad. App-wide `--added`, `--modified`, and `--deleted` remain status tokens — including diagnostics and invalid syntax — and are never view-revalued.
 
 ## 3. Typography
 
-**UI Font:** Instrument Sans (with system-ui, sans-serif fallback). North Light uses bundled Schibsted Grotesk for chrome and Graphite uses bundled Mona Sans. Views re-value only `--ui`; `--mono`, persisted `editorFontFamily`, and persisted `terminalFontFamily` remain untouched and user-configurable.
+**UI Font:** Instrument Sans (with system-ui, sans-serif fallback) for Classic. North Light uses bundled Schibsted Grotesk, Graphite uses bundled Mona Sans, and Stanza uses bundled Hanken Grotesk — each for chrome only. Views re-value only `--ui`; `--mono`, persisted `editorFontFamily`, and persisted `terminalFontFamily` remain untouched and user-configurable.
 **Mono Font:** The shipped editor default is Spline Sans Mono (with ui-monospace, Menlo fallback); terminal typography follows its separate persisted setting.
 **Voice Font:** Fraunces italic (with Georgia, serif fallback)
 
@@ -129,14 +131,14 @@ The Classic Ink/Washi palette is a near-monochrome ink/paper ramp with a single 
 
 ## 4. Elevation
 
-Flat by default. Classic and Graphite surfaces carry no ambient shadow at rest — depth is conveyed by the bg-0→bg-4 tonal step, not by blur. Shadow exists only as a structural signal that a surface is floating above the layout: dropdowns, popovers, and modals. North Light is the sole intentional exception: its in-flow sheets use only the day/night `--sheet-shadow` token, and its terminal may use `--term-shadow`. Shadow color stays literal black (`rgba(0,0,0,X)`) in Classic/Graphite by convention rather than re-deriving per-theme.
+Flat by default. Classic, Graphite, and Stanza surfaces carry no ambient shadow at rest — depth is conveyed by the bg-0→bg-4 tonal step, not by blur. Shadow exists only as a structural signal that a surface is floating above the layout: dropdowns, popovers, and modals. North Light is the sole intentional exception: its in-flow sheets use only the day/night `--sheet-shadow` token, and its terminal may use `--term-shadow`. Shadow color stays literal black (`rgba(0,0,0,X)`) in Classic/Graphite/Stanza by convention rather than re-deriving per-theme.
 
 ### Shadow Vocabulary
 - **Dropdown** (`box-shadow: 0 4px 12px rgba(0,0,0,0.3)`): gitbar and lightweight dropdown menus.
 - **Floating panel** (`box-shadow: 0 10px 28px rgba(0,0,0,0.45)`): automation drawer, deeper popovers that sit further above the surface.
 
 ### Named Rules
-**The Floating-Only Rule.** In Classic and Graphite, shadow appears exclusively on elements that are `position: absolute/fixed` above the base layout. North Light alone may elevate its static sheets through `--sheet-shadow` and its terminal through `--term-shadow`; any other in-flow shadow is a bug.
+**The Floating-Only Rule.** In Classic, Graphite, and Stanza, shadow appears exclusively on elements that are `position: absolute/fixed` above the base layout. North Light alone may elevate its static sheets through `--sheet-shadow` and its terminal through `--term-shadow`; any other in-flow shadow is a bug.
 
 ## 5. Components
 
@@ -173,13 +175,13 @@ Every control is small, dense, and icon- or label-led — there is no large mark
 ### Do:
 - **Do** keep ink and washi on one token set — a new color must be added as a variable pair in both `:root` and `.theme-washi`, never hardcoded per-theme.
 - **Do** keep the type scale inside 9.5–15px for all UI chrome; let mono/terminal content set its own size independently.
-- **Do** reserve Classic jade (`#4ade93` / `#0f8a5f`) for active/on/signal state only; Graphite follows its separate one-blue-signal rule.
+- **Do** reserve Classic jade (`#4ade93` / `#0f8a5f`) for active/on/signal state only; Graphite, North Light, and Stanza each follow their own separate one-signal rule.
 - **Do** keep shadows literal black and reserved for floating/overlay surfaces only.
 - **Do** favor icon-glyph and pill controls consistent with the existing dense, instrumented chrome; a new control should look like it belongs next to `.glyph`/`.sbtn`, not like an imported design-system button.
 
 ### Don't:
 - **Don't** build toward an Electron/VS Code-clone look — no heavy multi-panel chrome, no extension-marketplace visual language, no sprawling top-level menu bloat.
-- **Don't** introduce a second saturated active accent within a view; Classic uses jade and Graphite uses Primer blue. Use diff colors only for git semantics, or a neutral tonal step for non-active distinctions.
-- **Don't** use `border-left` as a colored accent stripe for "current"/"active" rows — use the view-scoped signal wash (`--em-wash-row`; jade in Classic, Primer blue in Graphite).
+- **Don't** introduce a second saturated active accent within a view; Classic uses jade, Graphite uses Primer blue, North Light uses ultramarine, and Stanza uses verdigris/teal. Use diff colors only for git semantics, or a neutral tonal step for non-active distinctions.
+- **Don't** use `border-left` as a colored accent stripe for "current"/"active" rows — use the view-scoped signal wash (`--em-wash-row`; jade in Classic, Primer blue in Graphite, ultramarine in North Light, verdigris/teal in Stanza).
 - **Don't** add card-style elevation/shadow to static, in-flow panels; flat is the resting state everywhere except dropdowns and popovers.
 - **Don't** reach for Fraunces/voice type for UI chrome — it is reserved for rare, deliberate voice moments, not headings or labels.
