@@ -27,6 +27,8 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
   - Surface producer state and North seam pills/whisper host migration. Existing terminal/composer/browser/diff hosts retain ownership.
 - `src/drawer.ts`
   - North sidebar drawer controller, DOM host placement, focus/Escape behavior, and guarded shortcut handling. The ledger shortcut is ignored while this drawer or a blocking overlay is open.
+- `src/rooms.ts`
+  - Pure stanza room router: fixed surface presets per room applied through injected setters (throw-isolated per call, primary focus last), current-room memory, and change subscription. No app-module imports; `main.ts` owns the tablist DOM, ⌘1–4 routing, and badge refresh.
 - `src/editor.ts`, `src/terminal.ts`, `src/browser.ts`, `src/diff.ts`, `src/composer.ts`, `src/annotations.ts`
   - Existing primary content surfaces. View changes restyle or relocate hosts without changing their content ownership.
 - `src/ipc.ts`
@@ -77,6 +79,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - `tests/turn-actions.test.ts` pins shared action forwarding, async settlement, and refresh behavior.
 - `tests/tasks.test.ts` pins deterministic owner mutation and durable task review round trips.
 - `tests/agent-tracking.test.ts` pins rollback eligibility, scope transitions, turn cache/test state, and turn-strip behavior.
+- `tests/rooms.test.ts` pins the room-router seam: full-preset application order, same-room re-entry, run-preset shape, write default, and per-setter throw isolation.
 - `tests/drawer.test.ts`, `tests/north-seam.test.ts`, and settings/style source checks protect North-only placement and Classic/other-view isolation.
 - Unit/static proof does not clear native layout/action behavior. `VERIFY-LEDGER.md` MV-6 remains BLOCKED until the manual `npm run tauri dev` script is observed.
 

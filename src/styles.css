@@ -4505,3 +4505,97 @@ body.app-hidden *::after {
     transition: none;
   }
 }
+
+/* ── W3/T7 Stanza rooms: room tablist + hearth strip. ── */
+/* Sanctioned base rule: the tablist is a dynamic host built only on stanza entry;
+   keep it inert should any transitional frame render it without the root class. */
+.room-tablist {
+  display: none;
+}
+:root.view-stanza .room-tablist {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--ui);
+}
+:root.view-stanza .room-tab {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 150ms ease-out;
+}
+:root.view-stanza .room-tab:hover {
+  background: transparent;
+  color: var(--fg);
+}
+:root.view-stanza .room-tab.active {
+  color: var(--fg);
+  font-weight: 550;
+}
+:root.view-stanza .room-tab.active::before {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--em);
+}
+/* Run pulse: live terminal session(s) behind the Run room. */
+:root.view-stanza .room-tab-live::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 0 1px 5px;
+  border-radius: 999px;
+  background: var(--em);
+  animation: stanza-room-live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes stanza-room-live-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+/* Review dot: linked turns awaiting review disposition. */
+:root.view-stanza .room-tab-dot::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 0 1px 5px;
+  border-radius: 999px;
+  background: var(--diff-mod);
+}
+/* Hearth strip: CSS-only restyle of the existing whisper-bar chip host — a
+   warm, inset footer band; no new DOM, Classic keeps its own base rule. */
+:root.view-stanza #whisper-bar {
+  flex: 0 0 30px;
+  margin: 0 10px 8px;
+  padding: 0 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root.view-stanza .room-tab {
+    transition: none;
+  }
+  :root.view-stanza .room-tab-live::after {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

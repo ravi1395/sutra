@@ -209,6 +209,7 @@ import {
   taskCheckEvidence,
   AUTOMATION_OUTPUT_TAIL_LIMIT,
   TASK_CHECK_TIMEOUT_MS,
+  unresolvedTurnCount,
   type Task,
 } from "./tasks";
 import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
@@ -236,6 +237,7 @@ import {
 } from "./drawer";
 import { createTurnActions, waitForRollbackAction } from "./turn-actions";
 import { mountLedger } from "./ledger";
+import { createRoomRouter, type RoomId } from "./rooms";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -930,11 +932,17 @@ function applySettings(next: UserSettings): void {
     syncSidebarView(previousView, settings.view);
     editor.renderAllTabs();
     syncGraphiteBottomPanel();
+    syncRoomTablist();
     whisperHostCache.reset((host) => host.replaceChildren());
     northSurfacePills.replaceChildren();
     renderWhisperBar();
     if (latestSurfaces) renderSurfacePills(latestSurfaces);
     refreshTurnActionConsumers();
+    // Entering stanza applies the remembered room preset over whatever layout was
+    // in place. Boot's first applySettings call runs before persisted UI state
+    // (drawer heights) is restored — deferred there via the same guard so the
+    // preset never races that restore; leaving stanza intentionally restores nothing.
+    if (settings.view === "stanza" && uiStateLoaded) roomRouter.enterRoom(roomRouter.currentRoom());
   }
   terminals.retheme();
   const rootStyle = document.documentElement.style;
@@ -1349,6 +1357,8 @@ function refreshTurnActionConsumers(): void {
     turns: currentRoot ? getTurns(currentRoot) : [],
     tasks: latestTasks,
   });
+  // Review-room dot rides the same task/turn refresh path — no new polling.
+  renderRoomTablist();
 }
 
 const turnActions = createTurnActions({
@@ -1967,6 +1977,7 @@ btnTasks.onclick = () => setTasks(tasksPane.classList.contains("hidden"));
 
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
+diffPane.tabIndex = -1; // programmatic room-focus target only, never in tab order
 const diffRes = $("diff-resizer");
 const btnDiff = $("btn-diff");
 function setDiff(on: boolean): void {
@@ -2179,6 +2190,101 @@ function setSidebar(on: boolean): void {
   }
   setDockedSidebar(on);
 }
+
+// Best-effort primary-surface focus for a room preset; each target degrades to a no-op
+// if that surface has nothing focusable yet (e.g. terminal still spinning up a session).
+function focusRoomSurface(target: "editor" | "terminal" | "diff" | "browser"): void {
+  if (target === "editor") editor.focused.view.focus();
+  else if (target === "terminal") terminals.focusActive();
+  else if (target === "browser") $<HTMLInputElement>("browser-url").focus();
+  else diffPane.focus();
+}
+
+// One shared stanza room router: presets drive the existing surface setters, never a
+// second source of truth for terminal/browser/diff/composer/sidebar visibility.
+const roomRouter = createRoomRouter({
+  setTerminal,
+  setBrowser,
+  setDiff,
+  setComposer,
+  setSidebar,
+  focus: focusRoomSurface,
+});
+
+const ROOM_TABS: readonly { id: RoomId; label: string }[] = [
+  { id: "write", label: "Write" },
+  { id: "run", label: "Run" },
+  { id: "review", label: "Review" },
+  { id: "web", label: "Web" },
+];
+let roomTablist: HTMLElement | null = null;
+
+// Active-tab highlight + Run/Review badges. Reuses terminals.liveCount() and the
+// existing latestTasks cache — no new polling.
+function renderRoomTablist(): void {
+  if (!roomTablist) return;
+  const current = roomRouter.currentRoom();
+  const runLive = terminals.liveCount() > 0;
+  const reviewDue = unresolvedTurnCount(latestTasks) > 0;
+  roomTablist.querySelectorAll<HTMLButtonElement>(".room-tab").forEach((tab) => {
+    const id = tab.dataset.room as RoomId;
+    const active = id === current;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    tab.classList.toggle("room-tab-live", id === "run" && runLive);
+    tab.classList.toggle("room-tab-dot", id === "review" && reviewDue);
+  });
+}
+
+function handleRoomTablistKeydown(event: KeyboardEvent, room: RoomId): void {
+  const index = ROOM_TABS.findIndex((tab) => tab.id === room);
+  let next: RoomId | null = null;
+  if (event.key === "ArrowRight") next = ROOM_TABS[(index + 1) % ROOM_TABS.length].id;
+  else if (event.key === "ArrowLeft") next = ROOM_TABS[(index - 1 + ROOM_TABS.length) % ROOM_TABS.length].id;
+  else if (event.key === "Home") next = ROOM_TABS[0].id;
+  else if (event.key === "End") next = ROOM_TABS[ROOM_TABS.length - 1].id;
+  if (!next) return;
+  event.preventDefault();
+  roomRouter.enterRoom(next);
+  roomTablist?.querySelector<HTMLButtonElement>(`[data-room="${next}"]`)?.focus();
+}
+
+// Builds/tears down the room tablist strip on stanza entry/exit — mirrors the
+// graphite band-tab row's dynamic-DOM lifecycle (syncGraphiteBottomPanel).
+function syncRoomTablist(): void {
+  if (!document.documentElement.classList.contains("view-stanza")) {
+    if (roomTablist) {
+      roomTablist.remove();
+      roomTablist = null;
+    }
+    return;
+  }
+  if (roomTablist) return;
+  const list = document.createElement("div");
+  list.className = "room-tablist";
+  list.setAttribute("role", "tablist");
+  list.setAttribute("aria-orientation", "horizontal");
+  list.setAttribute("aria-label", "Room");
+  for (const { id, label } of ROOM_TABS) {
+    const tab = document.createElement("button");
+    tab.className = "room-tab";
+    tab.type = "button";
+    tab.id = `room-tab-${id}`;
+    tab.dataset.room = id;
+    tab.setAttribute("role", "tab");
+    tab.textContent = label;
+    tab.onclick = () => roomRouter.enterRoom(id);
+    tab.onkeydown = (event) => handleRoomTablistKeydown(event, id);
+    list.append(tab);
+  }
+  roomTablist = list;
+  $("body").before(list);
+  renderRoomTablist();
+}
+roomRouter.onRoomChange(() => renderRoomTablist());
+// Run-room pulse rides the existing session-liveness notifications — no new polling.
+terminals.onSessionsChanged(() => renderRoomTablist());
 
 async function openSidebarFile(path: string, line?: number): Promise<void> {
   await editor.openFile(path, line);
@@ -3033,6 +3139,21 @@ window.addEventListener("keydown", (e) => {
     ledger.toggle();
     return;
   }
+  // ⌘1–4 stanza room switch: physical Digit codes, stanza-only, suppressed while a
+  // blocking overlay (palette/settings/rollback/task-modal) or the drawer is open.
+  if (
+    settings.view === "stanza"
+    && e.metaKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && /^Digit[1-4]$/.test(e.code)
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    roomRouter.enterRoom(ROOM_TABS[Number(e.code.slice(5)) - 1].id);
+    return;
+  }
   if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
@@ -3588,6 +3709,10 @@ void (async function boot(): Promise<void> {
   }
   setTerminal(drawerState.open);
   syncSurfacesFromUi();
+  // Deferred from applySettings' boot-time call (uiStateLoaded was still false
+  // there): booting straight into stanza applies the room preset only now that
+  // drawer heights/panel visibility have been restored.
+  if (settings.view === "stanza") roomRouter.enterRoom(roomRouter.currentRoom());
 
   // One-shot on upgrade: port pre-migration recents/trustedRoots into the
   // backend, then seed the trusted set from folders already in recents so
