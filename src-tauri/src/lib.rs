@@ -294,6 +294,8 @@ pub fn run() {
             git::git_branch,
             git::git_ahead_behind,
             git::git_changed_files,
+            git::git_branch_diff_files,
+            git::git_commit_content,
             git::git_worktrees,
             git::git_branches,
             git::git_checkout,

@@ -165,65 +165,22 @@ pub fn git_ahead_behind(root: String) -> Result<Option<AheadBehindResult>, Strin
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ChangedFile {
     pub path: String,
     pub status: String,
 }
 
-/// Files changed relative to merge-base of HEAD and base ref.
-/// Falls back to HEAD tree if no base ref. Returns paths relative to root.
-#[tauri::command]
-pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
-    let repo = match Repository::discover(&root) {
-        Ok(r) => r,
-        Err(_) => return Ok(vec![]),
-    };
-
-    let workdir = match repo.workdir() {
-        Some(w) => w.to_path_buf(),
-        None => return Ok(vec![]),
-    };
-
-    // Resolve base tree using same logic as git_ahead_behind
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return Ok(vec![]),
-    };
-    let head_oid = match head.target() {
-        Some(oid) => oid,
-        None => return Ok(vec![]),
-    };
-
-    let base_ref_names = ["origin/main", "origin/master", "main"];
-    let mut base_tree = None;
-
-    for ref_name in &base_ref_names {
-        match repo.resolve_reference_from_short_name(ref_name) {
-            Ok(r) => {
-                if let Some(target_oid) = r.target() {
-                    if let Ok(tree) = repo.find_commit(target_oid).and_then(|c| c.tree()) {
-                        base_tree = Some(tree);
-                        break;
-                    }
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-
-    // Fallback to HEAD tree if no base ref found
-    let base_tree = match base_tree {
-        Some(t) => t,
-        None => match repo.find_commit(head_oid).and_then(|c| c.tree()) {
-            Ok(t) => t,
-            Err(_) => return Ok(vec![]),
-        },
-    };
-
-    // Diff tree to workdir (includes untracked)
+/// Staged + worktree deltas of `base_tree`-vs-workdir (`_with_index` so
+/// staged-only edits still report), plus untracked files from a status pass
+/// (the with-index diff excludes them). Absolute paths.
+fn tree_vs_workdir_files(
+    repo: &Repository,
+    workdir: &Path,
+    base_tree: Option<&git2::Tree>,
+) -> Result<Vec<ChangedFile>, String> {
     let diff = repo
-        .diff_tree_to_workdir(Some(&base_tree), None)
+        .diff_tree_to_workdir_with_index(base_tree, None)
         .map_err(|e| e.to_string())?;
 
     let mut statuses = Vec::new();
@@ -255,7 +212,6 @@ pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
     )
     .ok();
 
-    // Get untracked files
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
@@ -266,7 +222,6 @@ pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
             if entry.status().contains(git2::Status::WT_NEW) {
                 if let Ok(p) = entry.path() {
                     let full_path = workdir.join(p).to_string_lossy().into_owned();
-                    // Avoid duplicates
                     if !statuses.iter().any(|s| s.path == full_path) {
                         statuses.push(ChangedFile {
                             path: full_path,
@@ -279,6 +234,114 @@ pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
     }
 
     Ok(statuses)
+}
+
+/// Files changed relative to git HEAD (the app-wide diff baseline): staged +
+/// worktree modifications plus untracked files. Absolute paths.
+#[tauri::command]
+pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
+    let repo = match Repository::discover(&root) {
+        Ok(r) => r,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let workdir = match repo.workdir() {
+        Some(w) => w.to_path_buf(),
+        None => return Ok(vec![]),
+    };
+
+    // Baseline is the HEAD tree — same baseline as the gutter and per-hunk
+    // diffs (git_head_content). Unborn branch → nothing tracked yet; the
+    // untracked pass still reports new files.
+    let head_tree = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .and_then(|c| c.tree())
+        .ok();
+
+    tree_vs_workdir_files(&repo, &workdir, head_tree.as_ref())
+}
+
+#[derive(Serialize, Debug)]
+pub struct BranchDiffFiles {
+    /// Base ref the merge-base was computed against (e.g. "origin/main").
+    pub base: String,
+    /// Merge-base commit id (full hex) — hunk expansion must diff against
+    /// blobs of exactly this commit so list and hunks can never disagree.
+    pub oid: String,
+    pub files: Vec<ChangedFile>,
+}
+
+/// Branch-review file list: everything the branch has done — committed work,
+/// staged, worktree edits, untracked — relative to the merge-base of HEAD and
+/// the first of origin/main / origin/master / main that resolves. Merge-base
+/// (not base tip) so commits landing on main after the fork never show up as
+/// branch changes. Errors (no base ref, unborn HEAD, no merge base) surface to
+/// the UI as a status line rather than an empty list.
+#[tauri::command]
+pub fn git_branch_diff_files(root: String) -> Result<BranchDiffFiles, String> {
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("bare repository has no worktree to diff")?
+        .to_path_buf();
+    let head_oid = repo
+        .head()
+        .ok()
+        .and_then(|h| h.target())
+        .ok_or("no commits on HEAD yet")?;
+    let (base_name, base_oid) = ["origin/main", "origin/master", "main"]
+        .iter()
+        .find_map(|name| {
+            let reference = repo.resolve_reference_from_short_name(name).ok()?;
+            Some(((*name).to_string(), reference.peel_to_commit().ok()?.id()))
+        })
+        .ok_or("no base ref found (tried origin/main, origin/master, main)")?;
+    let merge_base = repo
+        .merge_base(head_oid, base_oid)
+        .map_err(|e| format!("no merge base with {base_name}: {}", e.message()))?;
+    let base_tree = repo
+        .find_commit(merge_base)
+        .and_then(|c| c.tree())
+        .map_err(|e| e.to_string())?;
+    let files = tree_vs_workdir_files(&repo, &workdir, Some(&base_tree))?;
+    Ok(BranchDiffFiles {
+        base: base_name,
+        oid: merge_base.to_string(),
+        files,
+    })
+}
+
+/// Content of `path` (absolute, inside `root`'s worktree) at commit `oid`;
+/// None when the path doesn't exist at that commit or isn't a blob — same
+/// "no diff baseline" semantics as git_head_content. Invalid/unknown oid is a
+/// hard error: the caller passed a commit id it got from git_branch_diff_files,
+/// so a miss means state drift, not a normal empty baseline.
+#[tauri::command]
+pub fn git_commit_content(root: String, oid: String, path: String) -> Result<Option<String>, String> {
+    let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("bare repository has no worktree")?
+        .to_path_buf();
+    let oid = git2::Oid::from_str(&oid).map_err(|e| e.to_string())?;
+    let tree = repo
+        .find_commit(oid)
+        .and_then(|c| c.tree())
+        .map_err(|e| e.to_string())?;
+    let rel = match Path::new(&path).strip_prefix(&workdir) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    match tree.get_path(rel) {
+        Ok(entry) => {
+            let obj = entry.to_object(&repo).map_err(|e| e.to_string())?;
+            Ok(obj
+                .as_blob()
+                .map(|blob| String::from_utf8_lossy(blob.content()).into_owned()))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 #[derive(Serialize)]
@@ -977,6 +1040,105 @@ mod tests {
         let main_b = branches.iter().find(|b| b.name == "main").unwrap();
         assert!(!main_b.in_other_worktree, "main is the current root's branch");
         assert!(main_b.is_current);
+    }
+
+    #[test]
+    fn changed_files_empty_when_branch_committed_and_clean() {
+        // Baseline is HEAD, not main/origin-main: a branch whose work is fully
+        // committed (clean worktree) must report no changed files, even though
+        // it differs from `main` — otherwise the diff panel lists every
+        // committed file as M with zero hunks ("no text hunks").
+        let dir = repo_with_branch();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "feature"]);
+        fs::write(p.join("a.txt"), "hello\nfeature\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        run(p, &["commit", "-qm", "feature work"]);
+
+        let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(files.len(), 0, "clean tree vs HEAD → no rows, got {files:?}");
+    }
+
+    #[test]
+    fn changed_files_reports_staged_and_untracked() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "hello\nstaged\n").unwrap();
+        run(p, &["add", "a.txt"]); // staged-only modification
+        fs::write(p.join("new.txt"), "fresh\n").unwrap(); // untracked
+
+        let mut files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let rel: Vec<(String, String)> = files
+            .iter()
+            .map(|f| (Path::new(&f.path).file_name().unwrap().to_string_lossy().into_owned(), f.status.clone()))
+            .collect();
+        assert_eq!(rel, vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]);
+    }
+
+    #[test]
+    fn branch_diff_lists_branch_work_vs_merge_base_not_main_tip() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        // main moves on AFTER the fork point: c.txt must NOT appear in the
+        // feature branch's diff (merge-base baseline, not main tip).
+        fs::write(p.join("c.txt"), "main only\n").unwrap();
+        run(p, &["add", "c.txt"]);
+        run(p, &["commit", "-qm", "main moves on"]);
+        run(p, &["checkout", "-q", "feature"]);
+        // Committed branch work (tree clean afterwards) + one untracked file.
+        fs::write(p.join("a.txt"), "hello\nfeature\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        run(p, &["commit", "-qm", "feature work"]);
+        fs::write(p.join("new.txt"), "fresh\n").unwrap();
+
+        let bd = git_branch_diff_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(bd.base, "main", "no remotes in fixture → local main");
+        let mut rel: Vec<(String, String)> = bd
+            .files
+            .iter()
+            .map(|f| (Path::new(&f.path).file_name().unwrap().to_string_lossy().into_owned(), f.status.clone()))
+            .collect();
+        rel.sort();
+        assert_eq!(rel, vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]);
+    }
+
+    #[test]
+    fn commit_content_serves_merge_base_blob() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "feature"]);
+        fs::write(p.join("a.txt"), "hello\nfeature\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        run(p, &["commit", "-qm", "feature work"]);
+        fs::write(p.join("new.txt"), "fresh\n").unwrap();
+
+        let root = p.to_string_lossy().into_owned();
+        let bd = git_branch_diff_files(root.clone()).unwrap();
+        // Paths straight from the file list — exactly what the frontend passes back.
+        let a_path = bd.files.iter().find(|f| f.path.ends_with("a.txt")).unwrap().path.clone();
+        let new_path = bd.files.iter().find(|f| f.path.ends_with("new.txt")).unwrap().path.clone();
+
+        let base = git_commit_content(root.clone(), bd.oid.clone(), a_path).unwrap();
+        assert_eq!(base.as_deref(), Some("hello\n"), "blob at fork point, not branch tip");
+        let missing = git_commit_content(root.clone(), bd.oid.clone(), new_path).unwrap();
+        assert_eq!(missing, None, "file absent at merge-base → no baseline");
+        assert!(git_commit_content(root, "not-a-sha".into(), "x".into()).is_err());
+    }
+
+    #[test]
+    fn branch_diff_errs_without_base_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        run(p, &["init", "-q", "-b", "trunk"]);
+        run(p, &["config", "user.email", "t@t.t"]);
+        run(p, &["config", "user.name", "t"]);
+        fs::write(p.join("a.txt"), "hello\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        run(p, &["commit", "-qm", "init"]);
+
+        let err = git_branch_diff_files(p.to_string_lossy().into_owned()).unwrap_err();
+        assert!(err.contains("no base ref"), "got: {err}");
     }
 
     #[test]
