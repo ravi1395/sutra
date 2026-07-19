@@ -633,6 +633,64 @@ test("rollback action lifecycle: apply failure then successful retry resolves th
   }
 });
 
+test("rollback action lifecycle: hard onApply throw through a catch/rethrow wrapper stays retryable and refreshes once on success", async () => {
+  const { body, restore } = setupDom();
+  try {
+    const turns = [t(1, [f("a.ts", "h0", "h1", true)])];
+    let refreshes = 0;
+    let attempt = 0;
+    const applyTurnRollback = async (paths: string[]): Promise<RollbackResult> => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("ipc backend down");
+      return { restored: paths, failed: [] };
+    };
+    const actions = createTurnActions({
+      openReviewDiff: () => {},
+      rollbackTurn: () => waitForRollbackAction((lifecycle) => {
+        openRollbackDialog("/r", turns[0], {
+          turns,
+          // Mirrors main.ts openTurnRollback's onApply wrapper: a hard throw
+          // (IPC/backend failure) must propagate to the dialog WITHOUT the
+          // wrapper pre-settling the lifecycle — close() owns settlement.
+          // Regression guard for 0514e33: a `lifecycle.failed(error)` here
+          // before the rethrow makes the successful retry's refresh a no-op.
+          onApply: async (paths) => {
+            try {
+              return await applyTurnRollback(paths);
+            } catch (error) {
+              throw error;
+            }
+          },
+          getDiskHashes: async () => ({ "a.ts": "h1" }),
+          lifecycle,
+        });
+      }),
+      refresh: () => { refreshes += 1; },
+    });
+
+    const pending = actions.rollback(1);
+    const overlay = body.children[body.children.length - 1];
+    await flush();
+    await flush();
+
+    // First attempt hard-throws — dialog must stay open, action unsettled.
+    findByText(overlay, "Apply rollback")!.onclick?.();
+    await flush();
+    await flush();
+    assert.equal(overlay.removed, false, "dialog stays open after a hard apply throw");
+    assert.equal(refreshes, 0);
+
+    // Retry succeeds — must resolve the action and refresh exactly once.
+    findByText(overlay, "Apply rollback")!.onclick?.();
+    await pending;
+
+    assert.equal(overlay.removed, true, "success on retry must close the dialog");
+    assert.equal(refreshes, 1, "a rollback that ultimately applied must trigger exactly one refresh");
+  } finally {
+    restore();
+  }
+});
+
 test("rollback action lifecycle: checklist rejection settles while preserving the visible dialog error", async () => {
   const { body, restore } = setupDom();
   try {
