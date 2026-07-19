@@ -406,7 +406,10 @@ export function turnDropdownEl(
 
 // --- Turn-scoped diff mode (turn-UX rehaul P2) ---
 
-export type DiffScope = { kind: "workspace" } | { kind: "turn"; turnId: number };
+export type DiffScope =
+  | { kind: "workspace" }
+  | { kind: "turn"; turnId: number }
+  | { kind: "branch" };
 
 /** Enter turn-scoped diff mode for `turn`; a no-op (returns `current`
  * unchanged, by reference) for the still-open (unclosed) turn — scoped
@@ -417,9 +420,17 @@ export function enterTurnScope(current: DiffScope, turn: Turn): DiffScope {
   return { kind: "turn", turnId: turn.id };
 }
 
-/** Exit turn-scoped diff mode back to the normal working-tree view. */
+/** Exit any scoped diff mode (turn or branch) back to the normal
+ * working-tree view. */
 export function exitTurnScope(): DiffScope {
   return { kind: "workspace" };
+}
+
+/** Enter branch-review diff mode: file list + hunks against the merge-base
+ * of HEAD and main/master instead of git HEAD. Read-only (no accept/reject —
+ * committed work can't be hunk-reverted from the panel). */
+export function enterBranchScope(): DiffScope {
+  return { kind: "branch" };
 }
 
 /** Render-relevant signature for `.turn-strip`: identical output across two
@@ -442,7 +453,7 @@ export function turnStripRenderKey(
   const turnsKey = turns
     .map((t) => `${t.id}:${t.closedAt ?? "open"}:${t.rolledBack ? 1 : 0}:${t.testStatus?.state ?? ""}:${t.files.length}`)
     .join(",");
-  const scopeKey = scope.kind === "turn" ? `turn:${scope.turnId}` : "workspace";
+  const scopeKey = scope.kind === "turn" ? `turn:${scope.turnId}` : scope.kind;
   const minuteBucket = Math.floor(nowMs / 60000);
   return `${turnsKey}|${scopeKey}|${dropdownOpen ? 1 : 0}|${visibleCount}|${minuteBucket}`;
 }
@@ -490,6 +501,27 @@ export function turnBreadcrumbEl(
     rollback.onclick = () => onRollback(turn);
     bar.appendChild(rollback);
   }
+  return bar;
+}
+
+/** `.turn-breadcrumb`-styled bar shown atop the diff pane while branch-scoped:
+ * `Branch diff vs {base} @ {short-oid} · ✕ back to working tree`. `base` null
+ * until the first fetch resolves (label shows an ellipsis placeholder). */
+export function branchBreadcrumbEl(
+  base: { label: string; oid: string } | null,
+  onExit: () => void,
+): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "turn-breadcrumb branch-breadcrumb";
+  const label = document.createElement("span");
+  label.className = "turn-breadcrumb-label";
+  label.textContent = base ? `Branch diff vs ${base.label} @ ${base.oid.slice(0, 7)} ·` : "Branch diff …";
+  bar.appendChild(label);
+  const exit = document.createElement("button");
+  exit.className = "turn-breadcrumb-exit";
+  exit.textContent = "✕ back to working tree";
+  exit.onclick = onExit;
+  bar.appendChild(exit);
   return bar;
 }
 

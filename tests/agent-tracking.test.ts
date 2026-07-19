@@ -253,6 +253,8 @@ test("suppressibleCancelledIds swallows a cancel that throws (W3.7)", async () =
 // --- Turn-UX rehaul P1: collapsed summary row + dropdown ---
 import {
   agentLabel,
+  branchBreadcrumbEl,
+  enterBranchScope,
   enterTurnScope,
   exitTurnScope,
   olderTurnsCount,
@@ -499,6 +501,38 @@ test("exitTurnScope: always restores the workspace (normal) scope", () => {
   assert.deepEqual(exitTurnScope(), { kind: "workspace" });
 });
 
+test("enterBranchScope: returns branch scope", () => {
+  assert.deepEqual(enterBranchScope(), { kind: "branch" });
+});
+
+test("branchBreadcrumbEl: resolved base renders label with short oid; exit wired", () => {
+  const restore = setupFakeDom();
+  try {
+    let exited = false;
+    const bar = branchBreadcrumbEl(
+      { label: "origin/main", oid: "0123456789abcdef" },
+      () => (exited = true),
+    ) as unknown as FakeElement;
+    const label = findAllByClass(bar, "turn-breadcrumb-label")[0];
+    assert.equal(label.textContent, "Branch diff vs origin/main @ 0123456 ·");
+    const exit = findAllByClass(bar, "turn-breadcrumb-exit")[0];
+    exit.onclick?.();
+    assert.equal(exited, true);
+  } finally {
+    restore();
+  }
+});
+
+test("branchBreadcrumbEl: null base (first fetch in flight) renders placeholder", () => {
+  const restore = setupFakeDom();
+  try {
+    const bar = branchBreadcrumbEl(null, () => {}) as unknown as FakeElement;
+    assert.equal(findAllByClass(bar, "turn-breadcrumb-label")[0].textContent, "Branch diff …");
+  } finally {
+    restore();
+  }
+});
+
 // --- turnStripRenderKey (F1: skip poll-driven rebuilds that wouldn't visibly change anything) ---
 
 const workspaceScope: DiffScope = { kind: "workspace" };
@@ -548,9 +582,12 @@ test("turnStripRenderKey: changes with scope, dropdown-open state, and paging vi
   const turns = [closedTurn(1, 1000)];
   const workspaceKey = turnStripRenderKey(turns, workspaceScope, false, 6, 5000);
   const scopedKey = turnStripRenderKey(turns, { kind: "turn", turnId: 1 }, false, 6, 5000);
+  const branchKey = turnStripRenderKey(turns, { kind: "branch" }, false, 6, 5000);
   const openKey = turnStripRenderKey(turns, workspaceScope, true, 6, 5000);
   const pagedKey = turnStripRenderKey(turns, workspaceScope, false, 26, 5000);
   assert.notEqual(workspaceKey, scopedKey);
+  assert.notEqual(workspaceKey, branchKey);
+  assert.notEqual(scopedKey, branchKey);
   assert.notEqual(workspaceKey, openKey);
   assert.notEqual(workspaceKey, pagedKey);
 });

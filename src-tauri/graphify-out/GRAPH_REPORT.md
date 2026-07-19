@@ -1,16 +1,16 @@
 # Graph Report - src-tauri  (2026-07-19)
 
 ## Corpus Check
-- 37 files · ~70,382 words
+- 37 files · ~71,091 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1296 nodes · 3582 edges · 33 communities
+- 1306 nodes · 3625 edges · 33 communities
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 29 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0514e334`
+- Built from commit: `b90c41ee`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -55,8 +55,8 @@
 6. `Option` - 32 edges
 7. `String` - 32 edges
 8. `McpError` - 31 edges
-9. `CallToolResult` - 30 edges
-10. `String` - 28 edges
+9. `String` - 30 edges
+10. `CallToolResult` - 30 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `with_root_guard()` --calls--> `F`  [INFERRED]
@@ -104,7 +104,7 @@ Nodes (109): AgentKind, Metadata, ProcessInfo, Snapshot, accept_path_drops_pendi
 
 ### Community 2 - "Community 2"
 Cohesion: 0.07
-Nodes (48): agent_parent_origin_matches_dev_webview_origin(), agent_script(), auth_set_cookie_header(), copy_until_eof(), handle_conn(), Head, head_insert_index(), host_is_loopback() (+40 more)
+Nodes (49): agent_parent_origin_matches_dev_webview_origin(), agent_script(), auth_set_cookie_header(), copy_until_eof(), handle_conn(), Head, head_insert_index(), host_is_loopback() (+41 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.10
@@ -124,15 +124,15 @@ Nodes (43): connect_with_retry(), DapEvent, debug_send(), debug_start(), debug_s
 
 ### Community 7 - "Community 7"
 Cohesion: 0.13
-Nodes (29): canonicalize_in_root(), ErrorBody, file_url_path(), handle_client(), hex_val(), mime_for(), percent_decode(), percent_encode() (+21 more)
+Nodes (28): canonicalize_in_root(), ErrorBody, file_url_path(), handle_client(), hex_val(), mime_for(), percent_decode(), percent_encode() (+20 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.12
 Nodes (24): completion(), insert_best(), matches_prefix(), score(), IndexStats, build(), fuzzy_score(), index_file() (+16 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.10
-Nodes (69): AheadBehindResult, branches_bound_elsewhere(), branches_flag_head(), branches_flag_worktree_bound(), BranchInfo, canon(), canon_maybe_missing(), ChangedFile (+61 more)
+Cohesion: 0.09
+Nodes (79): AheadBehindResult, branch_diff_errs_without_base_ref(), branch_diff_lists_branch_work_vs_merge_base_not_main_tip(), BranchDiffFiles, branches_bound_elsewhere(), branches_flag_head(), branches_flag_worktree_bound(), BranchInfo (+71 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.18
@@ -215,23 +215,23 @@ Cohesion: 0.23
 Nodes (11): bind(), Frame, handle(), AppHandle, Option, Result, String, TcpListener (+3 more)
 
 ## Knowledge Gaps
-- **118 isolated node(s):** `$schema`, `identifier`, `description`, `windows`, `permissions` (+113 more)
+- **119 isolated node(s):** `$schema`, `identifier`, `description`, `windows`, `permissions` (+114 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `mcp_write_agent_config()` connect `Community 0` to `Community 10`, `Community 15`?**
-  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+  _High betweenness centrality (0.064) - this node is a cross-community bridge._
 - **Why does `capture_paths()` connect `Community 10` to `Community 0`, `Community 1`?**
-  _High betweenness centrality (0.063) - this node is a cross-community bridge._
+  _High betweenness centrality (0.060) - this node is a cross-community bridge._
 - **Why does `with_auth_token()` connect `Community 0` to `Community 2`, `Community 7`?**
-  _High betweenness centrality (0.037) - this node is a cross-community bridge._
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
 - **What connects `$schema`, `identifier`, `description` to the rest of the system?**
-  _118 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _119 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05125337806355419 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
   _Cohesion score 0.05281058101086443 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
-  _Cohesion score 0.07459207459207459 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07327001356852103 - nodes in this community are weakly interconnected._

@@ -54,7 +54,9 @@ import {
   createDir,
   movePath,
   copyPath,
+  gitBranchDiffFiles,
   gitChangedFiles,
+  gitCommitContent,
   gitCheckout,
   gitCreateWorktree,
   gitRemoveWorktree,
@@ -101,6 +103,8 @@ import {
 } from "./ipc";
 import {
   baseSourceFor,
+  branchBreadcrumbEl,
+  enterBranchScope,
   enterTurnScope,
   exitTurnScope,
   firstViewableAgentChange,
@@ -1041,12 +1045,15 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   // but skips its render/refresh calls, which would repaint the OLD root's
   // strip/file-list mid-switch — the new root's own poll-driven render
   // (later in this function) covers that.
-  if (diffScope.kind === "turn") resetTurnScope();
+  if (diffScope.kind !== "workspace") resetTurnScope();
   // Belt-and-suspenders beyond resetTurnScope's own clear: a rollback can set
   // diffScope back to "workspace" directly (bypassing resetTurnScope) while
   // leaving a populated cache behind, so clear it unconditionally here too —
   // a scoped blob cache must never survive into a different root.
   scopedDiffCache = null;
+  branchScopeBase = null;
+  branchBaseBlobCache = null;
+  editor.setScopedBaselines(null);
   // The dropdown's Esc/outside-click dismissers close over the OLD root, so
   // leaving it open would repaint stale turns if Esc fires mid-switch; this
   // also resets paging (turnDropdownVisibleCount) for the new root's view.
@@ -1287,7 +1294,14 @@ function openTurnReviewDiff(turnId: number): void {
   if (!target) return;
   const next = enterTurnScope(diffScope, target.turn);
   if (next === diffScope) return;
+  // Ledger "Review diff" can enter turn scope while branch scope is active —
+  // drop the branch scope's gutter baselines/caches first (else the editor
+  // would keep diffing against the merge-base during turn review), and the
+  // "vs main" toggle must unlight, or clicking it would re-enter branch
+  // scope instead of exiting (setBranchScope reads diffScope, not the class).
+  if (diffScope.kind === "branch") resetTurnScope();
   diffScope = next;
+  syncDiffScopeToggle();
   diffViewer.invalidate();
   closeTurnDropdown();
   // setDiff owns the one file-list refresh; this also opens the pane for the
@@ -1391,21 +1405,33 @@ let lastTurnStripKey: string | null = null;
 // A cached `null` means a prior IPC failure — also not retried every tick.
 let scopedDiffCache: { root: string; turnId: number; contents: Map<string, TurnFileContent | null> } | null = null;
 
-/** Drop turn-scoped diff mode's cached state (scope, blob cache, diffViewer's
- * scoped onExpand/onAccept closures) with no DOM work. Shared by
- * exitScopedDiff (user-triggered exit, which also repaints the current
- * root's strip/file-list) and openWorkspace's root-switch path, which must
- * NOT repaint the old root's strip while switching to a new one. Callers
- * check `diffScope.kind === "turn"` first, matching exitScopedDiff's
+// Branch-review scope state: merge-base identity from the last successful
+// gitBranchDiffFiles fetch (breadcrumb label + hunk baseline), and a blob
+// cache keyed by that immutable merge-base commit. A cached `null` = no
+// baseline at merge-base (added file) or a prior IPC failure — not retried
+// every poll tick.
+let branchScopeBase: { label: string; oid: string } | null = null;
+let branchBaseBlobCache: { root: string; oid: string; contents: Map<string, string | null> } | null = null;
+
+/** Drop scoped diff mode's (turn or branch) cached state — scope, blob
+ * caches, diffViewer's scoped onExpand/onAccept closures — with no DOM work.
+ * Shared by exitScopedDiff (user-triggered exit, which also repaints the
+ * current root's strip/file-list) and openWorkspace's root-switch path, which
+ * must NOT repaint the old root's strip while switching to a new one. Callers
+ * check `diffScope.kind !== "workspace"` first, matching exitScopedDiff's
  * existing no-op-when-not-scoped behavior. */
 function resetTurnScope(): void {
   diffScope = exitTurnScope();
   scopedDiffCache = null;
+  branchScopeBase = null;
+  branchBaseBlobCache = null;
+  editor.setScopedBaselines(null); // gutter back to HEAD baseline + revert re-enabled
   diffViewer.invalidate();
+  syncDiffScopeToggle();
 }
 
 function exitScopedDiff(root: string): void {
-  if (diffScope.kind !== "turn") return;
+  if (diffScope.kind === "workspace") return;
   resetTurnScope();
   renderTurnStrip(root);
   void refreshDiffFileList();
@@ -1445,13 +1471,24 @@ function renderTurnStrip(root: string): void {
   // changed since the last call — this is what preserves an open dropdown's
   // scrollTop across polling (rebuilding always resets it). Root-prefixed so
   // a workspace switch never spuriously compares equal to the old root.
-  const key = `${root}::${turnStripRenderKey(turns, diffScope, turnDropdownOpen, turnDropdownVisibleCount, Date.now())}`;
+  // Branch scope: merge-base oid rides the key so the breadcrumb rebuilds
+  // once the first fetch resolves the placeholder label into a real base.
+  const branchKey = diffScope.kind === "branch" ? branchScopeBase?.oid ?? "pending" : "";
+  const key = `${root}::${turnStripRenderKey(turns, diffScope, turnDropdownOpen, turnDropdownVisibleCount, Date.now())}::${branchKey}`;
   if (!isFreshStrip && key === lastTurnStripKey) return;
   lastTurnStripKey = key;
 
   const existingDropdown = document.getElementById("turn-dropdown");
   const savedScrollTop = existingDropdown ? existingDropdown.scrollTop : null;
   strip.textContent = "";
+
+  if (diffScope.kind === "branch") {
+    if (turnDropdownOpen) closeTurnDropdown();
+    const breadcrumb = branchBreadcrumbEl(branchScopeBase, () => exitScopedDiff(root));
+    breadcrumb.id = "branch-breadcrumb";
+    strip.appendChild(breadcrumb);
+    return; // .turn-summary/.turn-dropdown stay hidden while scoped
+  }
 
   if (scopedTurn) {
     if (turnDropdownOpen) closeTurnDropdown();
@@ -1499,7 +1536,7 @@ function renderTurnStrip(root: string): void {
 // the rollback dialog overlay is up so its own Esc-to-close (rollback-dialog.ts)
 // isn't compounded with also dropping the scope underneath it.
 document.addEventListener("keydown", (ev) => {
-  if (ev.key !== "Escape" || diffScope.kind !== "turn") return;
+  if (ev.key !== "Escape" || diffScope.kind === "workspace") return;
   if (document.querySelector(".rollback-overlay")) return;
   if (currentRoot) exitScopedDiff(currentRoot);
 });
@@ -1567,6 +1604,100 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
   });
 }
 
+// Branch-review file list: everything the branch changed vs the merge-base of
+// HEAD and main/master (committed + staged + worktree + untracked), hunks
+// diffed against blobs of exactly the merge-base commit the list came from —
+// list and hunks can never disagree the way the old vs-main list did against
+// HEAD-based hunks. Read-only: committed work can't be hunk-reverted, so no
+// accept/reject affordances (same rule as turn scope).
+async function refreshBranchDiffFileList(root: string): Promise<void> {
+  let bd;
+  try {
+    bd = await gitBranchDiffFiles(root);
+  } catch (e) {
+    if (currentRoot !== root || diffScope.kind !== "branch") return;
+    branchScopeBase = null;
+    editor.setScopedBaselines(null); // unusable scope → gutter falls back to HEAD
+    diffViewer.renderFileList([], null, {
+      onFilePick: () => {},
+      onExpand: async () => [],
+      onHunkPick: () => {},
+    });
+    diffViewer.renderStatus("Diff", `Branch diff unavailable: ${e}`);
+    return;
+  }
+  // The scope changed (or the root switched) while the fetch was in flight.
+  if (currentRoot !== root || diffScope.kind !== "branch") return;
+
+  if (branchScopeBase?.oid !== bd.oid || branchScopeBase?.label !== bd.base) {
+    branchScopeBase = { label: bd.base, oid: bd.oid };
+    renderTurnStrip(root); // breadcrumb placeholder → resolved base label
+    // A moved merge-base (main advanced past the old fork point) with a
+    // byte-identical file list would otherwise keep expanded rows' onExpand
+    // closures pinned to the old oid — force the list (and its closures) to
+    // rebuild whenever the baseline commit changes.
+    diffViewer.invalidate();
+  }
+  if (!branchBaseBlobCache || branchBaseBlobCache.root !== root || branchBaseBlobCache.oid !== bd.oid) {
+    branchBaseBlobCache = { root, oid: bd.oid, contents: new Map() };
+  }
+  const blobCache = branchBaseBlobCache.contents;
+  const baseOid = bd.oid;
+  const files = bd.files;
+  const activePath = editor.active?.path ?? null;
+
+  // Editor gutter follows the same merge-base baseline while branch-scoped:
+  // fetch base blobs for every listed file AND every open tab (an open tab
+  // outside the list still needs the scope baseline so its gutter can't
+  // disagree with the panel), then install them display-only (revert gated
+  // inside the editor). Poll-driven, so a tab opened mid-scope picks up its
+  // scoped gutter on the next 1.5s tick.
+  const scopedPaths = new Set<string>(files.map((file) => file.path));
+  for (const tab of editor.tabs) if (tab.path) scopedPaths.add(tab.path);
+  await Promise.all(
+    [...scopedPaths]
+      .filter((path) => !blobCache.has(path))
+      .map(async (path) => {
+        blobCache.set(path, await gitCommitContent(root, baseOid, path).catch(() => null));
+      }),
+  );
+  // Scope/root may have changed during the blob fetches.
+  if (currentRoot !== root || diffScope.kind !== "branch") return;
+  const scopedBaselines = new Map<string, string | null>();
+  for (const path of scopedPaths) scopedBaselines.set(path, blobCache.get(path) ?? null);
+  editor.setScopedBaselines(scopedBaselines);
+
+  if (files.length === 0) {
+    diffViewer.renderFileList([], null, {
+      onFilePick: () => {},
+      onExpand: async () => [],
+      onHunkPick: () => {},
+    });
+    diffViewer.renderStatus("Diff", `No changes vs ${bd.base} @ ${bd.oid.slice(0, 7)}`);
+    return;
+  }
+  diffViewer.renderFileList(files, activePath, {
+    onFilePick: (path: string) => void viewChangedPath(path),
+    onExpand: async (path: string) => {
+      try {
+        let base = blobCache.get(path);
+        if (base === undefined) {
+          base = await gitCommitContent(root, baseOid, path).catch(() => null);
+          blobCache.set(path, base);
+        }
+        const current = await readFile(path).catch(() => "");
+        return hunkSummaries(computeLineDiff(base ?? "", current).hunks);
+      } catch {
+        return [];
+      }
+    },
+    onHunkPick: (path: string, startLine: number) => {
+      const file = files.find((candidate) => candidate.path === path);
+      void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+    },
+  });
+}
+
 // ---- diff file list ----
 async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
@@ -1574,6 +1705,10 @@ async function refreshDiffFileList(): Promise<void> {
   renderTurnStrip(root);
   if (diffScope.kind === "turn") {
     await refreshScopedDiffFileList(root, diffScope.turnId);
+    return;
+  }
+  if (diffScope.kind === "branch") {
+    await refreshBranchDiffFileList(root);
     return;
   }
   try {
@@ -1997,6 +2132,35 @@ function setDiff(on: boolean): void {
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
+
+// ---- branch-review scope toggle (diff header "vs main" button) ----
+const btnDiffScope = $("diff-scope-toggle");
+function syncDiffScopeToggle(): void {
+  const on = diffScope.kind === "branch";
+  btnDiffScope.classList.toggle("on", on);
+  btnDiffScope.setAttribute("aria-pressed", on ? "true" : "false");
+}
+function setBranchScope(on: boolean): void {
+  if (on === (diffScope.kind === "branch")) return;
+  if (on) {
+    // Entering branch review from turn scope drops the turn scope's caches
+    // first (resetTurnScope), then re-enters as branch.
+    if (diffScope.kind === "turn") resetTurnScope();
+    diffScope = enterBranchScope();
+    closeTurnDropdown();
+    diffViewer.invalidate();
+    syncDiffScopeToggle();
+    if (currentRoot) {
+      renderTurnStrip(currentRoot);
+      void refreshDiffFileList();
+    }
+  } else if (currentRoot) {
+    exitScopedDiff(currentRoot); // resets scope + repaints strip/file list
+  } else {
+    resetTurnScope();
+  }
+}
+btnDiffScope.onclick = () => setBranchScope(diffScope.kind !== "branch");
 
 // ---- browser toggle ----
 const browserArea = $("browser-area");

@@ -97,7 +97,9 @@ const setLens = StateEffect.define<LensSpec | null>();
 
 interface LensSpec extends LensModel {
   anchorLine: number;
-  onRevert: () => void;
+  // Absent while a scoped (branch-review) baseline is active: the lens is
+  // display-only — reverting would rewrite committed work out of the buffer.
+  onRevert?: () => void;
 }
 
 class DiffMarker extends GutterMarker {
@@ -136,7 +138,7 @@ const diffField = StateField.define<RangeSet<GutterMarker>>({
 class LensWidget extends WidgetType {
   constructor(
     private spec: LensSpec,
-    private onRevert: () => void,
+    private onRevert: (() => void) | undefined,
   ) {
     super();
   }
@@ -145,6 +147,7 @@ class LensWidget extends WidgetType {
     return (
       this.spec.title === other.spec.title &&
       this.spec.attribution === other.spec.attribution &&
+      !this.onRevert === !other.onRevert &&
       this.spec.oldLines.join("\n") === other.spec.oldLines.join("\n") &&
       this.spec.newLines.join("\n") === other.spec.newLines.join("\n")
     );
@@ -158,14 +161,18 @@ class LensWidget extends WidgetType {
     head.className = "lens-head";
     const title = document.createElement("span");
     title.textContent = this.spec.title;
-    const revert = document.createElement("button");
-    revert.className = "lens-revert";
-    revert.textContent = "Revert";
-    revert.onclick = (event) => {
-      event.stopPropagation();
-      this.onRevert();
-    };
-    head.append(title, revert);
+    head.append(title);
+    const onRevert = this.onRevert;
+    if (onRevert) {
+      const revert = document.createElement("button");
+      revert.className = "lens-revert";
+      revert.textContent = "Revert";
+      revert.onclick = (event) => {
+        event.stopPropagation();
+        onRevert();
+      };
+      head.append(revert);
+    }
     root.append(head);
 
     const body = document.createElement("div");
@@ -810,11 +817,16 @@ export class Pane {
       effects: setLens.of({
         ...model,
         anchorLine: hunk.newTo > hunk.newFrom ? hunk.newTo - 1 : hunk.newFrom,
-        onRevert: () => {
-          this.mgr.setFocused(this);
-          this.mgr.revertHunk(hunk);
-          this.closeLens();
-        },
+        // Branch-review scope is display-only: no Revert affordance — the
+        // baseline is the merge-base, so reverting would rewrite committed
+        // work out of the buffer.
+        onRevert: this.mgr.scopedReadOnly
+          ? undefined
+          : () => {
+              this.mgr.setFocused(this);
+              this.mgr.revertHunk(hunk);
+              this.closeLens();
+            },
       }),
     });
   }
@@ -1400,7 +1412,30 @@ export class EditorManager {
     return [{ startLine: 0, endLine: Math.max(0, lineCount - 1), agent: "AI" }];
   }
 
+  // Branch-review scoped baselines: while non-null, tabs whose path has an
+  // entry diff against these merge-base blobs instead of git HEAD, and hunk
+  // revert is disabled everywhere (display-only review). A null entry = file
+  // absent at the scope base (added on branch) → "" baseline, whole-file adds.
+  private scopedBaselines: Map<string, string | null> | null = null;
+
+  /** Install (or clear, with null) the branch-review baseline map; repaints
+   * every visible pane's gutter immediately (split view included), hidden
+   * background tabs on activation. */
+  setScopedBaselines(map: Map<string, string | null> | null): void {
+    this.scopedBaselines = map;
+    for (const pane of this.panes) this.recomputeDiffFor(pane);
+  }
+
+  /** True while a scoped (branch-review) baseline is active — gutter lens
+   * drops its Revert affordance and revertHunk refuses. */
+  get scopedReadOnly(): boolean {
+    return this.scopedBaselines != null;
+  }
+
   private baselineOf(tab: Tab): string | null {
+    if (this.scopedBaselines && tab.path && this.scopedBaselines.has(tab.path)) {
+      return this.scopedBaselines.get(tab.path) ?? "";
+    }
     return tab.override ?? tab.gitHead;
   }
 
@@ -1666,7 +1701,12 @@ export class EditorManager {
 
   /** Recompute diff markers + hunks for the focused active tab. */
   recomputeDiff(): void {
-    const pane = this.focused;
+    this.recomputeDiffFor(this.focused);
+  }
+
+  /** Per-pane recompute — baseline swaps (scoped baselines install/clear)
+   * must repaint BOTH visible split panes, not just the focused one. */
+  private recomputeDiffFor(pane: Pane): void {
     const active = pane.active;
     if (!active) return;
     const baseline = this.baselineOf(active);
@@ -1800,8 +1840,11 @@ export class EditorManager {
     this.onDocChanged?.();
   }
 
-  /** Revert one hunk in the focused pane back to baseline (newline-safe). */
+  /** Revert one hunk in the focused pane back to baseline (newline-safe).
+   * Refused while a scoped (branch-review) baseline is active — that baseline
+   * is the merge-base, and reverting to it would rewrite committed work. */
   revertHunk(h: Hunk): void {
+    if (this.scopedReadOnly) return;
     const pane = this.focused;
     const cur = pane.getContent().split("\n");
     const next = [...cur.slice(0, h.newFrom), ...h.oldText, ...cur.slice(h.newTo)].join("\n");

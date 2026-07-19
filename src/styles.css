@@ -2137,6 +2137,20 @@ button:hover {
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
+#diff-title { flex: 1; }
+#diff-scope-toggle {
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin-right: 8px;
+}
+#diff-scope-toggle:hover { color: var(--fg); }
+#diff-scope-toggle.on { color: var(--em); border-color: var(--em); }
 #diff-close {
   border: none;
   background: none;

@@ -79,6 +79,19 @@ export interface ChangedFile {
 export const gitChangedFiles = (root: string) =>
   invoke<ChangedFile[]>("git_changed_files", { root });
 
+// Branch-review scope: files changed vs merge-base of HEAD and main/master.
+// `oid` is the merge-base commit — pass it to gitCommitContent for hunk bases
+// so the list and the hunks share one immutable baseline.
+export interface BranchDiffFiles {
+  base: string;
+  oid: string;
+  files: ChangedFile[];
+}
+export const gitBranchDiffFiles = (root: string) =>
+  invoke<BranchDiffFiles>("git_branch_diff_files", { root });
+export const gitCommitContent = (root: string, oid: string, path: string) =>
+  invoke<string | null>("git_commit_content", { root, oid, path });
+
 export interface WorktreeInfo {
   name: string;
   path: string;
