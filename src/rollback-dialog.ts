@@ -283,33 +283,51 @@ export function openRollbackDialog(
       }
       const result = await opts.onApply(paths);
       if (result.failed.length > 0) {
+        // Retryable: record the failure but do NOT settle the lifecycle here.
+        // Settling now would resolve/reject the turn-actions promise while the
+        // dialog stays open for retry — a subsequent successful retry's
+        // close("applied") would then be a no-op settle, silently dropping
+        // deps.refresh(). Settlement happens at dialog termination (close()).
         const message = result.failed.map((f) => `${f.path}: ${f.error}`).join("\n");
         failuresEl.textContent = message;
-        opts.lifecycle?.failed(new Error(message));
+        lastError = new Error(message);
         applyBtn.disabled = false;
         return;
       }
       close("applied");
     } catch (err) {
-      opts.lifecycle?.failed(err);
+      // Same reasoning as above: defer settlement, keep the dialog open for retry.
+      lastError = err;
       failuresEl.textContent = String(err);
       applyBtn.disabled = false;
     }
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") close();
+    if (e.key === "Escape") {
+      // Capture-phase + stop propagation: without this, Escape also bubbles to
+      // main.ts's window handler, which re-queries for other open overlays
+      // (e.g. the sidebar drawer) after this handler has already removed this
+      // one — closing both on a single Escape press.
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
   }
   let closed = false;
+  // Failure recorded by apply() but not yet settled (see above); close()
+  // resolves the deferred outcome once the dialog actually terminates.
+  let lastError: unknown = null;
   function close(outcome: "applied" | "cancelled" = "cancelled") {
     if (closed) return;
     closed = true;
-    document.removeEventListener("keydown", onKeydown);
+    document.removeEventListener("keydown", onKeydown, true);
     overlay.remove();
     if (outcome === "applied") opts.lifecycle?.applied();
+    else if (lastError !== null) opts.lifecycle?.failed(lastError);
     else opts.lifecycle?.cancelled();
   }
-  document.addEventListener("keydown", onKeydown);
+  document.addEventListener("keydown", onKeydown, true);
   overlay.onmousedown = (e) => {
     if (e.target === overlay) close();
   };
