@@ -1353,6 +1353,11 @@ async function applyTurnRollback(root: string, turnId: number, paths: string[]):
   return result;
 }
 
+// Declared here (not beside ROOM_TABS below) because refreshTurnActionConsumers
+// runs synchronously during module eval via mountTasksPanel's initial render —
+// a later `let` would be a TDZ ReferenceError that kills the whole boot.
+let roomTablist: HTMLElement | null = null;
+
 function refreshTurnActionConsumers(): void {
   if (currentRoot) renderTurnStrip(currentRoot);
   ledger.render({
@@ -2220,7 +2225,7 @@ const ROOM_TABS: readonly { id: RoomId; label: string }[] = [
   { id: "review", label: "Review" },
   { id: "web", label: "Web" },
 ];
-let roomTablist: HTMLElement | null = null;
+// (roomTablist is declared far above, next to refreshTurnActionConsumers — TDZ.)
 
 // Active-tab highlight + Run/Review badges. Reuses terminals.liveCount() and the
 // existing latestTasks cache — no new polling.
