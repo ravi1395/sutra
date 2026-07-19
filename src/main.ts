@@ -1304,15 +1304,7 @@ function openTurnRollback(turnId: number): Promise<void> {
   return waitForRollbackAction((lifecycle) => {
     openRollbackDialog(root, turn, {
       turns,
-      onApply: async (paths) => {
-        try {
-          const result = await applyTurnRollback(root, turn.id, paths);
-          return result;
-        } catch (error) {
-          lifecycle.failed(error);
-          throw error;
-        }
-      },
+      onApply: async (paths) => applyTurnRollback(root, turn.id, paths),
       getDiskHashes: async (resolvedRoot, paths) =>
         Object.fromEntries(
           (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
