@@ -133,7 +133,7 @@
 }
 
 /* ── W1/T1 Graphite: Primer-dark flat plane. ── */
-.view-graphite {
+:root.view-graphite {
   --bg-0: #0d1117; --bg-1: #0d1117; --bg-2: #10151c; --bg-3: #161b22; --bg-4: #21262d;
   --line: #21262d; --line-menu: #30363d;
   --fg: #e6edf3; --fg-dim: #9198a1; --fg-faint: #6e7681; --fg-ghost: #484f58;
@@ -393,11 +393,11 @@
 }
 :root.view-north .ledger-test-pass,
 :root.view-north .ledger-review-accepted {
-  color: var(--diff-add);
+  color: var(--em);
 }
 :root.view-north .ledger-test-fail,
 :root.view-north .ledger-review-unresolved {
-  color: var(--diff-del);
+  color: var(--deleted);
 }
 :root.view-north .ledger-test-running {
   color: var(--em);
@@ -447,8 +447,8 @@
 }
 :root.view-north .ledger-action-danger:hover:not(:disabled),
 :root.view-north .ledger-action-danger:focus-visible:not(:disabled) {
-  color: var(--diff-del);
-  border-color: var(--diff-del);
+  color: var(--deleted);
+  border-color: var(--deleted);
 }
 :root.view-north .ledger-action:disabled {
   color: var(--fg-ghost);
@@ -2735,9 +2735,9 @@ button:hover {
   margin-left: auto;
   flex: 0 0 6px;
 }
-.tree-dot.modified { background: var(--modified); }
-.tree-dot.added { background: var(--added); }
-.tree-dot.deleted { background: var(--deleted); }
+.tree-dot.modified { background: var(--diff-mod); }
+.tree-dot.added { background: var(--diff-add); }
+.tree-dot.deleted { background: var(--diff-del); }
 
 /* ---- folder search view ---- */
 #search-view {

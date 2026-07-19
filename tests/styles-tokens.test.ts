@@ -33,6 +33,36 @@ const rootBlock = extractBlock(css, ":root {");
 const washiBlock = extractBlock(css, ".theme-washi {");
 const northDayBlock = extractBlock(css, ":root.view-north {");
 const northNightBlock = extractBlock(css, ":root.view-north.variant-night {");
+const stanzaDuskBlock = extractBlock(css, ":root.view-stanza {");
+const stanzaDawnBlock = extractBlock(css, ":root.view-stanza.variant-dawn {");
+
+// Full selector+body rule scan (comments stripped). Only depth-1 braces are
+// captured as a rule; anything nested inside a wrapper (e.g. @media) is
+// skipped as a "rule" of its own and picked up on a later, deeper pass —
+// fine here since none of our ledger/tree-dot targets sit inside @media.
+function ruleBlocks(source: string): Array<{ selector: string; body: string }> {
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  const blocks: Array<{ selector: string; body: string }> = [];
+  let depth = 0;
+  let selectorBuf = "";
+  let bodyBuf = "";
+  for (const char of withoutComments) {
+    if (char === "{") {
+      depth += 1;
+      if (depth === 1) { bodyBuf = ""; continue; }
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        blocks.push({ selector: selectorBuf.trim(), body: bodyBuf });
+        selectorBuf = "";
+        continue;
+      }
+    }
+    if (depth >= 1) bodyBuf += char;
+    else selectorBuf += char;
+  }
+  return blocks;
+}
 
 const LEGACY_ALIASES = ["--bg", "--bg-alt", "--bg-bar", "--border", "--accent", "--accent-hi", "--line-soft"];
 
@@ -310,4 +340,78 @@ test("Graphite pinned palette and readable core pairs meet contrast", () => {
     contrastRatio(foreground, surface) >= 4.5,
     "Graphite foreground and tab labels must meet 4.5:1 on surface",
   );
+});
+
+test("Stanza owns complete dusk/dawn tokens (term, diff, ansi, syntax) without revaluing status tokens", () => {
+  // --ui is set once on the dusk base block; dawn is a delta layer (:root.view-stanza.variant-dawn)
+  // that cascades from it and correctly does not redeclare the font, mirroring North night/day.
+  const stanzaTokens = [
+    "--term-bg", "--term-fg", "--diff-add", "--diff-mod", "--diff-del",
+    "--syn-kw", "--syn-type", "--syn-str", "--syn-comment",
+    ...ANSI_TOKENS,
+  ];
+  assert.ok(stanzaDuskBlock.includes("--ui:"), "Stanza dusk missing --ui");
+  for (const [name, block] of [["dusk", stanzaDuskBlock], ["dawn", stanzaDawnBlock]] as const) {
+    for (const stanzaToken of stanzaTokens) {
+      assert.ok(block.includes(`${stanzaToken}:`), `Stanza ${name} missing ${stanzaToken}`);
+    }
+    for (const statusToken of ["--added", "--modified", "--deleted"]) {
+      assert.ok(!block.includes(`${statusToken}:`), `Stanza ${name} must not revalue ${statusToken}`);
+    }
+  }
+});
+
+test("Stanza pins its dusk/dawn palette (shipped, MV-8a/b-measured values)", () => {
+  const dusk: Record<string, string> = {
+    "--bg-0": "#0b1a1d", "--bg-1": "#071417", "--fg": "#dce7e7", "--fg-dim": "#8fa3a4",
+    "--em": "#63ccc0", "--term-bg": "#071417", "--term-fg": "#dce7e7",
+    "--diff-add": "#62c37a", "--diff-mod": "#e7b643", "--diff-del": "#f66d67",
+  };
+  const dawn: Record<string, string> = {
+    "--bg-0": "#e8f3f2", "--bg-1": "#f9fdfc", "--fg": "#0e2830", "--fg-dim": "#476065",
+    "--em": "#00706b", "--term-bg": "#001415", "--term-fg": "#e9f0f0",
+    "--diff-add": "#007f35", "--diff-mod": "#936500", "--diff-del": "#c9302d",
+  };
+  for (const [name, value] of Object.entries(dusk)) {
+    assert.match(stanzaDuskBlock, new RegExp(`${name}:\\s*${value}`, "i"), `Stanza dusk ${name} drifted`);
+  }
+  for (const [name, value] of Object.entries(dawn)) {
+    assert.match(stanzaDawnBlock, new RegExp(`${name}:\\s*${value}`, "i"), `Stanza dawn ${name} drifted`);
+  }
+});
+
+test("Stanza dusk/dawn meet WCAG contrast on ink/paper and terminal pairs", () => {
+  const token = (block: string, name: string) => block.match(new RegExp(`${name}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+  for (const [name, block] of [["dusk", stanzaDuskBlock], ["dawn", stanzaDawnBlock]] as const) {
+    const fg = token(block, "--fg")!;
+    const bg0 = token(block, "--bg-0")!;
+    assert.ok(contrastRatio(fg, bg0) >= 4.5, `Stanza ${name} fg/bg-0 must meet 4.5:1`);
+    const termFg = token(block, "--term-fg")!;
+    const termBg = token(block, "--term-bg")!;
+    assert.ok(contrastRatio(termFg, termBg) >= 7, `Stanza ${name} terminal must meet 7:1`);
+  }
+});
+
+test("no .ledger- selector paints with a --diff-* token (FIX 1 regression guard)", () => {
+  const ledgerBlocks = ruleBlocks(css).filter((block) => block.selector.includes(".ledger-"));
+  assert.ok(ledgerBlocks.length > 0, "expected at least one .ledger- rule in styles.css");
+  for (const { selector, body } of ledgerBlocks) {
+    assert.doesNotMatch(
+      body,
+      /var\(--diff-/,
+      `${selector} must use a status token (--em/--modified/--deleted), not a --diff-* token: ${body.trim()}`,
+    );
+  }
+});
+
+test("base .tree-dot status selectors read --diff-* tokens, not status tokens (FIX 2 regression guard)", () => {
+  const modified = extractBlock(css, ".tree-dot.modified {");
+  const added = extractBlock(css, ".tree-dot.added {");
+  const deleted = extractBlock(css, ".tree-dot.deleted {");
+  assert.match(modified, /var\(--diff-mod\)/, ".tree-dot.modified must read --diff-mod");
+  assert.match(added, /var\(--diff-add\)/, ".tree-dot.added must read --diff-add");
+  assert.match(deleted, /var\(--diff-del\)/, ".tree-dot.deleted must read --diff-del");
+  assert.doesNotMatch(modified, /var\(--modified\)/, ".tree-dot.modified must not read the status token");
+  assert.doesNotMatch(added, /var\(--added\)/, ".tree-dot.added must not read the status token");
+  assert.doesNotMatch(deleted, /var\(--deleted\)/, ".tree-dot.deleted must not read the status token");
 });
