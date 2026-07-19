@@ -1,7 +1,7 @@
 // DOM-bound annotation-panel behavior with minimal browser fakes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AnnotationsPanel } from "../src/annotations";
+import { AnnotationsPanel, type RailLayout } from "../src/annotations";
 import { ANNOTATIONS_FILE, type AnnotationPersistence } from "../src/annotation-store";
 import type { Task } from "../src/tasks";
 
@@ -20,39 +20,77 @@ class FakeClassList {
   }
 }
 
+type FakeEvent = { stopPropagation(): void; preventDefault(): void; key?: string; shiftKey?: boolean };
+
 class FakeElement {
   className = "";
   classList = new FakeClassList();
   dataset: Record<string, string> = {};
   children: FakeElement[] = [];
   textContent = "";
-  private listeners = new Map<string, (event?: { stopPropagation(): void }) => void>();
+  id = "";
+  title = "";
+  value = "";
+  parentElement: FakeElement | null = null;
+  private listeners = new Map<string, (event?: FakeEvent) => void>();
 
   set innerHTML(_value: string) {
     this.children = [];
   }
 
-  addEventListener(type: string, listener: (event?: { stopPropagation(): void }) => void): void {
+  addEventListener(type: string, listener: (event?: FakeEvent) => void): void {
     this.listeners.set(type, listener);
   }
 
   append(...children: FakeElement[]): void {
+    for (const child of children) child.parentElement = this;
     this.children.push(...children);
   }
 
   appendChild(child: FakeElement): FakeElement {
+    child.parentElement = this;
     this.children.push(child);
     return child;
   }
 
-  click(): void {
-    this.listeners.get("click")?.({ stopPropagation() {} });
+  /** Minimal stand-in for Element.closest(): supports only `#id` selectors, which is all
+   *  the rail-chrome render() code needs (`listEl.closest("#browser-body")`). */
+  closest(selector: string): FakeElement | null {
+    let node: FakeElement | null = this;
+    const id = selector.startsWith("#") ? selector.slice(1) : null;
+    while (node) {
+      if (id !== null && node.id === id) return node;
+      node = node.parentElement;
+    }
+    return null;
   }
+
+  click(): void {
+    this.fire("click");
+  }
+
+  /** Dispatch a minimal event that bubbles to ancestors unless a listener calls
+   *  stopPropagation — so tests can prove propagation actually stops. */
+  fire(type: string, event: Partial<FakeEvent> = {}): void {
+    let stopped = false;
+    const ev: FakeEvent = { stopPropagation() { stopped = true; }, preventDefault() {}, ...event };
+    for (let node: FakeElement | null = this; node && !stopped; node = node.parentElement) {
+      node.listeners.get(type)?.(ev);
+    }
+  }
+
+  focus(): void {}
 
   setAttribute(_name: string, _value: string): void {}
 }
 
 type Sent = { message: unknown; origin: string };
+
+/** Drops "theme" pushes (see pushTheme tests below) so routing assertions stay focused on
+ *  the arm/disarm/openEditor traffic they were written to check. */
+function withoutTheme(sent: Sent[]): Sent[] {
+  return sent.filter((s) => (s.message as { type?: string }).type !== "theme");
+}
 
 function frame() {
   const sent: Sent[] = [];
@@ -64,7 +102,7 @@ function frame() {
   return { contentWindow, sent };
 }
 
-function setup(persistence?: AnnotationPersistence) {
+function setup(persistence?: AnnotationPersistence, rail?: RailLayout) {
   const previousWindow = globalThis.window;
   const previousDocument = globalThis.document;
   const listeners = new Map<string, (event: MessageEvent) => void>();
@@ -78,17 +116,22 @@ function setup(persistence?: AnnotationPersistence) {
   } as unknown as Document;
 
   const first = frame();
+  const body = new FakeElement();
+  body.id = "browser-body";
   const list = new FakeElement();
+  body.appendChild(list); // mirrors real DOM: #annotation-list lives inside #browser-body
   const toggle = new FakeElement();
   const panel = new AnnotationsPanel(
     first as unknown as HTMLIFrameElement,
     list as unknown as HTMLElement,
     toggle as unknown as HTMLButtonElement,
     persistence,
+    rail,
   );
 
   return {
     first,
+    body,
     list,
     toggle,
     panel,
@@ -102,6 +145,31 @@ function setup(persistence?: AnnotationPersistence) {
   };
 }
 
+/** Spy RailLayout for rail-chrome tests: mutable in-memory state + call recorders. */
+function fakeRail(initial: { dockSide: "left" | "right"; collapsed: boolean }) {
+  const state = { ...initial };
+  const setDockSideCalls: Array<"left" | "right"> = [];
+  const setCollapsedCalls: boolean[] = [];
+  const rail: RailLayout = {
+    get: () => ({ ...state }),
+    setDockSide: (side) => { state.dockSide = side; setDockSideCalls.push(side); },
+    setCollapsed: (collapsed) => { state.collapsed = collapsed; setCollapsedCalls.push(collapsed); },
+  };
+  return { rail, state, setDockSideCalls, setCollapsedCalls };
+}
+
+/** Recursively collects every FakeElement under `root` (inclusive) whose className
+ *  includes `cls` — a querySelectorAll("." + cls) stand-in for the fake DOM. */
+function findByClassName(root: FakeElement, cls: string): FakeElement[] {
+  const found: FakeElement[] = [];
+  const visit = (el: FakeElement) => {
+    if (el.className.split(" ").includes(cls)) found.push(el);
+    for (const child of el.children) visit(child);
+  };
+  visit(root);
+  return found;
+}
+
 test("setTarget disarms old iframe and routes later toggles to new iframe", () => {
   const ctx = setup();
   try {
@@ -112,11 +180,14 @@ test("setTarget disarms old iframe and routes later toggles to new iframe", () =
     ctx.panel.setTarget(second as unknown as HTMLIFrameElement, "http://new.test");
     ctx.toggle.click();
 
-    assert.deepEqual(ctx.first.sent, [
+    // Theme pushes (setTarget + arm re-push) also flow over this channel now; filtered out
+    // here since this test is specifically about arm/disarm routing across a retarget —
+    // theme-push behavior itself is covered by the "pushTheme" tests below.
+    assert.deepEqual(withoutTheme(ctx.first.sent), [
       { message: { type: "arm" }, origin: "http://old.test" },
       { message: { type: "disarm" }, origin: "http://old.test" },
     ]);
-    assert.deepEqual(second.sent, [
+    assert.deepEqual(withoutTheme(second.sent), [
       { message: { type: "arm" }, origin: "http://new.test" },
     ]);
     assert.equal(ctx.toggle.classList.contains("active"), true);
@@ -143,9 +214,9 @@ test("setTarget rejects stale messages and renders picked messages from current 
     assert.equal(ctx.list.children.length, 0);
 
     ctx.message({ origin: "http://new.test", source: second.contentWindow as unknown as Window, data: picked });
-    // children[0] is the MCP trust banner; the annotation row follows.
-    assert.equal(ctx.list.children.length, 2);
-    assert.equal(ctx.list.children[1].children[1].textContent, "#hero");
+    // children[0] is the rail head, children[1] is the MCP trust banner, the annotation row follows.
+    assert.equal(ctx.list.children.length, 3);
+    assert.equal(ctx.list.children[2].children[1].textContent, "#hero");
   } finally {
     ctx.restore();
   }
@@ -184,8 +255,8 @@ test("deleting an annotation cascades detach from every task that references it"
       async (task, _annotation, reason) => { detached.push({ taskId: task.id, reason }); },
     );
 
-    // row.children = [num, sel, fb, del, taskSelect]; del is index 3.
-    const del = ctx.list.children[1].children[3];
+    // list.children = [head, hint, row]; row.children = [num, sel, fb, del, taskSelect]; del is index 3.
+    const del = ctx.list.children[2].children[3];
     del.click();
 
     assert.deepEqual(detached.map((d) => d.taskId).sort(), ["other", "owner"]);
@@ -238,6 +309,113 @@ test("annotation messages arriving during setRoot hydration are applied after lo
   }
 });
 
+test("overlapping setRoot hydrations discard messages queued for the superseded root", async () => {
+  const writes: Record<string, string> = {};
+  const resolvers = new Map<string, (value: string) => void>();
+  const persistence: AnnotationPersistence = {
+    read: (path: string) => new Promise<string>((resolve) => { resolvers.set(path, resolve); }),
+    write: async (path, content) => { writes[path] = content; },
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo-a");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/a" },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#a", tag: "div", html: "<div></div>", styles: {}, hints: {} } },
+    });
+
+    const hydrateB = ctx.panel.setRoot("/repo-b");
+    resolvers.get(`/repo-b/${ANNOTATIONS_FILE}`)?.(JSON.stringify({ version: 1, annotations: [] }));
+    await hydrateB;
+    resolvers.get(`/repo-a/${ANNOTATIONS_FILE}`)?.(JSON.stringify({ version: 1, annotations: [{ n: 9, selector: "#stale", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/a" }] }));
+    await hydrateA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(ctx.panel.currentRouteAnnotations(), []);
+    assert.deepEqual(writes, {});
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("late corrupt-file backup from root A cannot warn, render, or clear completed root B hydration", async () => {
+  const aPath = `/repo-a/${ANNOTATIONS_FILE}`;
+  const bPath = `/repo-b/${ANNOTATIONS_FILE}`;
+  let resolveBackup!: () => void;
+  const persistence: AnnotationPersistence = {
+    read: async (path) => {
+      if (path === aPath) return "not json";
+      if (path === bPath) return JSON.stringify({ version: 1, annotations: [{ n: 2, selector: "#b", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/b" }] });
+      throw new Error("missing");
+    },
+    write: async (path) => {
+      if (path === `${aPath}.bak`) await new Promise<void>((resolve) => { resolveBackup = resolve; });
+    },
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    const warnings: string[] = [];
+    ctx.panel.onWarnings = (received) => warnings.push(...received);
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo-a");
+    await new Promise((resolve) => setTimeout(resolve, 0)); // A is waiting on its deferred .bak write
+
+    await ctx.panel.setRoot("/repo-b");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/b" },
+    });
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+
+    resolveBackup();
+    await hydrateA;
+
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("overlapping same-root hydrations keep only the newest generation", async () => {
+  const path = `/repo/${ANNOTATIONS_FILE}`;
+  const reads: Array<(value: string) => void> = [];
+  const persistence: AnnotationPersistence = {
+    read: (readPath) => readPath === path
+      ? new Promise<string>((resolve) => { reads.push(resolve); })
+      : Promise.reject(new Error("missing")),
+    write: async () => {},
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo");
+    const hydrateB = ctx.panel.setRoot("/repo");
+    assert.equal(reads.length, 2);
+
+    reads[1](JSON.stringify({ version: 1, annotations: [{ n: 2, selector: "#new", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/current" }] }));
+    await hydrateB;
+    reads[0](JSON.stringify({ version: 1, annotations: [{ n: 1, selector: "#stale", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/current" }] }));
+    await hydrateA;
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/current" },
+    });
+
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+  } finally {
+    ctx.restore();
+  }
+});
+
 test("setRoot on a corrupt annotations file surfaces warnings and quarantines it to .bak before any save", async () => {
   const path = `/repo/${ANNOTATIONS_FILE}`;
   const writes: Record<string, string> = {};
@@ -258,6 +436,340 @@ test("setRoot on a corrupt annotations file surfaces warnings and quarantines it
     // saveAnnotations only ever writes annotations.json/.gitignore, never
     // `.bak`, so a subsequent save structurally cannot destroy the backup.
     assert.equal(Object.keys(writes).filter((p) => p.endsWith(".bak")).length, 1);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Phase 4 (theme bridge): the in-iframe agent has no CSS-var/theme-washi access of its own
+// (cross-origin proxied iframe), so the host resolves colors via cssVar() and pushes them
+// over the existing validated postMessage channel as a {type:"theme"} message. These tests
+// cover the host side (resolve + post, re-push on retarget/arm); the agent's receive+restyle
+// path is a standalone IIFE with top-level side effects and isn't importable under node:test,
+// so it's covered by the manual E2E row instead (see VERIFY-LEDGER.md).
+function stubCssVarTokens(tokens: Record<string, string>): { restore: () => void } {
+  const prev = globalThis.getComputedStyle;
+  (globalThis as unknown as { getComputedStyle: unknown }).getComputedStyle = (_el: unknown) => ({
+    getPropertyValue: (name: string) => tokens[name] ?? "",
+  });
+  return { restore: () => { globalThis.getComputedStyle = prev; } };
+}
+
+const WASHI_TOKENS: Record<string, string> = {
+  "--bg-3": "#fbf9f4", "--fg": "#1f231f", "--em": "#0f8a5f", "--em-dim": "#0c6b4a",
+};
+
+test("pushTheme resolves washi tokens via cssVar and posts a theme message over the proxyOrigin channel", () => {
+  const ctx = setup();
+  const dom = stubCssVarTokens(WASHI_TOKENS);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    // setTarget's own re-push is the only message so far — assert it directly (also
+    // proves theme is (re)pushed on setTarget, not just on arm).
+    assert.equal(ctx.first.sent.length, 1);
+    assert.deepEqual(ctx.first.sent[0], {
+      message: { type: "theme", colors: { bg: "#fbf9f4", fg: "#1f231f", em: "#0f8a5f", emDim: "#0c6b4a" } },
+      origin: "http://app.test", // targetOrigin === proxyOrigin, same channel as arm/openEditor
+    });
+  } finally {
+    dom.restore();
+    ctx.restore();
+  }
+});
+
+test("arming re-pushes theme before the arm message, so a freshly-targeted agent gets current colors", () => {
+  const ctx = setup();
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const baseline = ctx.first.sent.length; // the setTarget theme push
+    ctx.toggle.click(); // arms
+    const pushed = ctx.first.sent.slice(baseline);
+    assert.equal(pushed.length, 2);
+    assert.equal((pushed[0].message as { type: string }).type, "theme");
+    assert.equal(pushed[0].origin, "http://app.test");
+    assert.deepEqual(pushed[1], { message: { type: "arm" }, origin: "http://app.test" });
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("pushTheme no-ops when the panel has no targeted iframe/origin (never throws, never posts)", () => {
+  const ctx = setup();
+  try {
+    ctx.panel.pushTheme(); // never targeted via setTarget in this test
+    assert.equal(ctx.first.sent.length, 0);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Rail chrome (T3): header row (dock-toggle + collapse) when expanded, thin spine
+// (count badge, click to expand) when collapsed. Layout comes from an injected RailLayout.
+
+test("collapsed rail renders only the spine badge, never annotation rows", () => {
+  const { rail } = fakeRail({ dockSide: "right", collapsed: true });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/settings" },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#a", tag: "div", html: "", styles: {}, hints: {} } },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#b", tag: "div", html: "", styles: {}, hints: {} } },
+    });
+
+    assert.equal(findByClassName(ctx.list, "ann-spine").length, 1);
+    const badges = findByClassName(ctx.list, "ann-spine-badge");
+    assert.equal(badges[0].textContent, "2");
+    assert.equal(findByClassName(ctx.list, "annotation-row").length, 0);
+    assert.equal(ctx.list.classList.contains("collapsed"), true);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("expanded rail toggles dock-left on #browser-body based on dockSide", () => {
+  const left = fakeRail({ dockSide: "left", collapsed: false });
+  const leftCtx = setup(undefined, left.rail);
+  try {
+    leftCtx.toggle.click(); // arm -> visible, no annotations needed
+    assert.equal(leftCtx.body.classList.contains("dock-left"), true);
+  } finally {
+    leftCtx.restore();
+  }
+
+  const right = fakeRail({ dockSide: "right", collapsed: false });
+  const rightCtx = setup(undefined, right.rail);
+  try {
+    rightCtx.toggle.click();
+    assert.equal(rightCtx.body.classList.contains("dock-left"), false);
+  } finally {
+    rightCtx.restore();
+  }
+});
+
+test("clicking the dock-toggle button calls rail.setDockSide with the opposite side", () => {
+  const { rail, setDockSideCalls } = fakeRail({ dockSide: "right", collapsed: false });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.toggle.click(); // arm -> visible, renders the head
+    const [dockToggle] = findByClassName(ctx.list, "ann-dock-toggle");
+    dockToggle.click();
+    assert.deepEqual(setDockSideCalls, ["left"]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("clicking the spine calls rail.setCollapsed(false) to expand", () => {
+  const { rail, setCollapsedCalls } = fakeRail({ dockSide: "right", collapsed: true });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.toggle.click(); // arm -> visible, collapsed renders the spine
+    const [spine] = findByClassName(ctx.list, "ann-spine");
+    spine.click();
+    assert.deepEqual(setCollapsedCalls, [false]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+// Inline note editing + MCP pull indicator (v2.3.3 annotation-rail feedback).
+
+/** Shared fixture: targeted panel with one picked annotation on a known route. */
+function setupWithPick() {
+  const ctx = setup();
+  ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+  ctx.message({
+    origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+    data: { type: "ready", route: "http://app.test/settings" },
+  });
+  ctx.message({
+    origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+    data: { type: "picked", payload: { selector: "#hero", tag: "div", html: "", styles: {}, hints: {} } },
+  });
+  return ctx;
+}
+
+test("clicking the note span swaps it for a textarea seeded with the current feedback", () => {
+  const ctx = setupWithPick();
+  try {
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "feedbackChanged", n: 1, text: "too wide" },
+    });
+    const [fb] = findByClassName(ctx.list, "ann-fb");
+    fb.click();
+    const editors = findByClassName(ctx.list, "ann-fb-edit");
+    assert.equal(editors.length, 1);
+    assert.equal(editors[0].value, "too wide");
+    assert.equal(findByClassName(ctx.list, "ann-fb").length, 0); // span replaced
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("Enter commits the edited note through setFeedback and re-renders the span", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    const [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "align with header";
+    editor.fire("keydown", { key: "Enter", shiftKey: false });
+
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "align with header");
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-fb")[0].textContent, "align with header");
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("blur commits the edited note; Escape cancels without changing feedback", () => {
+  const ctx = setupWithPick();
+  try {
+    // blur commits
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    let [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "from blur";
+    editor.fire("blur");
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "from blur");
+
+    // Escape cancels
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "discarded";
+    editor.fire("keydown", { key: "Escape" });
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "from blur");
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("empty note renders the add-note placeholder", () => {
+  const ctx = setupWithPick();
+  try {
+    const [fb] = findByClassName(ctx.list, "ann-fb");
+    assert.equal(fb.textContent, "add note…");
+    assert.ok(fb.className.includes("empty"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("markPulled marks rows ✓, header shows pulled status, and an edit clears the ✓", () => {
+  const ctx = setupWithPick();
+  try {
+    ctx.panel.setMcpShared(true);
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 0);
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.includes("not pulled yet"));
+
+    ctx.panel.markPulled([1]);
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 1);
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.startsWith("Agent pulled"));
+
+    // Edit after pull: the agent's copy is stale, so the ✓ must disappear.
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "feedbackChanged", n: 1, text: "changed after pull" },
+    });
+    assert.equal(findByClassName(ctx.list, "ann-sent").length, 0);
+    // The header timestamp survives — the pull itself still happened.
+    assert.ok(findByClassName(ctx.list, "ann-hint")[0].textContent.startsWith("Agent pulled"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("note/textarea clicks stop propagation — scrollToPin fires only on row clicks", () => {
+  const ctx = setupWithPick();
+  try {
+    const scrolls = () =>
+      withoutTheme(ctx.first.sent).filter((s) => (s.message as { type?: string }).type === "scrollToPin").length;
+
+    // Positive control: the bubbling harness delivers a row click to the row handler.
+    findByClassName(ctx.list, "annotation-row")[0].fire("click");
+    assert.equal(scrolls(), 1);
+
+    findByClassName(ctx.list, "ann-fb")[0].fire("click"); // enters edit mode
+    assert.equal(scrolls(), 1); // note click did NOT bubble to the row
+
+    findByClassName(ctx.list, "ann-fb-edit")[0].fire("click");
+    assert.equal(scrolls(), 1); // textarea click did NOT bubble either
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("mid-edit re-render (agent pull) preserves the uncommitted draft text", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    const [editor] = findByClassName(ctx.list, "ann-fb-edit");
+    editor.value = "half-typed thought";
+    editor.fire("input");
+
+    // Agent pulls while the user is typing → render() rebuilds the textarea.
+    ctx.panel.markPulled([1]);
+
+    const [rebuilt] = findByClassName(ctx.list, "ann-fb-edit");
+    assert.equal(rebuilt.value, "half-typed thought"); // draft survived the rebuild
+    rebuilt.fire("keydown", { key: "Enter", shiftKey: false });
+    assert.equal(ctx.panel.currentRouteAnnotations()[0].feedback, "half-typed thought");
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("route change cancels an in-progress edit instead of leaving a phantom editor", () => {
+  const ctx = setupWithPick();
+  try {
+    findByClassName(ctx.list, "ann-fb")[0].click();
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 1);
+
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "routeChanged", route: "http://app.test/other" },
+    });
+    // Back to the annotated route: the edit was dropped, not resurrected.
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "routeChanged", route: "http://app.test/settings" },
+    });
+    assert.equal(findByClassName(ctx.list, "ann-fb-edit").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-fb").length, 1);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("untrusted workspace renders the not-shared banner instead of pull status", () => {
+  const ctx = setupWithPick();
+  try {
+    // mcpShared defaults to false (trust is proven, not assumed).
+    const [hint] = findByClassName(ctx.list, "ann-hint");
+    assert.ok(hint.textContent.includes("workspace untrusted"));
+    assert.ok(hint.className.includes("untrusted"));
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("regression: no annotations and not armed keeps the list hidden with no rail chrome", () => {
+  const { rail } = fakeRail({ dockSide: "right", collapsed: false });
+  const ctx = setup(undefined, rail);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test"); // triggers a render, still unarmed/empty
+    assert.equal(ctx.list.classList.contains("hidden"), true);
+    assert.equal(findByClassName(ctx.list, "ann-spine").length, 0);
+    assert.equal(findByClassName(ctx.list, "ann-rail-head").length, 0);
   } finally {
     ctx.restore();
   }

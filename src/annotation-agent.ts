@@ -1,7 +1,7 @@
 // annotation-agent.ts
 // Runs INSIDE the proxied iframe document. Standalone IIFE — no app imports at
 // runtime; core helpers are bundled in by esbuild from annotation-core.ts.
-import { selectorFor, routeKey, isTrustedMessage, type NodeShape, type PickedPayload } from "./annotation-core";
+import { selectorFor, routeKey, isTrustedMessage, type NodeShape, type PickedPayload, type AnnotationTheme } from "./annotation-core";
 
 // Window globals injected by proxy as a prelude script before this bundle.
 declare global {
@@ -18,6 +18,29 @@ const PROXY_TOKEN = window.__SUTRA_PROXY_TOKEN__ as string | undefined;
 
 let armed = false;
 const pins = new Map<number, { pin: HTMLElement; el: Element }>();
+
+// Colors bridged in from the host over the "theme" message (see annotations.ts pushTheme):
+// this iframe is cross-origin from the host, so it has no CSS-var/theme-washi access of its
+// own. Defaults below equal the app's dark palette but expressed as rgb() rather than hex,
+// so this file never contains the app's dark-hex literals even before a theme message
+// arrives (host pushes on arm/setTarget, so the gap is normally brief).
+let theme: AnnotationTheme = {
+  bg: "rgb(22, 24, 26)",
+  fg: "rgb(232, 234, 228)",
+  em: "rgb(74, 222, 147)",
+  emDim: "rgb(31, 138, 99)",
+};
+// The single open feedback textarea, if any — restyled in place when a "theme" message
+// arrives so a live ink/washi toggle doesn't leave it showing stale colors.
+let openTextarea: HTMLTextAreaElement | null = null;
+
+function restyleOpenTextarea() {
+  if (!openTextarea) return;
+  openTextarea.style.background = theme.bg;
+  openTextarea.style.color = theme.fg;
+  openTextarea.style.caretColor = theme.em;
+  openTextarea.style.borderColor = theme.emDim;
+}
 
 function post(msg: unknown) {
   window.parent.postMessage(msg, PARENT_ORIGIN);
@@ -103,18 +126,22 @@ window.addEventListener("resize", repositionPins);
 function openEditor(n: number, el: Element | null) {
   const r = (el ?? document.body).getBoundingClientRect();
   const ta = document.createElement("textarea");
-  // Themed inline: the agent runs in the proxied iframe with no access to the
-  // host's CSS vars, so colors are literal copies of the app's dark palette.
+  // Themed via the "theme" bridge message from the host (see `theme` above); colors are
+  // read from the module-level `theme` var, not hardcoded, so a live retint applies.
   Object.assign(ta.style, {
     position: "fixed", left: `${r.left}px`, top: `${r.top + 24}px`, zIndex: "2147483647",
     width: "240px", height: "64px", padding: "8px 10px", boxSizing: "border-box",
-    background: "#16181a", color: "#e8eae4", caretColor: "#4ade93",
-    border: "1px solid #1f8a63", borderRadius: "6px", outline: "none", resize: "none",
+    background: theme.bg, color: theme.fg, caretColor: theme.em,
+    border: `1px solid ${theme.emDim}`, borderRadius: "6px", outline: "none", resize: "none",
     font: "12px/1.4 ui-sans-serif, system-ui, sans-serif",
-    boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.4)", // fixed: overlay glow, theme-independent
   } as CSSStyleDeclaration);
   ta.placeholder = "design feedback… (Enter to save · Esc to cancel)";
-  ta.addEventListener("focus", () => { ta.style.borderColor = "#4ade93"; ta.style.boxShadow = "0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(74,222,147,0.25)"; });
+  ta.addEventListener("focus", () => {
+    ta.style.borderColor = theme.em;
+    // fixed: overlay glow, theme-independent (translucent highlight, not a base color)
+    ta.style.boxShadow = "0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(74,222,147,0.25)";
+  });
   ta.addEventListener("input", () => post({ type: "feedbackChanged", n, text: ta.value }));
   // Enter concludes annotation #n in place; Shift+Enter inserts a newline; Esc cancels.
   ta.addEventListener("keydown", (ev) => {
@@ -128,8 +155,9 @@ function openEditor(n: number, el: Element | null) {
       ta.blur();
     }
   });
-  ta.addEventListener("blur", () => ta.remove());
+  ta.addEventListener("blur", () => { ta.remove(); if (openTextarea === ta) openTextarea = null; });
   document.body.appendChild(ta);
+  openTextarea = ta;
   ta.focus();
 }
 
@@ -195,8 +223,13 @@ window.addEventListener("message", (e) => {
       const entry = pins.get(m.n);
       if (entry) {
         entry.pin.style.transform = m.on ? "scale(1.4)" : "";
-        (entry.el as HTMLElement).style.outline = m.on ? "2px solid #4ade93" : "";
+        (entry.el as HTMLElement).style.outline = m.on ? `2px solid ${theme.em}` : "";
       }
+      break;
+    }
+    case "theme": {
+      theme = m.colors as AnnotationTheme;
+      restyleOpenTextarea();
       break;
     }
     case "scrollToPin": {

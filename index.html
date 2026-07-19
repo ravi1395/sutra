@@ -69,6 +69,7 @@
             <div id="diff-pane" class="hidden">
               <div id="diff-header">
                 <span id="diff-title">Diff</span>
+                <button id="diff-scope-toggle" title="Toggle branch review: diff vs merge-base of main instead of HEAD" aria-pressed="false">vs main</button>
                 <button id="diff-close" title="Close">×</button>
               </div>
               <div id="diff-files"></div>
@@ -82,8 +83,10 @@
                 <button id="btn-annotate" class="browser-btn" title="Annotate" aria-label="Annotate">⊕</button>
                 <button id="btn-browser-maximize" class="browser-btn" title="Maximize browser" aria-label="Maximize browser"></button>
               </div>
-              <iframe id="browser-frame" class="browser-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
-              <div id="annotation-list" class="annotation-list hidden"></div>
+              <div id="browser-body">
+                <iframe id="browser-frame" class="browser-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+                <div id="annotation-list" class="annotation-list hidden"></div>
+              </div>
             </div>
             <div id="sessions-panel-host" class="hidden"></div>
           </div>

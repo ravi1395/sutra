@@ -3,9 +3,10 @@
 // (native dialog), pane resizers, and integrated-agent workspace tracking.
 import "./styles.css";
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
+import { FileTree, OutlineView, sidebarSections, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -15,13 +16,13 @@ import {
 } from "./split-drop";
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
-import { TerminalManager } from "./terminal";
-import { DiffViewer, computeLineDiff, hunkSummaries } from "./diff";
+import { TerminalManager, type TerminalMaximizeState } from "./terminal";
+import { DiffViewer, computeLineDiff, hunkSummaries, turnFileHunkRows } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
 import { resolveUiQuery } from "./annotation-core";
 import { redactAnnotationForExternal } from "./annotation-context";
-import { AnnotationsPanel } from "./annotations";
+import { AnnotationsPanel, type RailLayout } from "./annotations";
 import { vResizer, hResizer, mountDebuggerSidebarSlot } from "./layout";
 import { setBreakpointToggleHandler, setBreakpointContextMenuHandler, setBreakpointMarks, toMark } from "./editor";
 import { DebugSession, resolveDebugUiCore } from "./debug-session";
@@ -53,7 +54,9 @@ import {
   createDir,
   movePath,
   copyPath,
+  gitBranchDiffFiles,
   gitChangedFiles,
+  gitCommitContent,
   gitCheckout,
   gitCreateWorktree,
   gitRemoveWorktree,
@@ -69,6 +72,7 @@ import {
   onUiRequest,
   onPromptRequest,
   mcpUiReply,
+  workspaceGenerationNext,
   mcpSetRoot,
   mcpWriteAgentConfig,
   onFsChanged,
@@ -82,6 +86,7 @@ import {
   turnTestRecord,
   turnRollback,
   turnDiskHashes,
+  turnFileContent,
   deliverToPty,
   runnerRun,
   runnerCancel,
@@ -92,9 +97,40 @@ import {
   listFiles,
   langWorkspaceSymbols,
   type AgentTrackingStatus,
+  type RollbackResult,
+  type TestStatus,
   type Turn,
+  type TurnFileContent,
 } from "./ipc";
-import { baseSourceFor, firstViewableAgentChange, getTurns, hunkDiagBadgeEl, markRolledBack, mergeChangedFiles, onTurnClosed, replaceTurns, reviewablePaths, setTurnState, suppressibleCancelledIds, turnHeaderEl, whisperText } from "./agent-tracking";
+import {
+  baseSourceFor,
+  branchBreadcrumbEl,
+  enterBranchScope,
+  enterTurnScope,
+  exitTurnScope,
+  firstViewableAgentChange,
+  getTurns,
+  hunkDiagBadgeEl,
+  isRollbackable,
+  launchTurnTest,
+  markRolledBack,
+  mergeChangedFiles,
+  onTurnClosed,
+  replaceTurns,
+  reviewablePaths,
+  runnerDoneTestState,
+  setTurnState,
+  setTurnTestStatus,
+  suppressibleCancelledIds,
+  turnBreadcrumbEl,
+  turnDropdownEl,
+  turnFileStatus,
+  turnStripRenderKey,
+  turnSummaryEl,
+  turnSummaryState,
+  whisperText,
+  type DiffScope,
+} from "./agent-tracking";
 import { openRollbackDialog, rollbackTargetId, setRollbackEditor } from "./rollback-dialog";
 import { Facet, StateEffect } from "@codemirror/state";
 import {
@@ -143,19 +179,25 @@ import {
   seedRecentsFromLocalStorage,
   sessionFromTabs,
   trustWorkspace,
+  workspaceEffectCurrent,
   type RecentWorkspace,
 } from "./workspace";
 import {
   DEFAULT_SETTINGS,
+  VIEW_VARIANTS,
   clampSettings,
   isTestAutoRunEnabled,
   loadSettings,
   nextFontSettings,
   saveSettings,
+  viewClasses,
+  type ViewId,
+  type ViewVariant,
   type UserSettings,
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
+import { loadDraft } from "./composer-store";
 import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
 import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
@@ -173,12 +215,35 @@ import {
   taskCheckEvidence,
   AUTOMATION_OUTPUT_TAIL_LIMIT,
   TASK_CHECK_TIMEOUT_MS,
+  unresolvedTurnCount,
   type Task,
 } from "./tasks";
 import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
+import { onSurfaces, setSurface, type SurfaceId, type Surfaces } from "./surface-state";
+import {
+  ChipHostCache,
+  ComposerSurfaceBinding,
+  HiddenComposerSurfaceHydrator,
+  browserSurface,
+  composerSurface,
+  diffSurface,
+  restorableSurfacePills,
+  terminalSurface,
+} from "./north-seam";
+import { ComposerFileCache } from "./composer-files";
+import {
+  BLOCKING_OVERLAY_SELECTOR,
+  createDomSidebarDrawerHost,
+  createSidebarDrawer,
+  handleSidebarDrawerShortcut,
+  hasActiveBlockingOverlay,
+} from "./drawer";
+import { createTurnActions, waitForRollbackAction } from "./turn-actions";
+import { mountLedger } from "./ledger";
+import { createRoomRouter, type RoomId } from "./rooms";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -307,7 +372,9 @@ const search = new SearchPanel(
   $<HTMLButtonElement>("search-case"),
   $("search-results"),
 );
-search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+search.onOpenMatch = (path, line) => {
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
+};
 const browserFrame = $<HTMLIFrameElement>("browser-frame");
 const browser = new BrowserPane(
   $("browser-area"),
@@ -317,10 +384,17 @@ const browser = new BrowserPane(
   $<HTMLButtonElement>("btn-reload"),
   $<HTMLButtonElement>("btn-browser-maximize"),
 );
+const railLayout: RailLayout = {
+  get: () => ({ dockSide: settings.annotationDockSide, collapsed: settings.annotationRailCollapsed }),
+  setDockSide: (side) => persistSettings({ ...settings, annotationDockSide: side }),
+  setCollapsed: (collapsed) => persistSettings({ ...settings, annotationRailCollapsed: collapsed }),
+};
 const annotations = new AnnotationsPanel(
   browserFrame,
   $("annotation-list"),
   $<HTMLButtonElement>("btn-annotate"),
+  undefined,
+  railLayout,
 );
 // Corrupt/partial annotations.json is quarantined to a .bak by the panel
 // itself; this only needs to tell the user it happened. Reuses the same
@@ -358,11 +432,19 @@ async function annotationsDeliver(task: Task, prompt: string): Promise<void> {
 }
 browser.onProxied = (origin) => annotations.setTarget(browserFrame, origin);
 
-// Wire terminal link clicks → embedded browser.
-terminals.onLinkActivate = (url: string) => {
-  setBrowser(true);
-  browser.show();
-  void browser.open(url);
+// Wire terminal cmd+click links: localhost → embedded browser pane, other URLs → OS
+// default browser, resolved file paths → editor at the reported line.
+terminals.onUrlActivate = (uri, kind) => {
+  if (kind === "localhost") {
+    setBrowser(true);
+    browser.show();
+    void browser.open(uri);
+  } else {
+    void openUrl(uri).catch(() => {});
+  }
+};
+terminals.onFileLinkActivate = (absPath, line) => {
+  void editor.openFile(absPath, line);
 };
 
 // Subscribe to MCP preview-open events emitted by the Rust MCP server tools.
@@ -411,7 +493,10 @@ void onDrive((d) => {
       if (d.url) {
         setBrowser(true);
         browser.show();
-        void browser.open(d.url).catch((e) => console.error("agent navigate failed", e));
+        void browser.open(d.url).catch((e) => {
+          console.error("agent navigate failed", e);
+          browser.showError(String(e));
+        });
       }
       break;
   }
@@ -493,7 +578,14 @@ void onUiRequest((r) => {
   const result = resolveUiQuery(r.query, {
     openTabs: () => editor.getOpenTabs(),
     selection: () => editor.getSelection(),
-    annotations: () => currentWorkspaceTrusted ? annotations.currentRouteAnnotations().map(redactAnnotationForExternal) : [],
+    annotations: () => {
+      if (!currentWorkspaceTrusted) return [];
+      const anns = annotations.currentRouteAnnotations();
+      // Stamp the pull so the rail can show "✓ read by agent" per row + a
+      // header timestamp — get_annotations is the only moment delivery happens.
+      annotations.markPulled(anns.map((a) => a.n));
+      return anns.map(redactAnnotationForExternal);
+    },
   });
   void mcpUiReply(r.id, result.ok ? result.payload : { error: `unknown query: ${r.query}` });
 });
@@ -567,6 +659,7 @@ async function resolveAutomationUi(
 void onFsChanged((payload) => {
   if (!currentRoot) return;
   const root = currentRoot;
+  if (!isWorkspaceOpenCurrent(payload.generation, workspaceOpenGeneration, payload.root, root)) return;
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
     return;
   }
@@ -582,6 +675,15 @@ void onFsChanged((payload) => {
 });
 
 const whisperBar = $("whisper-bar");
+const northSeam = document.createElement("div");
+northSeam.id = "north-seam";
+const northWhisper = document.createElement("div");
+northWhisper.className = "north-seam-whisper";
+const northSurfacePills = document.createElement("div");
+northSurfacePills.className = "north-surface-pills";
+northSeam.append(northWhisper, northSurfacePills);
+whisperBar.before(northSeam);
+const whisperHostCache = new ChipHostCache(whisperBar, northWhisper);
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -589,6 +691,13 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+// `workspaceOpenRequestGeneration` is synchronously incremented before any
+// await, preserving in-renderer stale-request ownership. The backend-issued
+// generation survives HMR/full renderer reload and gates MCP/watcher claims.
+let workspaceOpenGeneration = 0;
+let workspaceOpenRequestGeneration = 0;
+let workspaceSessionSuppressionOwner = 0;
+let latestTasks: readonly Task[] = [];
 let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
@@ -648,17 +757,13 @@ editor.confirmCloseTab = (tab) =>
 
 tree.onOpenFile = async (path) => {
   try {
-    await editor.openFile(path);
-    tree.setActive(path);
+    await openSidebarFile(path);
   } catch (e) {
     void alertNative(`Cannot open ${path}: ${e}`);
   }
 };
 tree.onOpenFileInPane = (path, side) => {
-  void editor
-    .openFileInSide(path, side)
-    .then(() => tree.setActive(path))
-    .catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
+  void openSidebarFileInPane(path, side).catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
 };
 
 // Tree context menu actions
@@ -797,36 +902,81 @@ async function pathExists(path: string): Promise<boolean> {
   );
 }
 
-async function restoreWorkspaceTabs(root: string): Promise<void> {
+async function restoreWorkspaceTabs(root: string, isCurrent = () => currentRoot === root): Promise<void> {
   const session = loadWorkspaceSession(root);
   if (!session) return;
   const existing = new Set<string>();
   for (const path of session.tabs) {
     if (await pathExists(path)) existing.add(path);
+    if (!isCurrent()) return;
   }
   const pruned = pruneWorkspaceSession(session, (path) => existing.has(path));
   for (const path of pruned.tabs) {
+    const existingTab = editor.tabByPath(path);
     try {
       await editor.openFile(path);
+      if (!isCurrent()) {
+        // openFile itself awaits disk I/O. If a newer workspace won while it
+        // was pending, remove only the clean tab this restore introduced; a
+        // dirty tab may be a concurrent user edit and must remain untouched.
+        const openedTab = editor.tabByPath(path);
+        if (!existingTab && openedTab && !openedTab.dirty) editor.closeTab(openedTab);
+        return;
+      }
     } catch {
       // Missing/unreadable files are skipped; restore is best-effort.
     }
   }
+  if (!isCurrent()) return;
   if (pruned.activePath) {
     const active = editor.tabByPath(pruned.activePath);
     if (active) editor.activate(active);
   }
 }
 
-// Apply the active theme by toggling the washi class on the document root.
-function applyTheme(theme: "ink" | "washi"): void {
-  document.documentElement.classList.toggle("theme-washi", theme === "washi");
+const VIEW_CLASS_NAMES = [
+  "view-north", "view-graphite", "view-stanza", "theme-washi", "theme-light", "variant-night", "variant-dawn",
+];
+
+// Replace every view/variant marker as one synchronous root-class transaction.
+function applyTheme(view: ViewId, theme: ViewVariant): void {
+  const root = document.documentElement;
+  root.classList.remove(...VIEW_CLASS_NAMES);
+  root.classList.add(...viewClasses(view, theme));
 }
 
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
-  settings = clampSettings(next);
-  applyTheme(settings.theme);
+  const clamped = clampSettings(next);
+  const previousView = settings.view;
+  const viewChanged = previousView !== clamped.view;
+  settings = clamped;
+  applyTheme(settings.view, settings.theme);
+  if (viewChanged) {
+    syncSidebarView(previousView, settings.view);
+    editor.renderAllTabs();
+    syncGraphiteBottomPanel();
+    syncRoomTablist();
+    // Leaving stanza never calls roomRouter.enterRoom (no room change fires), so the
+    // shelf needs its own sync here to restore exclusive Files<->Outline on exit.
+    syncShelfMode();
+    whisperHostCache.reset((host) => host.replaceChildren());
+    northSurfacePills.replaceChildren();
+    renderWhisperBar();
+    if (latestSurfaces) renderSurfacePills(latestSurfaces);
+    refreshTurnActionConsumers();
+    // Entering stanza applies the remembered room preset over whatever layout was
+    // in place. Boot's first applySettings call runs before persisted UI state
+    // (drawer heights) is restored — deferred there via the same guard so the
+    // preset never races that restore. Exiting stanza resets the remembered room
+    // to Write (D11: no per-room persistence across a stanza exit/relaunch) —
+    // resetRoom mutates no layout itself, so exit stays a no-op visually; the next
+    // enterRoom (re-entry or relaunch) is what applies the Write preset. Drift
+    // after entry (switching rooms while inside stanza) is still allowed.
+    if (settings.view === "stanza" && uiStateLoaded) roomRouter.enterRoom(roomRouter.currentRoom());
+    else if (previousView === "stanza") roomRouter.resetRoom();
+  }
+  terminals.retheme();
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
   rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
@@ -905,23 +1055,67 @@ editor.saveHandler = saveTab;
 // forward, session restore, and switcher/worktree re-selects of a recents row —
 // passes explicit=false and relies on persisted trust, so re-opening an
 // OS-delivered folder never silently elevates it.
+function isWorkspaceOpenCurrent(
+  generation: number,
+  activeGeneration: number,
+  root: string,
+  activeRoot: string | null,
+): boolean {
+  return workspaceEffectCurrent(generation, activeGeneration, root, activeRoot);
+}
+
 async function openWorkspace(dir: string, explicit = false): Promise<void> {
+  const requestGeneration = ++workspaceOpenRequestGeneration;
+  const requestCurrent = () => requestGeneration === workspaceOpenRequestGeneration;
   if (!(await confirmWorkspaceClose(dir))) return;
+  if (!requestCurrent()) return;
   if (explicit) await trustWorkspace(dir);
+  if (!requestCurrent()) return;
+  const generation = await workspaceGenerationNext();
+  if (!requestCurrent()) return;
+  workspaceOpenGeneration = generation;
+  const isCurrent = () => requestCurrent()
+    && isWorkspaceOpenCurrent(generation, workspaceOpenGeneration, dir, currentRoot);
   hideTrustToast(); // drop any leftover toast from the previous root
+  // Turn ids are per-root; a scope pointed at the old root's turn would
+  // render the wrong (or nonexistent) snapshot against the new one. Shares
+  // exitScopedDiff's exit routine (blob-cache drop + diffViewer.invalidate)
+  // but skips its render/refresh calls, which would repaint the OLD root's
+  // strip/file-list mid-switch — the new root's own poll-driven render
+  // (later in this function) covers that.
+  if (diffScope.kind !== "workspace") resetTurnScope();
+  // Belt-and-suspenders beyond resetTurnScope's own clear: a rollback can set
+  // diffScope back to "workspace" directly (bypassing resetTurnScope) while
+  // leaving a populated cache behind, so clear it unconditionally here too —
+  // a scoped blob cache must never survive into a different root.
+  scopedDiffCache = null;
+  branchScopeBase = null;
+  branchBaseBlobCache = null;
+  editor.setScopedBaselines(null);
+  // The dropdown's Esc/outside-click dismissers close over the OLD root, so
+  // leaving it open would repaint stale turns if Esc fires mid-switch; this
+  // also resets paging (turnDropdownVisibleCount) for the new root's view.
+  closeTurnDropdown();
+  lastTurnStripKey = null; // drop any stale key so the new root's first render isn't skipped
   persistWorkspaceSession();
   suppressSessionSave = true;
+  workspaceSessionSuppressionOwner = generation;
   currentWorkspaceTrusted = false;
+  annotations.setMcpShared(false);
   try {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    resetComposerForWorkspace();
+    latestTasks = [];
+    refreshTurnActionConsumers();
     // Invalidate the previous root's symbols at the switch boundary; the
     // backend builds off-thread and generation-gates late completions.
     void langIndexBuild(dir).catch(() => {});
     loadBreakpointStore(dir); // per-root persisted breakpoints; gutter repaints via onActiveTabChanged
-    const turnsHydrated = hydrateTurnsForWorkspace(dir);
-    void watchStop().catch(() => {});
+    const turnsHydrated = hydrateTurnsForWorkspace(dir, isCurrent);
+    await watchStop(generation).catch(() => {});
+    if (!isCurrent()) return;
     void mcpWriteAgentConfig(dir).then((warnings) => {
       for (const w of warnings) console.warn("MCP config:", w);
     });
@@ -930,40 +1124,67 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     renderWhisperBar();
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
-    if (settings.restoreSession) await restoreWorkspaceTabs(dir);
+    if (!isCurrent()) return;
+    if (settings.restoreSession) await restoreWorkspaceTabs(dir, isCurrent);
+    if (!isCurrent()) return;
     // Persisted task links need the complete turn manifest (not only the
     // consume-once turn_poll delta) before the panel renders files/test state.
     await turnsHydrated;
-    if (currentRoot !== dir) return;
+    if (!isCurrent()) return;
     await annotations.setRoot(dir);
-    currentWorkspaceTrusted = await isWorkspaceTrusted(dir).catch(() => false);
+    if (!isCurrent()) return;
+    const trusted = await isWorkspaceTrusted(dir).catch(() => false);
+    if (!isCurrent()) return;
+    currentWorkspaceTrusted = trusted;
+    annotations.setMcpShared(currentWorkspaceTrusted);
     // Publish the MCP root only after annotation state is hydrated; queries
     // cannot observe the previous project's annotations during a switch.
-    void mcpSetRoot(dir);
+    // The backend rejects an out-of-order claim, so A cannot replace B when
+    // IPC delivery completes after the newer workspace has won.
+    await mcpSetRoot(dir, generation).catch((e) => console.warn("MCP root unavailable", e));
+    if (!isCurrent()) return;
     const annotationTasks = (await loadTasks(dir)).tasks.filter((task) => task.root === dir);
+    if (!isCurrent()) return;
     annotations.setTaskContext(annotationTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
     await tasksPanel.reload();
+    if (!isCurrent()) return;
   } finally {
-    suppressSessionSave = false;
+    if (workspaceSessionSuppressionOwner === generation) {
+      suppressSessionSave = false;
+      workspaceSessionSuppressionOwner = 0;
+    }
   }
+  if (!isCurrent()) return;
   persistWorkspaceSession();
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   await terminals.reset(dir, drawerState.open);
+  if (!isCurrent()) return;
   // A trusted primary dispatch writes this link before launching the worktree
   // process. Give the new root an integrated terminal immediately; it is ready
   // for the user to launch their selected terminal-native agent there.
-  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
+  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) {
+    if (!isCurrent()) return;
+    setTerminal(true);
+  }
+  if (!isCurrent()) return;
+  syncSurfacesFromUi();
   await recentsPush(dir, basename(dir));
-  void loadRecents().then((r) => { recentsCache = r; });
-  void refreshGitState(dir);
-  automations = await loadAutomations(dir);
+  if (!isCurrent()) return;
+  void loadRecents().then((r) => { if (isCurrent()) recentsCache = r; });
+  void refreshGitState(dir, isCurrent);
+  const loadedAutomations = await loadAutomations(dir);
+  if (!isCurrent()) return;
+  automations = loadedAutomations;
   automationBar.setAutomations(automations);
   stopGitPoll();
   const resolvedGitIndexPath = await resolveGitIndexPath(dir);
-  if (currentRoot !== dir) return;
+  if (!isCurrent()) return;
   gitIndexPath = resolvedGitIndexPath;
-  void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
+  // Await the generation-aware native claim: a delayed A start must not leave
+  // A's watcher active after B owns the UI.
+  await watchStart(dir, generation).catch((e) => console.warn("watcher unavailable", e));
+  if (!isCurrent()) return;
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
@@ -972,11 +1193,13 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
 /** Hydrate closed historical turns for task links after a restart. turn_poll
  * only delivers each close once, whereas turn_list is the durable manifest.
  * The root guard prevents an old IPC result populating a newly selected root. */
-async function hydrateTurnsForWorkspace(root: string): Promise<void> {
+async function hydrateTurnsForWorkspace(root: string, isCurrent: () => boolean): Promise<void> {
   try {
     const turns = await turnList(root);
-    if (currentRoot !== root) return;
+    if (!isCurrent()) return;
     replaceTurns(root, turns);
+    if (!isCurrent()) return;
+    refreshTurnActionConsumers();
   } catch {
     // A non-Git root or unavailable backend still opens normally; saved task
     // evidence remains visible without the live turn detail.
@@ -1003,6 +1226,7 @@ const btnTerm = $("btn-term");
 // Real value loaded async at boot (see boot() below); this placeholder
 // (closed, default height) is only visible for the instant before then.
 let drawerState: DrawerState = clampDrawerState(null);
+let uiStateLoaded = false;
 const terminalSeam = document.createElement("button");
 terminalSeam.id = "terminal-seam";
 terminalSeam.type = "button";
@@ -1030,84 +1254,633 @@ function renderTerminalSeam(): void {
   terminalSeam.append(chevron, label, rule, kbd);
 }
 
+function syncTerminalSurface(visible = drawerState.open): void {
+  setSurface("terminal", terminalSurface(visible, terminals.count, terminals.liveCount()));
+}
+
 function setTerminal(on: boolean): void {
+  const isGraphite = document.documentElement.classList.contains("view-graphite");
+  if (isGraphite) {
+    if (!on) terminals.setMaximizeState(null);
+    graphiteBottomPanel = on ? "terminal" : "problems";
+    setProblemsHost(!on);
+  }
   saveDrawerState({ ...drawerState, open: on });
   termArea.classList.toggle("terminal-collapsed", !on);
   hres.classList.toggle("hidden", !on);
   btnTerm.classList.toggle("on", on);
-  termArea.style.flex = on ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+  termArea.style.flex = on
+    ? `0 1 ${drawerState.heightPx}px`
+    : isGraphite ? "0 0 35px" : "0 0 30px";
   renderTerminalSeam();
+  renderGraphiteBottomPanel();
   if (on) {
     if (terminals.count === 0) void terminals.create();
     // Refit, then focus so keystrokes reach the shell without a manual click.
     else requestAnimationFrame(() => { terminals.refit(); terminals.focusActive(); });
   }
+  syncTerminalSurface(on);
 }
 btnTerm.onclick = () => setTerminal(!drawerState.open);
 terminals.onTabsChanged = renderTerminalSeam;
+terminals.onSessionsChanged(() => {
+  renderTerminalSeam();
+  syncTerminalSurface();
+});
 
-// ---- turn strip (harness v2) ----
-// Turn headers (Turn N · agent · N files · test chip) above the changed-file
-// list; Rollback opens the per-file checklist dialog backed by turn snapshots,
-// with live disk hashes powering human-touched detection.
+// ---- turn strip (harness v2 → turn-UX rehaul P1) ----
+// Collapsed to a single .turn-summary row (⟲ N turns · agent · relTime [chip])
+// above the changed-file list; click toggles a .turn-dropdown overlay with the
+// last 6 closed turns (turn-header rows). Rollback opens the per-file
+// checklist dialog backed by turn snapshots, with live disk hashes powering
+// human-touched detection.
+let turnDropdownOpen = false;
+// Dropdown paging (P3): starts at the recent-6 default and grows +20 per
+// footer click; reset here (not just on open) so a re-open after a stray
+// close always starts collapsed rather than resuming wherever it was left.
+let turnDropdownVisibleCount = 6;
+let turnDropdownDismissers: { onKey: (ev: KeyboardEvent) => void; onMouse: (ev: MouseEvent) => void } | null = null;
+
+function closeTurnDropdown(): void {
+  turnDropdownOpen = false;
+  turnDropdownVisibleCount = 6;
+  if (turnDropdownDismissers) {
+    document.removeEventListener("keydown", turnDropdownDismissers.onKey);
+    document.removeEventListener("mousedown", turnDropdownDismissers.onMouse);
+    turnDropdownDismissers = null;
+  }
+}
+
+// Looks up summary/dropdown by id at event-time (not a captured element
+// reference) since renderTurnStrip rebuilds both on every poll tick while the
+// dropdown may be open; a stale captured node would misreport "outside".
+function openTurnDropdown(root: string): void {
+  turnDropdownOpen = true;
+  turnDropdownVisibleCount = 6;
+  const isInside = (t: Node) =>
+    !!document.getElementById("turn-summary")?.contains(t) || !!document.getElementById("turn-dropdown")?.contains(t);
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key === "Escape") {
+      closeTurnDropdown();
+      renderTurnStrip(root);
+    }
+  };
+  const onMouse = (ev: MouseEvent) => {
+    if (!isInside(ev.target as Node)) {
+      closeTurnDropdown();
+      renderTurnStrip(root);
+    }
+  };
+  turnDropdownDismissers = { onKey, onMouse };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("mousedown", onMouse);
+}
+
+// ---- turn-scoped diff mode (turn-UX rehaul P2) ----
+// A turn row's BODY click (dropdown or breadcrumb rollback excluded) scopes
+// the diff pane to that turn's before/after snapshots instead of the normal
+// git-HEAD-vs-worktree view; see refreshScopedDiffFileList. Entered/exited
+// via the pure enterTurnScope/exitTurnScope so the transition itself stays
+// unit-testable without a DOM.
+let diffScope: DiffScope = { kind: "workspace" };
+
+type TurnActionTarget = { root: string; turn: Turn; turns: Turn[] };
+
+function currentTurnActionTarget(turnId: number): TurnActionTarget | null {
+  const root = currentRoot;
+  if (!root || !Number.isInteger(turnId)) return null;
+  const turns = getTurns(root);
+  const turn = turns.find((candidate) => candidate.id === turnId);
+  if (!turn || turn.rolledBack || turn.closedAt == null || turn.boundarySource === "open" || turn.boundarySource === "rollback") return null;
+  return { root, turn, turns };
+}
+
+function openTurnReviewDiff(turnId: number): void {
+  const target = currentTurnActionTarget(turnId);
+  if (!target) return;
+  const next = enterTurnScope(diffScope, target.turn);
+  if (next === diffScope) return;
+  // Ledger "Review diff" can enter turn scope while branch scope is active —
+  // drop the branch scope's gutter baselines/caches first (else the editor
+  // would keep diffing against the merge-base during turn review), and the
+  // "vs main" toggle must unlight, or clicking it would re-enter branch
+  // scope instead of exiting (setBranchScope reads diffScope, not the class).
+  if (diffScope.kind === "branch") resetTurnScope();
+  diffScope = next;
+  syncDiffScopeToggle();
+  diffViewer.invalidate();
+  closeTurnDropdown();
+  // setDiff owns the one file-list refresh; this also opens the pane for the
+  // future ledger caller without duplicating its existing refresh path.
+  setDiff(true);
+}
+
+function openTurnRollback(turnId: number): Promise<void> {
+  const target = currentTurnActionTarget(turnId);
+  if (!target || !isRollbackable(target.turn, target.turns)) {
+    return Promise.reject(new Error("Turn is no longer available to roll back in this workspace."));
+  }
+  const { root, turn, turns } = target;
+  return waitForRollbackAction((lifecycle) => {
+    openRollbackDialog(root, turn, {
+      turns,
+      onApply: async (paths) => applyTurnRollback(root, turn.id, paths),
+      getDiskHashes: async (resolvedRoot, paths) =>
+        Object.fromEntries(
+          (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
+        ) as Record<string, string>,
+      lifecycle,
+    });
+  });
+}
+
+async function applyTurnRollback(root: string, turnId: number, paths: string[]): Promise<RollbackResult> {
+  let target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Turn is no longer available to roll back in this workspace.");
+  }
+  // The rolled-back turn and any newer turn's code state is about to be
+  // replaced — cancel their in-flight test runs BEFORE restoring so a
+  // long-running suite cannot record a result against replaced code.
+  await cancelTurnTestsFrom(root, turnId);
+  target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Workspace or turn state changed before rollback was applied.");
+  }
+  const { turn } = target;
+  const result = await turnRollback(root, rollbackTargetId(turn), paths);
+  // A whole-turn disposition requires every file in the clicked turn to have
+  // restored. Metadata failure must not make an already-applied Git rollback
+  // look retryable, so it remains best-effort and visibly logged.
+  if (turn.files.length > 0 && turn.files.every((file) => result.restored.includes(file.path))) {
+    await queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"))
+      .catch((error) => console.warn("Task rollback review update failed", error));
+  }
+  markRolledBack(root, turn.id);
+  try {
+    replaceTurns(root, await turnList(root));
+  } catch (error) {
+    console.warn("turnList refresh after rollback failed", error);
+  }
+  if (currentRoot === root) {
+    if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
+    diffViewer.invalidate();
+    await refreshDiffFileList();
+  }
+  return result;
+}
+
+// Declared here (not beside ROOM_TABS below) because refreshTurnActionConsumers
+// runs synchronously during module eval via mountTasksPanel's initial render —
+// a later `let` would be a TDZ ReferenceError that kills the whole boot.
+let roomTablist: HTMLElement | null = null;
+
+function refreshTurnActionConsumers(): void {
+  if (currentRoot) renderTurnStrip(currentRoot);
+  ledger.render({
+    root: currentRoot,
+    turns: currentRoot ? getTurns(currentRoot) : [],
+    tasks: latestTasks,
+  });
+  // Review-room dot rides the same task/turn refresh path — no new polling.
+  renderRoomTablist();
+}
+
+const turnActions = createTurnActions({
+  openReviewDiff: openTurnReviewDiff,
+  rollbackTurn: openTurnRollback,
+  refresh: refreshTurnActionConsumers,
+});
+
+const ledgerHost = document.createElement("aside");
+ledgerHost.id = "ledger";
+ledgerHost.setAttribute("aria-label", "Turn ledger");
+$("body").appendChild(ledgerHost);
+const ledger = mountLedger(ledgerHost, turnActions, {
+  currentRoot: () => currentRoot,
+  turnsForRoot: (root) => getTurns(root),
+});
+
+// Last render's turn-strip key (see turnStripRenderKey); root-prefixed so a
+// root switch always compares unequal even if the new root's turn shape
+// happens to coincide with the old one's.
+let lastTurnStripKey: string | null = null;
+
+// A closed turn's snapshot blobs are immutable, so turnFileContent results
+// are cached per (root, turnId) rather than re-fetched every 1.5s poll tick.
+// A cached `null` means a prior IPC failure — also not retried every tick.
+let scopedDiffCache: { root: string; turnId: number; contents: Map<string, TurnFileContent | null> } | null = null;
+
+// Branch-review scope state: merge-base identity from the last successful
+// gitBranchDiffFiles fetch (breadcrumb label + hunk baseline), and a blob
+// cache keyed by that immutable merge-base commit. A cached `null` = no
+// baseline at merge-base (added file) or a prior IPC failure — not retried
+// every poll tick.
+let branchScopeBase: { label: string; oid: string } | null = null;
+let branchBaseBlobCache: { root: string; oid: string; contents: Map<string, string | null> } | null = null;
+// Every branch refresh owns a generation. A newer poll/entry/exit invalidates
+// older async work before it can replace the breadcrumb, baselines, or row
+// handlers captured against a previous merge-base.
+let branchRefreshGeneration = 0;
+
+/** Drop scoped diff mode's (turn or branch) cached state — scope, blob
+ * caches, diffViewer's scoped onExpand/onAccept closures — with no DOM work.
+ * Shared by exitScopedDiff (user-triggered exit, which also repaints the
+ * current root's strip/file-list) and openWorkspace's root-switch path, which
+ * must NOT repaint the old root's strip while switching to a new one. Callers
+ * check `diffScope.kind !== "workspace"` first, matching exitScopedDiff's
+ * existing no-op-when-not-scoped behavior. */
+function resetTurnScope(): void {
+  branchRefreshGeneration++;
+  diffScope = exitTurnScope();
+  scopedDiffCache = null;
+  branchScopeBase = null;
+  branchBaseBlobCache = null;
+  editor.setBranchScopeReadOnly(false);
+  editor.setScopedBaselines(null); // gutter back to HEAD baseline + revert re-enabled
+  diffViewer.invalidate();
+  syncDiffScopeToggle();
+}
+
+function exitScopedDiff(root: string): void {
+  if (diffScope.kind === "workspace") return;
+  resetTurnScope();
+  renderTurnStrip(root);
+  void refreshDiffFileList();
+}
+
 function renderTurnStrip(root: string): void {
   const pane = document.getElementById("diff-pane");
   if (!pane) return;
   let strip = document.getElementById("turn-strip");
+  const isFreshStrip = !strip;
   if (!strip) {
     strip = document.createElement("div");
     strip.id = "turn-strip";
     pane.prepend(strip);
   }
-  strip.textContent = "";
   const turns = getTurns(root);
+
   const onRollback = (turn: Turn) => {
-    openRollbackDialog(root, turn, {
-      turns,
-      onApply: async (paths) => {
-        // The rolled-back turn and any newer turn's code state is about to be
-        // replaced — cancel their in-flight test runs BEFORE restoring so a
-        // long-running suite can't finish against a tree that no longer
-        // matches what it was testing and get recorded as that turn's result.
-        await cancelTurnTestsFrom(root, turn.id);
-        const res = await turnRollback(root, rollbackTargetId(turn), paths);
-        // A turn has a rolled-back review disposition only when every file in
-        // that turn was restored. A partial rollback leaves it unresolved for
-        // later explicit review rather than claiming a false whole-turn result.
-        if (turn.files.length > 0 && turn.files.every((file) => res.restored.includes(file.path))) {
-          void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"));
-        }
-        // turn_poll is consume-once and never re-delivers a closed turn, so
-        // rolled_back (set server-side on the manifest) would otherwise never
-        // reach turnsByRoot — re-fetch the full list so the strip reflects it
-        // immediately instead of showing a stale live Rollback button.
-        // Optimistically flag the rolled-back turn locally FIRST so the strip
-        // disables its Rollback button even if the authoritative turnList
-        // re-fetch below throws — otherwise an IPC failure would leave a live
-        // button that re-applies into a false-success no-op. A successful
-        // turnList overwrites this with the server truth.
-        markRolledBack(root, turn.id);
-        try {
-          replaceTurns(root, await turnList(root));
-        } catch (e) {
-          console.warn("turnList refresh after rollback failed", e);
-        }
-        diffViewer.invalidate();
-        void refreshDiffFileList();
-        return res;
-      },
-      getDiskHashes: async (r, ps) =>
-        Object.fromEntries(
-          (await turnDiskHashes(r, ps)).filter(([, hash]) => hash != null),
-        ) as Record<string, string>,
-    });
+    if (currentRoot !== root) return;
+    void turnActions.rollback(turn.id).catch(() => {});
+  };
+
+  // Resolve the scope BEFORE computing the render key: a vanished turn falls
+  // back to workspace scope, which the key must reflect.
+  let scopedTurn: Turn | undefined;
+  if (diffScope.kind === "turn") {
+    const scopedTurnId = diffScope.turnId;
+    scopedTurn = turns.find((t) => t.id === scopedTurnId && !t.rolledBack);
+    if (!scopedTurn) {
+      // Turn vanished from the local cache (shouldn't happen) — fall back
+      // defensively instead of rendering a breadcrumb for nothing.
+      diffScope = exitTurnScope();
+    }
+  }
+
+  // Poll ticks fire every 1.5s; skip the rebuild when nothing render-relevant
+  // changed since the last call — this is what preserves an open dropdown's
+  // scrollTop across polling (rebuilding always resets it). Root-prefixed so
+  // a workspace switch never spuriously compares equal to the old root.
+  // Branch scope: merge-base oid rides the key so the breadcrumb rebuilds
+  // once the first fetch resolves the placeholder label into a real base.
+  const branchKey = diffScope.kind === "branch" ? branchScopeBase?.oid ?? "pending" : "";
+  const key = `${root}::${turnStripRenderKey(turns, diffScope, turnDropdownOpen, turnDropdownVisibleCount, Date.now())}::${branchKey}`;
+  if (!isFreshStrip && key === lastTurnStripKey) return;
+  lastTurnStripKey = key;
+
+  const existingDropdown = document.getElementById("turn-dropdown");
+  const savedScrollTop = existingDropdown ? existingDropdown.scrollTop : null;
+  strip.textContent = "";
+
+  if (diffScope.kind === "branch") {
+    if (turnDropdownOpen) closeTurnDropdown();
+    const breadcrumb = branchBreadcrumbEl(branchScopeBase, () => exitScopedDiff(root));
+    breadcrumb.id = "branch-breadcrumb";
+    strip.appendChild(breadcrumb);
+    return; // .turn-summary/.turn-dropdown stay hidden while scoped
+  }
+
+  if (scopedTurn) {
+    if (turnDropdownOpen) closeTurnDropdown();
+    const breadcrumb = turnBreadcrumbEl(scopedTurn, turns, () => exitScopedDiff(root), onRollback);
+    breadcrumb.id = "turn-breadcrumb";
+    strip.appendChild(breadcrumb);
+    return; // .turn-summary/.turn-dropdown stay hidden while scoped
+  }
+
+  // 0 non-synthetic turns: leave the strip with no children at all (not just
+  // a display:none row) so #turn-strip:empty collapses it, matching the
+  // pre-rehaul "hidden entirely" behavior.
+  if (turnSummaryState(turns, Date.now()).kind === "hidden") {
+    if (turnDropdownOpen) closeTurnDropdown();
+    return;
+  }
+  const onSelectTurn = (turn: Turn) => {
+    if (currentRoot !== root) return;
+    turnActions.reviewDiff(turn.id);
   };
   // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
-  // rollback can itself be undone; they aren't a real agent turn and have no
-  // useful strip entry of their own.
-  for (const turn of turns) {
-    if (turn.boundarySource === "rollback") continue;
-    strip.appendChild(turnHeaderEl(turn, turns, onRollback));
+  // rollback can itself be undone; they aren't a real agent turn and are
+  // filtered out of both the summary count and the dropdown (agent-tracking's
+  // closedTurns / turnSummaryState).
+  const summary = turnSummaryEl(turns, Date.now(), () => {
+    if (turnDropdownOpen) closeTurnDropdown();
+    else openTurnDropdown(root);
+    renderTurnStrip(root);
+  });
+  summary.id = "turn-summary";
+  strip.appendChild(summary);
+  if (turnDropdownOpen) {
+    const dropdown = turnDropdownEl(turns, Date.now(), onRollback, onSelectTurn, turnDropdownVisibleCount, () => {
+      turnDropdownVisibleCount += 20;
+      renderTurnStrip(root);
+    });
+    dropdown.id = "turn-dropdown";
+    dropdown.style.top = `${summary.offsetHeight}px`;
+    strip.appendChild(dropdown);
+    if (savedScrollTop != null) dropdown.scrollTop = savedScrollTop;
+  }
+}
+
+// Esc exits turn-scoped diff mode, same as the breadcrumb's ✕. Skipped while
+// the rollback dialog overlay is up so its own Esc-to-close (rollback-dialog.ts)
+// isn't compounded with also dropping the scope underneath it.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape" || diffScope.kind === "workspace") return;
+  if (document.querySelector(".rollback-overlay")) return;
+  if (currentRoot) exitScopedDiff(currentRoot);
+});
+
+// Turn-scoped file list: shows only `turnId`'s files, diffed against that
+// turn's own before/after snapshot content (turnFileContent) rather than
+// git-HEAD-vs-worktree — the latter would smear in every later turn's edits
+// on the same file. Fetched eagerly for all of the turn's files (turns touch
+// few) so each row's ~HEAD fallback badge is known before it's expanded, and
+// a per-file IPC error degrades to the same fallback rather than a blank row.
+async function refreshScopedDiffFileList(root: string, turnId: number): Promise<void> {
+  const turn = getTurns(root).find((t) => t.id === turnId);
+  if (!turn) {
+    exitScopedDiff(root);
+    return;
+  }
+  // Reuse the (root, turnId)-keyed cache across poll ticks — a closed turn's
+  // snapshot blobs never change — and only fetch files not already cached
+  // (a fresh cache object for a new/different scope starts empty).
+  if (!scopedDiffCache || scopedDiffCache.root !== root || scopedDiffCache.turnId !== turnId) {
+    scopedDiffCache = { root, turnId, contents: new Map() };
+  }
+  const contents = scopedDiffCache.contents;
+  const uncached = turn.files.filter((f) => !contents.has(f.path));
+  await Promise.all(
+    uncached.map(async (f) => {
+      try {
+        contents.set(f.path, await turnFileContent(root, turnId, f.path));
+      } catch (e) {
+        console.warn(`turn_file_content failed for turn ${turnId} ${f.path}`, e);
+        contents.set(f.path, null); // IPC error → same fallback as snapshotted:false; cached so it isn't retried every tick
+      }
+    }),
+  );
+  // The scope changed (or the pane closed) while the fetch was in flight.
+  if (currentRoot !== root || diffScope.kind !== "turn" || diffScope.turnId !== turnId) return;
+
+  const activePath = editor.active?.path ?? null;
+  const files = turn.files.map((f) => {
+    const content = contents.get(f.path) ?? null;
+    const headFallback = !content || !content.snapshotted;
+    return { path: f.path, status: turnFileStatus(f), badge: headFallback ? "~HEAD" : undefined };
+  });
+  diffViewer.renderFileList(files, activePath, {
+    onFilePick: (path: string) => {
+      const entry = turn.files.find((f) => f.path === path);
+      if (entry && turnFileStatus(entry) === "D") {
+        const content = contents.get(path);
+        if (content?.snapshotted && content.before != null) {
+          editor.openReadOnlySnapshot(path, content.before);
+          return;
+        }
+        void gitHeadContent(path).then((base) => {
+          if (base == null) {
+            diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+            return;
+          }
+          editor.openReadOnlySnapshot(path, base);
+        }).catch(() => diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks."));
+        return;
+      }
+      void editor.openFile(path).then(() => tree.setActive(path)).catch((e) => console.warn(`cannot open ${path}`, e));
+    },
+    onExpand: async (path: string) => {
+      const content = contents.get(path);
+      if (content?.snapshotted) return turnFileHunkRows(content.before, content.after);
+      try {
+        const entry = turn.files.find((f) => f.path === path);
+        const base = await gitHeadContent(path).catch(() => null);
+        if (entry && turnFileStatus(entry) === "D") {
+          if (base == null) diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+          return base == null ? [] : turnFileHunkRows(base, null);
+        }
+        const current = await readFile(path).catch(() => null);
+        if (current == null) {
+          diffViewer.renderStatus(basename(path), "Current file content is unavailable; no text hunks.");
+          return [];
+        }
+        return hunkSummaries(computeLineDiff(base ?? "", current).hunks);
+      } catch {
+        return [];
+      }
+    },
+    onHunkPick: (path: string, startLine: number) => {
+      const entry = turn.files.find((f) => f.path === path);
+      const content = contents.get(path);
+      if (entry && turnFileStatus(entry) === "D") {
+        if (content?.snapshotted && content.before != null) {
+          editor.openReadOnlySnapshot(path, content.before, startLine + 1);
+          return;
+        }
+        void gitHeadContent(path).then((base) => {
+          if (base == null) {
+            diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+            return;
+          }
+          editor.openReadOnlySnapshot(path, base, startLine + 1);
+        }).catch(() => diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks."));
+        return;
+      }
+      void editor.revealHunkPeek(path, startLine, entry ? turnFileStatus(entry) : "M");
+    },
+    // Scoped review is read-only against a fixed snapshot baseline — no
+    // accept/reject affordances (onAccept/onReject both omitted).
+  });
+}
+
+// Branch-review file list: everything the branch changed vs the merge-base of
+// HEAD and main/master (committed + staged + worktree + untracked), hunks
+// diffed against blobs of exactly the merge-base commit the list came from —
+// list and hunks can never disagree the way the old vs-main list did against
+// HEAD-based hunks. Read-only: committed work can't be hunk-reverted, so no
+// accept/reject affordances (same rule as turn scope).
+async function refreshBranchDiffFileList(root: string): Promise<void> {
+  const generation = ++branchRefreshGeneration;
+  const isCurrent = () =>
+    generation === branchRefreshGeneration && currentRoot === root && diffScope.kind === "branch";
+  let bd;
+  try {
+    bd = await gitBranchDiffFiles(root);
+  } catch (e) {
+    if (!isCurrent()) return;
+    branchScopeBase = null;
+    renderTurnStrip(root); // replace any resolved breadcrumb with the pending label
+    // Keep the independent branch read-only latch set. Clearing baselines only
+    // makes their availability unknown; it must not re-enable hunk revert.
+    editor.setScopedBaselines(new Map());
+    diffViewer.renderFileList([], null, {
+      onFilePick: () => {},
+      onExpand: async () => [],
+      onHunkPick: () => {},
+    });
+    diffViewer.renderStatus("Diff", `Branch diff unavailable: ${e}`);
+    return;
+  }
+  // The scope changed (or the root switched) while the fetch was in flight.
+  if (!isCurrent()) return;
+
+  if (branchScopeBase?.oid !== bd.oid || branchScopeBase?.label !== bd.base) {
+    branchScopeBase = { label: bd.base, oid: bd.oid };
+    renderTurnStrip(root); // breadcrumb placeholder → resolved base label
+    // A moved merge-base (main advanced past the old fork point) with a
+    // byte-identical file list would otherwise keep expanded rows' onExpand
+    // closures pinned to the old oid — force the list (and its closures) to
+    // rebuild whenever the baseline commit changes.
+    diffViewer.invalidate();
+  }
+  if (!branchBaseBlobCache || branchBaseBlobCache.root !== root || branchBaseBlobCache.oid !== bd.oid) {
+    branchBaseBlobCache = { root, oid: bd.oid, contents: new Map() };
+  }
+  const blobCache = branchBaseBlobCache.contents;
+  const baseOid = bd.oid;
+  // Row handlers may outlive a later poll with the same merge-base (the
+  // viewer preserves its DOM in that case). They remain valid for that base,
+  // but must stop as soon as another base/scope replaces their cache.
+  const isBaseCurrent = () =>
+    currentRoot === root &&
+    diffScope.kind === "branch" &&
+    branchScopeBase?.oid === baseOid &&
+    branchBaseBlobCache?.contents === blobCache;
+  const files = bd.files;
+  const activePath = editor.active?.path ?? null;
+
+  // Editor gutter follows the same merge-base baseline while branch-scoped:
+  // fetch base blobs for every listed file AND every open tab (an open tab
+  // outside the list still needs the scope baseline so its gutter can't
+  // disagree with the panel), then install them display-only (revert gated
+  // inside the editor). Poll-driven, so a tab opened mid-scope picks up its
+  // scoped gutter on the next 1.5s tick.
+  const scopedPaths = new Set<string>(files.map((file) => file.path));
+  for (const tab of editor.tabs) if (tab.path) scopedPaths.add(tab.path);
+  await Promise.all(
+    [...scopedPaths]
+      .filter((path) => !blobCache.has(path))
+      .map(async (path) => {
+        try {
+          // Only a successful null means "absent at merge-base". A rejected
+          // IPC call is deliberately left uncached so the next refresh retries.
+          const content = await gitCommitContent(root, baseOid, path);
+          if (isCurrent()) blobCache.set(path, content);
+        } catch (e) {
+          if (isCurrent()) console.warn(`git_commit_content failed for ${path}`, e);
+        }
+      }),
+  );
+  // Scope/root/newer refresh may have changed during the blob fetches.
+  if (!isCurrent()) return;
+  const scopedBaselines = new Map<string, string | null>();
+  // Missing is intentionally distinct from a successfully fetched null:
+  // the former is unavailable and must not become a synthetic empty baseline.
+  for (const path of scopedPaths) {
+    if (blobCache.has(path)) scopedBaselines.set(path, blobCache.get(path) ?? null);
+  }
+  editor.setScopedBaselines(scopedBaselines);
+
+  const unavailableCount = [...scopedPaths].filter((path) => !blobCache.has(path)).length;
+
+  if (files.length === 0) {
+    diffViewer.renderFileList([], null, {
+      onFilePick: () => {},
+      onExpand: async () => [],
+      onHunkPick: () => {},
+    });
+    diffViewer.renderStatus("Diff", `No changes vs ${bd.base} @ ${bd.oid.slice(0, 7)}`);
+    return;
+  }
+  // A successful null is meaningful: this file was added after the merge-base
+  // and must diff against an empty baseline. Lookup failure is deliberately a
+  // separate result so it cannot fabricate a whole-file added hunk.
+  const branchBaseForPath = async (
+    path: string,
+  ): Promise<{ available: true; content: string | null } | { available: false }> => {
+    let base = blobCache.get(path);
+    if (base === undefined) {
+      try {
+        base = await gitCommitContent(root, baseOid, path);
+        if (!isBaseCurrent()) return { available: false };
+        blobCache.set(path, base);
+      } catch (e) {
+        if (isBaseCurrent()) {
+          diffViewer.renderStatus("Diff", `Branch baseline unavailable for ${path.split("/").pop()}; retrying.`);
+          console.warn(`git_commit_content failed for ${path}`, e);
+        }
+        return { available: false };
+      }
+    }
+    return isBaseCurrent() ? { available: true, content: base ?? null } : { available: false };
+  };
+  const openDeletedBranchSnapshot = async (path: string, startLine?: number): Promise<void> => {
+    const baseline = await branchBaseForPath(path);
+    if (!baseline.available || baseline.content == null) {
+      if (isBaseCurrent()) diffViewer.renderStatus(basename(path), "Deleted merge-base content is unavailable; no text hunks.");
+      return;
+    }
+    editor.openReadOnlySnapshot(path, baseline.content, startLine === undefined ? undefined : startLine + 1);
+  };
+
+  // Branch current bytes can change without the status/path list changing.
+  // Rebuild so retained expanded paths reload their hunk rows against disk.
+  diffViewer.invalidate();
+  diffViewer.renderFileList(files, activePath, {
+    onFilePick: (path: string) => {
+      const file = files.find((candidate) => candidate.path === path);
+      if (file?.status === "D") void openDeletedBranchSnapshot(path);
+      else void viewChangedPath(path);
+    },
+    onExpand: async (path: string) => {
+      try {
+        const file = files.find((candidate) => candidate.path === path);
+        const baseline = await branchBaseForPath(path);
+        if (!baseline.available) return [];
+        const base = baseline.content ?? "";
+        if (file?.status === "D") return hunkSummaries(computeLineDiff(base, "").hunks);
+        const current = await readFile(path).catch(() => null);
+        if (current == null) {
+          if (isBaseCurrent()) diffViewer.renderStatus(basename(path), "Current file content is unavailable; no text hunks.");
+          return [];
+        }
+        if (!isBaseCurrent()) return [];
+        return hunkSummaries(computeLineDiff(base, current).hunks);
+      } catch {
+        return [];
+      }
+    },
+    onHunkPick: (path: string, startLine: number) => {
+      const file = files.find((candidate) => candidate.path === path);
+      if (file?.status === "D") void openDeletedBranchSnapshot(path, startLine);
+      else void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+    },
+  });
+  if (unavailableCount > 0 && isCurrent()) {
+    diffViewer.renderStatus("Diff", `Branch baseline unavailable for ${unavailableCount} file${unavailableCount === 1 ? "" : "s"}; retrying.`);
   }
 }
 
@@ -1116,6 +1889,14 @@ async function refreshDiffFileList(): Promise<void> {
   if (!currentRoot) return;
   const root = currentRoot;
   renderTurnStrip(root);
+  if (diffScope.kind === "turn") {
+    await refreshScopedDiffFileList(root, diffScope.turnId);
+    return;
+  }
+  if (diffScope.kind === "branch") {
+    await refreshBranchDiffFileList(root);
+    return;
+  }
   try {
     await editor.refreshCleanGitBaselines();
     if (currentRoot !== root) return;
@@ -1228,7 +2009,6 @@ const btnComposer = $("btn-composer");
 
 // Recursive file walk for the composer's @file autocomplete (cached per root).
 const COMPOSER_SKIP = new Set(["node_modules", ".git", "dist", ".cache", "build", "target", ".next"]);
-let composerFileCache: string[] | null = null;
 async function walkComposerFiles(dir: string, depth: number): Promise<string[]> {
   if (depth <= 0) return [];
   const entries = await listDir(dir).catch(() => []);
@@ -1240,10 +2020,7 @@ async function walkComposerFiles(dir: string, depth: number): Promise<string[]> 
   }
   return out;
 }
-async function getComposerFiles(root: string): Promise<string[]> {
-  if (!composerFileCache) composerFileCache = await walkComposerFiles(root, 4);
-  return composerFileCache;
-}
+const composerFileCache = new ComposerFileCache((root) => walkComposerFiles(root, 4));
 
 const LANG_BY_EXT: Record<string, string> = {
   ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", rs: "rust",
@@ -1258,20 +2035,66 @@ function composerSelection(): { path: string | null; text: string; line: number;
 
 let composerPanel: ReturnType<typeof mountComposer> | null = null;
 let composerMountedRoot: string | null = null;
-function ensureComposer(): boolean {
-  if (!currentRoot) return false;
-  if (composerPanel && composerMountedRoot === currentRoot) return true;
+const composerSurfaceBinding = new ComposerSurfaceBinding();
+const hiddenComposerSurface = new HiddenComposerSurfaceHydrator(
+  (root) => loadDraft(root),
+  (ownedRoot, state) => {
+    if (currentRoot === ownedRoot && composerPanel === null && composerPane.classList.contains("hidden")) {
+      setSurface("composer", state);
+    }
+  },
+);
+
+function disposeComposerPanel(): void {
+  composerSurfaceBinding.clear();
+  hiddenComposerSurface.clear();
   composerPanel?.dispose();
-  composerFileCache = null;
-  composerMountedRoot = currentRoot;
-  composerPanel = mountComposer({
-    root: currentRoot,
+  composerPanel = null;
+  composerMountedRoot = null;
+  composerFileCache.clear();
+}
+
+function ensureComposer(): boolean {
+  const root = currentRoot;
+  if (!root) return false;
+  if (composerPanel && composerMountedRoot === root) return true;
+  disposeComposerPanel();
+  const mounted = mountComposer({
+    root,
     trusted: false, // composer.ts re-checks localStorage trust
     container: composerBody,
-    getFiles: () => getComposerFiles(currentRoot as string),
+    getFiles: () => composerFileCache.get(root),
     getSelection: composerSelection,
   });
+  composerPanel = mounted;
+  composerMountedRoot = root;
+  composerSurfaceBinding.bind(
+    root,
+    mounted,
+    () => composerPanel === mounted && !composerPane.classList.contains("hidden"),
+    (ownedRoot, state) => {
+      if (currentRoot === ownedRoot && composerPanel === mounted) setSurface("composer", state);
+    },
+  );
   return true;
+}
+
+function resetComposerForWorkspace(): void {
+  const root = currentRoot;
+  disposeComposerPanel();
+  if (!composerPane.classList.contains("hidden")) ensureComposer();
+  else {
+    setSurface("composer", composerSurface(false, false));
+    if (root) hiddenComposerSurface.hydrate(root);
+  }
+}
+
+function syncComposerSurface(visible = !composerPane.classList.contains("hidden")): void {
+  const hasDraft = composerPanel !== null
+    && composerMountedRoot === currentRoot
+    ? composerPanel.hasDraft()
+    : currentRoot !== null && hiddenComposerSurface.hasDraft(currentRoot);
+  setSurface("composer", composerSurface(visible, hasDraft));
 }
 
 function setComposer(on: boolean): void {
@@ -1281,6 +2104,7 @@ function setComposer(on: boolean): void {
   btnComposer.classList.toggle("on", on);
   if (on) composerPanel?.show();
   else composerPanel?.hide();
+  syncComposerSurface(on);
 }
 btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
 $("composer-close").onclick = () => setComposer(false);
@@ -1457,7 +2281,9 @@ const tasksPanel = mountTasksPanel({
   }),
   onTasksChanged: (entries) => {
     const root = currentRoot;
-    if (root) annotations.setTaskContext(entries.filter((task) => task.root === root), annotationsAttach, annotationsDeliver, annotationsDetach);
+    latestTasks = root ? entries.filter((task) => task.root === root) : [];
+    annotations.setTaskContext(latestTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
+    refreshTurnActionConsumers();
   },
 });
 let tasksAgentRefreshTimer: number | undefined;
@@ -1477,6 +2303,7 @@ btnTasks.onclick = () => setTasks(tasksPane.classList.contains("hidden"));
 
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
+diffPane.tabIndex = -1; // programmatic room-focus target only, never in tab order
 const diffRes = $("diff-resizer");
 const btnDiff = $("btn-diff");
 function setDiff(on: boolean): void {
@@ -1487,9 +2314,40 @@ function setDiff(on: boolean): void {
     editor.recomputeDiff();
     void refreshDiffFileList();
   }
+  setSurface("diff", diffSurface(on));
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
+
+// ---- branch-review scope toggle (diff header "vs main" button) ----
+const btnDiffScope = $("diff-scope-toggle");
+function syncDiffScopeToggle(): void {
+  const on = diffScope.kind === "branch";
+  btnDiffScope.classList.toggle("on", on);
+  btnDiffScope.setAttribute("aria-pressed", on ? "true" : "false");
+}
+function setBranchScope(on: boolean): void {
+  if (on === (diffScope.kind === "branch")) return;
+  if (on) {
+    // Entering branch review from turn scope drops the turn scope's caches
+    // first (resetTurnScope), then re-enters as branch.
+    if (diffScope.kind === "turn") resetTurnScope();
+    diffScope = enterBranchScope();
+    editor.setBranchScopeReadOnly(true); // immediate: do not await merge-base I/O to lock revert
+    closeTurnDropdown();
+    diffViewer.invalidate();
+    syncDiffScopeToggle();
+    if (currentRoot) {
+      renderTurnStrip(currentRoot);
+      void refreshDiffFileList();
+    }
+  } else if (currentRoot) {
+    exitScopedDiff(currentRoot); // resets scope + repaints strip/file list
+  } else {
+    resetTurnScope();
+  }
+}
+btnDiffScope.onclick = () => setBranchScope(diffScope.kind !== "branch");
 
 // ---- browser toggle ----
 const browserArea = $("browser-area");
@@ -1501,8 +2359,51 @@ function setBrowser(on: boolean): void {
   if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
+  setSurface("browser", browserSurface(on, browser.hasHistory()));
 }
 btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
+
+function syncBrowserSurface(): void {
+  setSurface("browser", browserSurface(!browserArea.classList.contains("hidden"), browser.hasHistory()));
+}
+
+browser.onHistoryChanged(() => syncBrowserSurface());
+
+function syncSurfacesFromUi(): void {
+  syncTerminalSurface();
+  syncComposerSurface();
+  setSurface("diff", diffSurface(!diffPane.classList.contains("hidden")));
+  syncBrowserSurface();
+}
+
+function surfaceLabel(id: SurfaceId): string {
+  return id === "terminal" ? "Terminal" : id === "browser" ? "Browser" : id === "diff" ? "Diff" : "Composer";
+}
+
+const surfaceRestorers = {
+  terminal: () => setTerminal(true),
+  browser: () => setBrowser(true),
+  diff: () => setDiff(true),
+  composer: () => setComposer(true),
+};
+
+function renderSurfacePills(all: Surfaces): void {
+  northSurfacePills.replaceChildren();
+  for (const pill of restorableSurfacePills(all, surfaceRestorers)) {
+    const button = document.createElement("button");
+    button.className = "north-surface-pill" + (pill.live ? " live" : "");
+    button.type = "button";
+    button.textContent = surfaceLabel(pill.id);
+    button.onclick = pill.restore;
+    northSurfacePills.append(button);
+  }
+}
+
+let latestSurfaces: Surfaces | null = null;
+onSurfaces((all) => {
+  latestSurfaces = all;
+  renderSurfacePills(all);
+});
 
 // ---- open-editors switcher ----
 // Toolbar button → .menu-card dropdown listing every open tab across panes;
@@ -1608,9 +2509,153 @@ btnOpenEditors.onclick = (e) => {
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
 const vres = $("vresizer");
-function setSidebar(on: boolean): void {
+const treeEl = $("tree");
+const sidebarDrawer = createSidebarDrawer(createDomSidebarDrawerHost({
+  sidebar,
+  tree: treeEl,
+  resizer: vres,
+  overlayParent: $("body"),
+  normalizeFiles: () => {
+    if (searchViewOpen) closeSearchView();
+    outlineView?.setMode("files");
+  },
+}));
+let preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+
+function setDockedSidebar(on: boolean): void {
   sidebar.classList.toggle("hidden", !on);
   vres.classList.toggle("hidden", !on);
+}
+
+function syncSidebarView(previous: ViewId, next: ViewId): void {
+  if (previous !== "north" && next === "north") {
+    preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(false);
+  } else if (previous === "north" && next !== "north") {
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(preNorthSidebarVisible);
+  }
+}
+
+function setSidebar(on: boolean): void {
+  if (settings.view === "north") {
+    if (on) sidebarDrawer.open();
+    else sidebarDrawer.close();
+    return;
+  }
+  setDockedSidebar(on);
+}
+
+// Best-effort primary-surface focus for a room preset; each target degrades to a no-op
+// if that surface has nothing focusable yet (e.g. terminal still spinning up a session).
+function focusRoomSurface(target: "editor" | "terminal" | "diff" | "browser"): void {
+  if (target === "editor") editor.focused.view.focus();
+  else if (target === "terminal") terminals.focusActive();
+  else if (target === "browser") $<HTMLInputElement>("browser-url").focus();
+  else diffPane.focus();
+}
+
+// One shared stanza room router: presets drive the existing surface setters, never a
+// second source of truth for terminal/browser/diff/composer/sidebar visibility.
+const roomRouter = createRoomRouter({
+  setTerminal,
+  setBrowser,
+  setDiff,
+  setComposer,
+  setSidebar,
+  focus: focusRoomSurface,
+});
+
+const ROOM_TABS: readonly { id: RoomId; label: string }[] = [
+  { id: "write", label: "Write" },
+  { id: "run", label: "Run" },
+  { id: "review", label: "Review" },
+  { id: "web", label: "Web" },
+];
+// (roomTablist is declared far above, next to refreshTurnActionConsumers — TDZ.)
+
+// Active-tab highlight + Run/Review badges. Reuses terminals.liveCount() and the
+// existing latestTasks cache — no new polling.
+function renderRoomTablist(): void {
+  if (!roomTablist) return;
+  const current = roomRouter.currentRoom();
+  const runLive = terminals.liveCount() > 0;
+  const reviewDue = unresolvedTurnCount(latestTasks) > 0;
+  roomTablist.querySelectorAll<HTMLButtonElement>(".room-tab").forEach((tab) => {
+    const id = tab.dataset.room as RoomId;
+    const active = id === current;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    tab.classList.toggle("room-tab-live", id === "run" && runLive);
+    tab.classList.toggle("room-tab-dot", id === "review" && reviewDue);
+  });
+}
+
+function handleRoomTablistKeydown(event: KeyboardEvent, room: RoomId): void {
+  const index = ROOM_TABS.findIndex((tab) => tab.id === room);
+  let next: RoomId | null = null;
+  if (event.key === "ArrowRight") next = ROOM_TABS[(index + 1) % ROOM_TABS.length].id;
+  else if (event.key === "ArrowLeft") next = ROOM_TABS[(index - 1 + ROOM_TABS.length) % ROOM_TABS.length].id;
+  else if (event.key === "Home") next = ROOM_TABS[0].id;
+  else if (event.key === "End") next = ROOM_TABS[ROOM_TABS.length - 1].id;
+  if (!next) return;
+  event.preventDefault();
+  roomRouter.enterRoom(next);
+  roomTablist?.querySelector<HTMLButtonElement>(`[data-room="${next}"]`)?.focus();
+}
+
+// Builds/tears down the room tablist strip on stanza entry/exit — mirrors the
+// graphite band-tab row's dynamic-DOM lifecycle (syncGraphiteBottomPanel).
+function syncRoomTablist(): void {
+  if (!document.documentElement.classList.contains("view-stanza")) {
+    if (roomTablist) {
+      roomTablist.remove();
+      roomTablist = null;
+    }
+    return;
+  }
+  if (roomTablist) return;
+  const list = document.createElement("div");
+  list.className = "room-tablist";
+  list.setAttribute("role", "tablist");
+  list.setAttribute("aria-orientation", "horizontal");
+  list.setAttribute("aria-label", "Room");
+  for (const { id, label } of ROOM_TABS) {
+    const tab = document.createElement("button");
+    tab.className = "room-tab";
+    tab.type = "button";
+    tab.id = `room-tab-${id}`;
+    tab.dataset.room = id;
+    tab.setAttribute("role", "tab");
+    tab.textContent = label;
+    tab.onclick = () => roomRouter.enterRoom(id);
+    tab.onkeydown = (event) => handleRoomTablistKeydown(event, id);
+    list.append(tab);
+  }
+  roomTablist = list;
+  $("body").before(list);
+  renderRoomTablist();
+}
+roomRouter.onRoomChange(() => renderRoomTablist());
+// Shelf activates/deactivates on every room change within stanza (Write <-> the rest);
+// entering/leaving stanza itself is handled separately in applySettings (no room
+// change fires there — leaving stanza never calls roomRouter.enterRoom).
+roomRouter.onRoomChange(() => syncShelfMode());
+// Run-room pulse rides the existing session-liveness notifications — no new polling.
+terminals.onSessionsChanged(() => renderRoomTablist());
+
+async function openSidebarFile(path: string, line?: number): Promise<void> {
+  await editor.openFile(path, line);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
+}
+
+async function openSidebarFileInPane(path: string, side: "left" | "right"): Promise<void> {
+  await editor.openFileInSide(path, side);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
 }
 
 function togglePreview(): void {
@@ -1620,13 +2665,24 @@ function togglePreview(): void {
 }
 
 // ---- search view toggle ----
-const treeEl = $("tree");
 const searchView = $("search-view");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
 let searchIconHtml = "";
+// Set true only while the stanza Write-room shelf (T8b) is active — see
+// syncShelfMode below. Declared here (ahead of its assignment site) because
+// openSearchView/closeSearchView close over it; both only ever run after full
+// module init, by which point syncShelfMode has already been defined.
+let shelfActive = false;
 
 function openSearchView(): void {
+  // Shelf mode already co-displays Files/Outline/Search — opening search here
+  // must not collapse it back to the exclusive Files<->Outline toggle (D-item
+  // 3 of T8b); just focus the always-visible search section instead.
+  if (shelfActive) {
+    search.focus();
+    return;
+  }
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
@@ -1637,6 +2693,7 @@ function openSearchView(): void {
 }
 
 function closeSearchView(): void {
+  if (shelfActive) return; // nothing to collapse — search stays co-displayed
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
@@ -1645,7 +2702,15 @@ function closeSearchView(): void {
 }
 
 function toggleSearchView(): void {
+  if (shelfActive) return; // toggle button is hidden in shelf mode; defensive no-op
   if (searchViewOpen) closeSearchView(); else openSearchView();
+}
+
+function openSidebarSearch(): void {
+  if (settings.view === "north") setSidebar(true);
+  if (!shelfActive) outlineView?.setMode("files");
+  if (!searchViewOpen) openSearchView();
+  search.focus();
 }
 
 // ---- background-poll idle gate ----
@@ -1795,8 +2860,9 @@ async function pollAgentChanges(): Promise<void> {
     const res = await turnPoll(root);
     if (currentRoot !== root) return;
     setTurnState(root, res);
-    // Strip re-render after state update (refreshDiffFileList above ran pre-poll).
-    if (!diffPane.classList.contains("hidden")) renderTurnStrip(root);
+    // Shared turn consumers re-render after state update
+    // (refreshDiffFileList above ran pre-poll).
+    refreshTurnActionConsumers();
   } catch {
     // Poll failures must not interrupt editing.
   }
@@ -1838,6 +2904,12 @@ function showTrustToast(root: string): void {
   trustBtn.onclick = () => {
     void (async () => {
       await trustWorkspace(root); // must land before the trust re-check below
+      // Sync the in-memory gate too: MCP get_annotations and the rail banner
+      // read this flag, and without it the grant only took effect on reopen.
+      if (currentRoot === root) {
+        currentWorkspaceTrusted = true;
+        annotations.setMcpShared(true);
+      }
       hideTrustToast();
       void runDiagnostics(root); // run the now-permitted jobs immediately
       // Top-level reload so the now-trusted root runs its one-time worktree
@@ -1997,15 +3069,23 @@ export async function cancelTaskRequiredCheck(task: Task, automationId: string):
 }
 
 // Auto-run the project's test automation when an agent turn closes.
+onTurnClosed((root) => {
+  if (currentRoot === root) refreshTurnActionConsumers();
+});
+
 onTurnClosed((root, turn) => {
   void (async () => {
     if (!isTestAutoRunEnabled(root)) return;
     if (!(await isWorkspaceTrusted(root))) return; // never auto-run a repo's test command for an untrusted folder
     const test = testAutomation(automations);
     if (!test) return;
-    await turnTestRecord(root, turn.id, { state: "running", outputTail: "" })
-      .then(() => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000))
-      .catch(() => {});
+    await launchTurnTest(
+      root,
+      turn.id,
+      turnTestRecord,
+      () => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000),
+      () => { if (currentRoot === root) refreshTurnActionConsumers(); },
+    );
   })();
 });
 
@@ -2077,12 +3157,18 @@ void onRunnerDone((p) => {
   const root = rest.slice(0, sep);
   const turnId = Number(rest.slice(sep + 1));
   if (!Number.isFinite(turnId)) return;
-  void turnTestRecord(root, turnId, {
-    state: p.exitCode === 0 ? "pass" : "fail",
+  const finalStatus: TestStatus = {
+    state: runnerDoneTestState(p),
     exitCode: p.exitCode,
     durationMs: p.durationMs,
     outputTail: (p.stdout + p.stderr).slice(-4000),
-  }).catch(() => {});
+  };
+  // Same rationale as the "running" stamp above: keep the local model
+  // truthful to what the runner observed even if the backend record call
+  // below fails.
+  setTurnTestStatus(root, turnId, finalStatus);
+  if (currentRoot === root) refreshTurnActionConsumers();
+  void turnTestRecord(root, turnId, finalStatus).catch(() => {});
 });
 
 // MCP/agent navigation: open file + reveal line.
@@ -2101,8 +3187,167 @@ const problemsHost = $("problems-panel-host");
 problemsHost.append(problemsPanelEl());
 const sessionsHost = $("sessions-panel-host");
 sessionsHost.append(sessionsPanelEl());
-function setProblemsPanel(on: boolean): void {
+type GraphiteBottomPanel = "terminal" | "problems";
+type GraphiteBottomSnapshot = {
+  drawer: DrawerState;
+  problemsOpen: boolean;
+  terminalMaximize: TerminalMaximizeState;
+};
+type GraphiteHostAccessibilitySnapshot = {
+  role: string | null;
+  ariaLabelledBy: string | null;
+  ariaHidden: string | null;
+  hidden: boolean;
+};
+const GRAPHITE_BOTTOM_PANELS: readonly GraphiteBottomPanel[] = ["terminal", "problems"];
+const terminalHost = $("term-host");
+let graphiteBand: HTMLElement | null = null;
+let graphiteBottomPanel: GraphiteBottomPanel = "terminal";
+let graphiteBottomSnapshot: GraphiteBottomSnapshot | null = null;
+let graphiteHostAccessibilitySnapshot: {
+  terminal: GraphiteHostAccessibilitySnapshot;
+  problems: GraphiteHostAccessibilitySnapshot;
+} | null = null;
+
+function setProblemsHost(on: boolean): void {
   problemsHost.classList.toggle("hidden", !on);
+}
+
+function renderGraphiteBottomPanel(): void {
+  if (!graphiteBand) return;
+  graphiteBand.querySelectorAll<HTMLButtonElement>(".graphite-band-tab").forEach((tab) => {
+    const active = tab.dataset.panel === graphiteBottomPanel;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  const terminalActive = graphiteBottomPanel === "terminal";
+  terminalHost.hidden = !terminalActive;
+  terminalHost.setAttribute("aria-hidden", String(!terminalActive));
+  problemsHost.hidden = terminalActive;
+  problemsHost.setAttribute("aria-hidden", String(terminalActive));
+}
+
+function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  setTerminal(panel === "terminal");
+}
+
+function focusGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  setGraphiteBottomPanel(panel);
+  graphiteBand?.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)?.focus();
+}
+
+function handleGraphiteBandKeydown(event: KeyboardEvent, panel: GraphiteBottomPanel): void {
+  const index = GRAPHITE_BOTTOM_PANELS.indexOf(panel);
+  let next: GraphiteBottomPanel | null = null;
+  if (event.key === "ArrowRight") next = GRAPHITE_BOTTOM_PANELS[(index + 1) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "ArrowLeft") next = GRAPHITE_BOTTOM_PANELS[(index - 1 + GRAPHITE_BOTTOM_PANELS.length) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "Home") next = GRAPHITE_BOTTOM_PANELS[0];
+  else if (event.key === "End") next = GRAPHITE_BOTTOM_PANELS[GRAPHITE_BOTTOM_PANELS.length - 1];
+  if (!next) return;
+  event.preventDefault();
+  focusGraphiteBottomPanel(next);
+}
+
+function mountGraphitePanelAccessibility(): void {
+  const snapshot = (host: HTMLElement): GraphiteHostAccessibilitySnapshot => ({
+    role: host.getAttribute("role"),
+    ariaLabelledBy: host.getAttribute("aria-labelledby"),
+    ariaHidden: host.getAttribute("aria-hidden"),
+    hidden: host.hasAttribute("hidden"),
+  });
+  graphiteHostAccessibilitySnapshot = {
+    terminal: snapshot(terminalHost),
+    problems: snapshot(problemsHost),
+  };
+  terminalHost.setAttribute("role", "tabpanel");
+  terminalHost.setAttribute("aria-labelledby", "graphite-band-tab-terminal");
+  problemsHost.setAttribute("role", "tabpanel");
+  problemsHost.setAttribute("aria-labelledby", "graphite-band-tab-problems");
+}
+
+function clearGraphitePanelAccessibility(): void {
+  const snapshot = graphiteHostAccessibilitySnapshot;
+  graphiteHostAccessibilitySnapshot = null;
+  if (!snapshot) return;
+  const restore = (host: HTMLElement, state: GraphiteHostAccessibilitySnapshot): void => {
+    for (const [attribute, value] of [
+      ["role", state.role],
+      ["aria-labelledby", state.ariaLabelledBy],
+      ["aria-hidden", state.ariaHidden],
+    ] as const) {
+      if (value === null) host.removeAttribute(attribute);
+      else host.setAttribute(attribute, value);
+    }
+    host.hidden = state.hidden;
+  };
+  restore(terminalHost, snapshot.terminal);
+  restore(problemsHost, snapshot.problems);
+}
+
+function syncGraphiteBottomPanel(): void {
+  if (!document.documentElement.classList.contains("view-graphite")) {
+    if (graphiteBand) {
+      graphiteBand.remove();
+      graphiteBand = null;
+      clearGraphitePanelAccessibility();
+      const snapshot = graphiteBottomSnapshot;
+      graphiteBottomSnapshot = null;
+      if (snapshot) {
+        terminals.setMaximizeState(null);
+        drawerState = snapshot.drawer;
+        setTerminal(snapshot.drawer.open);
+        setProblemsHost(snapshot.problemsOpen);
+        terminals.setMaximizeState(snapshot.terminalMaximize);
+      } else {
+        termArea.style.flex = drawerState.open ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+        renderTerminalSeam();
+      }
+    }
+    return;
+  }
+  if (!graphiteBand) {
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
+    const band = document.createElement("div");
+    band.className = "graphite-band";
+    band.setAttribute("role", "tablist");
+    band.setAttribute("aria-orientation", "horizontal");
+    for (const panel of GRAPHITE_BOTTOM_PANELS) {
+      const tab = document.createElement("button");
+      tab.className = "graphite-band-tab";
+      tab.type = "button";
+      tab.id = `graphite-band-tab-${panel}`;
+      tab.dataset.panel = panel;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", panel === "terminal" ? "term-host" : "problems-panel-host");
+      tab.textContent = panel === "terminal" ? "Terminal" : "Problems";
+      tab.onclick = () => setGraphiteBottomPanel(panel);
+      tab.onkeydown = (event) => handleGraphiteBandKeydown(event, panel);
+      band.append(tab);
+    }
+    graphiteBand = band;
+    termArea.prepend(band);
+    mountGraphitePanelAccessibility();
+    if (!drawerState.open) termArea.style.flex = "0 0 35px";
+  }
+  const panel = problemsHost.classList.contains("hidden") ? "terminal" : "problems";
+  if (uiStateLoaded) setGraphiteBottomPanel(panel);
+  else {
+    graphiteBottomPanel = panel;
+    renderGraphiteBottomPanel();
+  }
+}
+
+function setProblemsPanel(on: boolean): void {
+  if (document.documentElement.classList.contains("view-graphite")) {
+    setGraphiteBottomPanel(on ? "problems" : "terminal");
+    return;
+  }
+  setProblemsHost(on);
 }
 function setSessionsPanel(on: boolean): void {
   sessionsHost.classList.toggle("hidden", !on);
@@ -2133,7 +3378,10 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-let lastWhisperSig = "";
+function chipHost(): HTMLElement {
+  return whisperHostCache.host(document.documentElement.classList.contains("view-north"));
+}
+
 function renderWhisperBar(): void {
   const dirty = editor.tabs.some((tab) => tab.dirty);
   const activePath = editor.active?.path ?? null;
@@ -2146,10 +3394,10 @@ function renderWhisperBar(): void {
   // of the signature too — an active→inactive flip with identical leftover text must
   // still trigger the rebuild that drops it from the DOM.
   const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${debugSession.active}:${debugChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
-  if (sig === lastWhisperSig) return;
-  lastWhisperSig = sig;
+  if (!whisperHostCache.shouldRender(sig)) return;
 
-  whisperBar.innerHTML = "";
+  const host = chipHost();
+  host.replaceChildren();
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
@@ -2174,7 +3422,7 @@ function renderWhisperBar(): void {
   // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
   // hidden, with no session), multi-session aggregate strip.
   const dbgChip = debugSession.active ? [debugChipEl()] : [];
-  whisperBar.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
+  host.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -2234,7 +3482,53 @@ window.addEventListener("dragend", clearPaneDropHint);
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
   const mod = isMod(e);
-  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
+  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S.
+  const blockingOverlayActive = hasActiveBlockingOverlay(
+    document.querySelectorAll<HTMLElement>(BLOCKING_OVERLAY_SELECTOR),
+  );
+  if (handleSidebarDrawerShortcut(sidebarDrawer, {
+    key: e.key,
+    code: e.code,
+    mod,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey,
+    repeat: e.repeat,
+    defaultPrevented: e.defaultPrevented,
+    target: e.target,
+    preventDefault: () => e.preventDefault(),
+    stopPropagation: () => e.stopPropagation(),
+  }, { north: settings.view === "north", blockingOverlayActive })) return;
+  if (
+    settings.view === "north"
+    && mod
+    && e.code === "KeyL"
+    && !e.shiftKey
+    && !e.altKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    ledger.toggle();
+    return;
+  }
+  // ⌘1–4 stanza room switch: physical Digit codes, stanza-only, suppressed while a
+  // blocking overlay (palette/settings/rollback/task-modal) or the drawer is open.
+  if (
+    settings.view === "stanza"
+    && uiStateLoaded
+    && e.metaKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && /^Digit[1-4]$/.test(e.code)
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    roomRouter.enterRoom(ROOM_TABS[Number(e.code.slice(5)) - 1].id);
+    return;
+  }
   if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
@@ -2257,7 +3551,7 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
     setTerminal(!drawerState.open);
-  } else if (mod && e.code === "KeyB") {
+  } else if (mod && e.code === "KeyB" && settings.view !== "north") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
   } else if (mod && e.shiftKey && e.code === "KeyP") {
@@ -2278,8 +3572,7 @@ window.addEventListener("keydown", (e) => {
     togglePreview();
   } else if (mod && e.shiftKey && e.code === "KeyF") {
     e.preventDefault();
-    if (!searchViewOpen) openSearchView();
-    search.focus();
+    openSidebarSearch();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(!drawerState.open);
@@ -2397,7 +3690,9 @@ const actions = {
   toggleTerminal: () => setTerminal(!drawerState.open),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
-  toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
+  toggleSidebar: () => setSidebar(settings.view === "north"
+    ? !sidebarDrawer.isOpen()
+    : sidebar.classList.contains("hidden")),
   newTerminal: () => void terminals.create(),
   increaseFontSize: () => persistSettings(nextFontSettings(settings, 1)),
   decreaseFontSize: () => persistSettings(nextFontSettings(settings, -1)),
@@ -2433,9 +3728,11 @@ gitBar = createGitBar($("branch-whisper"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path); // worktree is its own root; re-open only, trust not auto-granted
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
-async function refreshGitState(root: string): Promise<void> {
+async function refreshGitState(root: string, isCurrent = () => currentRoot === root): Promise<void> {
+  if (!isCurrent()) return;
   await editor.refreshCleanGitBaselines();
-  await gitBar.refresh(root);
+  if (!isCurrent()) return;
+  await gitBar.refresh(root, isCurrent);
 }
 
 // ---- automations ----
@@ -2630,11 +3927,13 @@ const paletteCommands: Command[] = [
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
   { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
+  { id: "view-classic", title: "View: Classic", run: () => setView("classic") },
+  { id: "view-north", title: "View: North Light", run: () => setView("north") },
+  { id: "view-graphite", title: "View: Graphite", run: () => setView("graphite") },
+  { id: "view-stanza", title: "View: Stanza", run: () => setView("stanza") },
+  { id: "view-variant-next", title: "View variant: next", run: nextViewVariant },
   { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
-  { id: "search", title: "Search Folder", run: () => {
-    if (!searchViewOpen) openSearchView();
-    search.focus();
-  }, shortcut: fmtShortcut("F", { shift: true }) },
+  { id: "search", title: "Search Folder", run: openSidebarSearch, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
   { id: "about", title: "About Sutra", run: () => openAbout() },
   { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
@@ -2646,6 +3945,16 @@ const paletteCommands: Command[] = [
   { id: "debug-step-out", title: "Debug: Step Out", run: () => void debugSession.stepOut(), shortcut: "⇧F11" },
   { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop(), shortcut: "⇧F5" },
 ];
+
+function setView(view: ViewId): void {
+  persistSettings({ ...settings, view, theme: VIEW_VARIANTS[view][0] });
+}
+
+function nextViewVariant(): void {
+  const variants = VIEW_VARIANTS[settings.view];
+  const current = variants.indexOf(settings.theme);
+  persistSettings({ ...settings, theme: variants[(current + 1) % variants.length] });
+}
 
 function recentPaletteCommands(): Command[] {
   // mountPalette's builder must stay synchronous — read the cached snapshot
@@ -2725,7 +4034,7 @@ outlineView = new OutlineView(
   () => editor.getDocumentSymbols(),
 );
 outlineView.onRevealLine = (path, line) => {
-  void editor.openFile(path, line).then(() => editor.revealLine(line));
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
 };
 
 // Refresh the outline when the active file changes.
@@ -2741,6 +4050,44 @@ editor.onDocChanged = () => {
   const activePath = editor.active?.path;
   if (activePath) notifyDocChanged(activePath);
 };
+
+// ---- W3/T8b: stanza Write-room shelf ----
+// Stacked co-display of Files + Outline + Search, active only in stanza's Write
+// room (D11). Reuses the exact FileTree/OutlineView/SearchPanel DOM nodes —
+// treeEl, outlineView.panelEl and searchView — never clones or rebuilds them;
+// the only new DOM is one small label header per section, reparented beside
+// each node in the order sidebarSections("stacked") defines.
+const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline", search: "Search" };
+const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl, search: searchView };
+const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section, index) => {
+  const label = document.createElement("div");
+  label.className = index === 0 ? "shelf-label shelf-label-first hidden" : "shelf-label hidden";
+  label.textContent = SHELF_SECTION_LABEL[section];
+  SHELF_SECTION_EL[section].before(label);
+  return label;
+});
+
+/** Toggle the stanza Write-room shelf on/off: stacked Files/Outline/Search
+ *  co-display vs. the existing exclusive Files<->Outline sidebar. Called on
+ *  every stanza room change (write <-> run/review/web) and on every view
+ *  change (entering/leaving stanza). Idempotent — no-op if already in the
+ *  target state, so it's safe to call from both triggers unconditionally. */
+function syncShelfMode(): void {
+  const active = settings.view === "stanza" && roomRouter.currentRoom() === "write";
+  if (active === shelfActive) return;
+  shelfActive = active;
+  sidebar.classList.toggle("shelf-active", active);
+  for (const label of shelfLabels) label.classList.toggle("hidden", !active);
+  btnSearchToggle.classList.toggle("hidden", active);
+  if (active) {
+    outlineView.setMode("stacked");
+    searchView.classList.remove("hidden");
+  } else {
+    if (searchViewOpen) closeSearchView();
+    else searchView.classList.add("hidden");
+    outlineView.setMode("files");
+  }
+}
 
 // Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
 // by the same state notification the strip uses. Wired here (not beside the strip near
@@ -2760,15 +4107,27 @@ renderWhisperBar();
 // the user left off instead of a blank window; skips silently if the folder
 // was moved/deleted since last run.
 void (async function boot(): Promise<void> {
-  settings = await loadSettings();
-  applySettings(settings);
+  applySettings(await loadSettings());
 
   const ui = await readUiState({
     drawerRaw: localStorage.getItem(DRAWER_KEY),
     composerHRaw: localStorage.getItem(LEGACY_DRAWER_H_KEY),
   });
   drawerState = ui.terminalDrawer;
+  uiStateLoaded = true;
+  if (graphiteBand) {
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
+  }
   setTerminal(drawerState.open);
+  syncSurfacesFromUi();
+  // Deferred from applySettings' boot-time call (uiStateLoaded was still false
+  // there): booting straight into stanza applies the room preset only now that
+  // drawer heights/panel visibility have been restored.
+  if (settings.view === "stanza") roomRouter.enterRoom(roomRouter.currentRoom());
 
   // One-shot on upgrade: port pre-migration recents/trustedRoots into the
   // backend, then seed the trusted set from folders already in recents so

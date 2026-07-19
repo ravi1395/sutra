@@ -132,6 +132,22 @@ export interface Task {
   evidence: readonly Evidence[];
 }
 
+export type TurnReviewState = TurnReviewDisposition | "unresolved";
+
+export function turnReviewState(task: Task, turnId: number): TurnReviewState {
+  return task.turnReviews?.[String(turnId)] ?? "unresolved";
+}
+
+export function unresolvedTurnCount(tasks: readonly Task[]): number {
+  let count = 0;
+  for (const task of tasks) {
+    for (const turnId of task.turnIds) {
+      if (turnReviewState(task, turnId) === "unresolved") count += 1;
+    }
+  }
+  return count;
+}
+
 export interface TaskLoadResult {
   tasks: Task[];
   warnings: string[];

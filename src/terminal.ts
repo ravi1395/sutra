@@ -1,12 +1,13 @@
 // Terminal subsystem: xterm.js front-ends bound to portable-pty sessions in Rust.
 // Multiple terminals; toggling the panel only hides the DOM — PTYs keep running,
 // so reopening resumes the live session.
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme, type ILink, type ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { ptySpawn, ptyWrite, ptyResize, ptyKill, ptyIsBusy, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin } from "./ipc";
+import { homeDir } from "@tauri-apps/api/path";
+import { ptySpawn, ptyWrite, ptyResize, ptyKill, ptyIsBusy, onPtyOutput, onPtyExit, clipboardRead, clipboardWrite, agentTrackingBegin, fileMtime } from "./ipc";
 import { isIntegratedAgentCommand } from "./agent-tracking";
 import { showContextMenu, type ContextMenuItem } from "./contextmenu";
 import { beginSplitPointerDrag } from "./split-drop";
@@ -21,6 +22,9 @@ import {
 import { icon } from "./icons";
 import { isMod } from "./shortcuts";
 import { isControlSequence } from "./terminal-input";
+import { cssVar, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
+
+export type TerminalMaximizeState = TerminalGroupSide | null;
 
 interface Term {
   id: string;
@@ -29,17 +33,244 @@ interface Term {
   el: HTMLElement;
   title: string;
   alive: boolean;
+  spawnPending: boolean;
   agentAttached: boolean;
   cmdHistory: string[]; // Recent commands for autocomplete
   currentInput: string; // Current line being typed
+  cwd: string | null; // Spawn-time cwd (session.cwd) — used to resolve relative file links
 }
 
-const THEME = {
-  background: "#181818",
-  foreground: "#cccccc",
-  cursor: "#cccccc",
-  selectionBackground: "#264f78",
-};
+type SessionSnapshot = { count: number; liveCount: number };
+type SessionNotification = SessionSnapshot & { listeners: (() => void)[] };
+
+/** Build the live xterm theme from CSS tokens (full ANSI-16 + bg/fg/cursor/selection). */
+export function buildTermTheme(): ITheme {
+  return {
+    background: cssVar("--term-bg", D.background),
+    foreground: cssVar("--term-fg", D.foreground),
+    cursor: cssVar("--term-fg", D.cursor),
+    cursorAccent: cssVar("--term-bg", D.cursorAccent),
+    selectionBackground: cssVar("--em-wash", D.selectionBackground),
+    black: cssVar("--ansi-black", D.black),
+    red: cssVar("--ansi-red", D.red),
+    green: cssVar("--ansi-green", D.green),
+    yellow: cssVar("--ansi-yellow", D.yellow),
+    blue: cssVar("--ansi-blue", D.blue),
+    magenta: cssVar("--ansi-magenta", D.magenta),
+    cyan: cssVar("--ansi-cyan", D.cyan),
+    white: cssVar("--ansi-white", D.white),
+    brightBlack: cssVar("--ansi-bright-black", D.brightBlack),
+    brightRed: cssVar("--ansi-bright-red", D.brightRed),
+    brightGreen: cssVar("--ansi-bright-green", D.brightGreen),
+    brightYellow: cssVar("--ansi-bright-yellow", D.brightYellow),
+    brightBlue: cssVar("--ansi-bright-blue", D.brightBlue),
+    brightMagenta: cssVar("--ansi-bright-magenta", D.brightMagenta),
+    brightCyan: cssVar("--ansi-bright-cyan", D.brightCyan),
+    brightWhite: cssVar("--ansi-bright-white", D.brightWhite),
+  };
+}
+
+/** Re-theme every live terminal session in place; xterm repaints on `options.theme` assignment.
+ *  Exported (rather than inlined in the subscription) so tests can drive it against fake
+ *  sessions without a MutationObserver/DOM. */
+export function retheme(sessions: ReadonlyArray<{ term: Pick<Terminal, "options"> }>): void {
+  const theme = buildTermTheme();
+  for (const s of sessions) s.term.options.theme = theme;
+}
+
+/** Classify a URL's host for cmd+click routing: loopback hosts open in Sutra's embedded
+ *  browser pane, everything else goes to the OS default browser. */
+export function classifyLink(uri: string): "localhost" | "external" {
+  try {
+    const host = new URL(uri).hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") {
+      return "localhost";
+    }
+  } catch {
+    // Unparsable — fall through to external so we never silently misroute.
+  }
+  return "external";
+}
+
+interface PathMatch {
+  path: string;
+  line?: number;
+  index: number;
+  length: number;
+}
+
+// Path-ish token: optional prefix (~/, ~, ../, ./, /) + a body of word/dot/slash/hyphen chars,
+// plus an optional :line[:col] suffix (col is captured only to be dropped — openFile has no
+// column support). Bare words with no separator, extension, or :line are filtered out below so
+// stray identifiers in shell output don't turn into link spam.
+const PATH_TOKEN_SRC = String.raw`(~\/|~|\.\.\/|\.\/|\/)?(\w[\w./-]*)(?::(\d+)(?::\d+)?)?`;
+
+function findPathMatches(lineText: string, cap = 20): PathMatch[] {
+  const re = new RegExp(PATH_TOKEN_SRC, "g");
+  const out: PathMatch[] = [];
+  let m: RegExpExecArray | null;
+  while (out.length < cap && (m = re.exec(lineText))) {
+    const path = (m[1] ?? "") + m[2];
+    const hasLine = m[3] !== undefined;
+    const pathIsh = path.includes("/") || /\.[A-Za-z0-9]+$/.test(path) || hasLine;
+    if (pathIsh) {
+      out.push({ path, line: hasLine ? Number(m[3]) : undefined, index: m.index, length: m[0].length });
+    }
+  }
+  return out;
+}
+
+/** Extract path-ish tokens (with optional :line[:col], col dropped) from one terminal line of text. */
+export function extractPathCandidates(lineText: string): Array<{ path: string; line?: number }> {
+  return findPathMatches(lineText).map(({ path, line }) => (line === undefined ? { path } : { path, line }));
+}
+
+export type MtimeProbe = (path: string) => Promise<number>;
+
+function joinPosix(base: string, rel: string): string {
+  const b = base.endsWith("/") ? base.slice(0, -1) : base;
+  const r = rel.startsWith("/") ? rel.slice(1) : rel;
+  return `${b}/${r}`;
+}
+
+/** Resolve a path-ish token to a validated absolute path, trying (in order) the literal token,
+ *  home-expansion, the spawning terminal's cwd, then the workspace root — first mtime hit wins.
+ *  `probe` and `home` are injected so tests can stub filesystem existence. */
+export async function resolveLinkPath(
+  path: string,
+  ctx: { cwd: string | null; workspaceRoot: string | null; home: string | null },
+  probe: MtimeProbe,
+): Promise<string | null> {
+  const isTilde = path === "~" || path.startsWith("~/");
+  const attempts: string[] = [];
+  // Bare-literal probe only for already-absolute tokens (incl. ~-prefixed, absolute post-expansion) —
+  // a plain relative token must never hit fs::metadata as-is: that resolves against the Sutra
+  // process's launch cwd, not the terminal session's cwd, and can shadow the real match below.
+  if (path.startsWith("/") || isTilde) attempts.push(path);
+  if (isTilde) {
+    if (ctx.home) attempts.push(path === "~" ? ctx.home : joinPosix(ctx.home, path.slice(2)));
+  }
+  if (!path.startsWith("/")) {
+    if (ctx.cwd) attempts.push(joinPosix(ctx.cwd, path));
+    if (ctx.workspaceRoot) attempts.push(joinPosix(ctx.workspaceRoot, path));
+  }
+  for (const attempt of attempts) {
+    try {
+      await probe(attempt);
+      return attempt;
+    } catch {
+      // Not this one — try the next candidate location.
+    }
+  }
+  return null;
+}
+
+let cachedHomeDir: Promise<string | null> | null = null;
+/** Cached best-effort home dir via Tauri's core path resolver (the renderer has no HOME env). */
+function getHomeDir(): Promise<string | null> {
+  if (!cachedHomeDir) cachedHomeDir = homeDir().catch(() => null);
+  return cachedHomeDir;
+}
+
+/** Collect the full logical (wrapped) line containing buffer row `y0` (0-based): walk back to
+ *  the row that starts the wrap chain, then forward through every continuation row. Adapted from
+ *  @xterm/addon-web-links's windowing strategy (MIT) without its space heuristic — path tokens,
+ *  like URLs, never legitimately contain unescaped spaces, so a straight wrap-chain walk is
+ *  precise here without needing that shortcut. */
+function getWindowedLine(term: Terminal, y0: number): { text: string; startRow: number } | null {
+  const buf = term.buffer.active;
+  if (!buf.getLine(y0)) return null;
+  let startRow = y0;
+  while (startRow > 0 && buf.getLine(startRow)?.isWrapped) startRow--;
+  const parts: string[] = [];
+  let row = startRow;
+  let guard = 0;
+  do {
+    const line = buf.getLine(row);
+    if (!line) break;
+    parts.push(line.translateToString(true));
+    row++;
+    guard++;
+  } while (guard < 200 && buf.getLine(row)?.isWrapped);
+  return { text: parts.join(""), startRow };
+}
+
+/** Port of @xterm/addon-web-links's `_mapStrIdx` (MIT): advance `count` string characters from
+ *  (lineIndex, columnIndex), returning the buffer position reached — walking through wrapped
+ *  continuation rows and accounting for wide (2-cell) characters. */
+function mapStrIdx(term: Terminal, lineIndex: number, columnIndex: number, count: number): [number, number] {
+  const buf = term.buffer.active;
+  const nullCell = buf.getNullCell();
+  let li = lineIndex;
+  let col = columnIndex;
+  let remaining = count;
+  while (remaining > 0) {
+    const line = buf.getLine(li);
+    if (!line) return [-1, -1];
+    for (let x = col; x < line.length; x++) {
+      line.getCell(x, nullCell);
+      const chars = nullCell.getChars();
+      if (nullCell.getWidth()) {
+        remaining -= chars.length || 1;
+        if (x === line.length - 1 && chars === "") {
+          const nextLine = buf.getLine(li + 1);
+          if (nextLine?.isWrapped) {
+            nextLine.getCell(0, nullCell);
+            if (nullCell.getWidth() === 2) remaining += 1;
+          }
+        }
+      }
+      if (remaining < 0) return [li, x];
+    }
+    li++;
+    col = 0;
+  }
+  return [li, col];
+}
+
+/** Custom xterm link provider for file paths — WebLinksAddon's regex is URL-only. Reads the
+ *  hovered logical (wrapped) line, extracts path-ish candidates, resolves+validates each against
+ *  the filesystem, and only surfaces validated paths as clickable links (modifier-gated). */
+export class FileLinkProvider implements ILinkProvider {
+  constructor(
+    private readonly term: Terminal,
+    private readonly getCwd: () => string | null,
+    private readonly getWorkspaceRoot: () => string | null,
+    private readonly probe: MtimeProbe,
+    private readonly onActivate: (absPath: string, line?: number) => void,
+  ) {}
+
+  provideLinks(y: number, callback: (links: ILink[] | undefined) => void): void {
+    void this.computeLinks(y - 1).then(callback);
+  }
+
+  private async computeLinks(y0: number): Promise<ILink[] | undefined> {
+    const windowed = getWindowedLine(this.term, y0);
+    if (!windowed) return undefined;
+    const matches = findPathMatches(windowed.text);
+    if (matches.length === 0) return undefined;
+
+    const home = await getHomeDir();
+    const ctx = { cwd: this.getCwd(), workspaceRoot: this.getWorkspaceRoot(), home };
+    const links: ILink[] = [];
+    for (const match of matches) {
+      const resolved = await resolveLinkPath(match.path, ctx, this.probe);
+      if (!resolved) continue;
+      const [startLine, startCol] = mapStrIdx(this.term, windowed.startRow, 0, match.index);
+      const [endLine, endCol] = mapStrIdx(this.term, startLine, startCol, match.length);
+      if (startLine === -1 || endLine === -1) continue;
+      links.push({
+        range: { start: { x: startCol + 1, y: startLine + 1 }, end: { x: endCol, y: endLine + 1 } },
+        text: windowed.text.slice(match.index, match.index + match.length),
+        activate: (event) => {
+          if (!isMod(event)) return;
+          this.onActivate(resolved, match.line);
+        },
+      });
+    }
+    return links.length ? links : undefined;
+  }
+}
 
 // Random PTY ids survive HMR reloads — the Rust process keeps running across hot
 // reloads, so a counter reset would re-issue the same id and pick up the old
@@ -75,6 +306,10 @@ export class TerminalManager {
   private fontFamily = '"SF Mono", Menlo, monospace';
   private scrollback = 5000;
   private shellPref: string | null = null;
+  private sessionListeners = new Set<() => void>();
+  private sessionNotifications: SessionNotification[] = [];
+  private drainingSessionNotifications = false;
+  private sessionSnapshotOverride: SessionSnapshot | null = null;
   // Cursor blink is a repaint loop that keeps the compositor awake. Read the OS
   // reduced-motion preference once, and let the window-idle gate pause blink
   // while hidden — WKWebView keeps xterm's blink timer running off-screen where
@@ -85,7 +320,8 @@ export class TerminalManager {
   onTabsChanged?: () => void;
   /** Fires after a Claude/Codex command is delivered to an integrated terminal. */
   onAgentAttached?: () => void;
-  onLinkActivate?: (url: string) => void; // Hook for Group 5 mini-browser integration
+  onUrlActivate?: (uri: string, kind: "localhost" | "external") => void; // cmd+click on a URL
+  onFileLinkActivate?: (absPath: string, line?: number) => void; // cmd+click on a resolved file path
 
   constructor(host: HTMLElement, area: HTMLElement, mainEl: HTMLElement) {
     this.mainEl = mainEl;
@@ -147,16 +383,95 @@ export class TerminalManager {
     });
     void onPtyExit((id) => {
       const t = this.terms.find((x) => x.id === id);
-      if (t) {
-        t.alive = false;
-        t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
-        this.renderTabs();
-      }
+      if (t) this.markExited(t);
     });
+
+  }
+
+  /** Re-theme all live sessions after an explicit settings class transaction. */
+  retheme(): void {
+    retheme(this.terms);
   }
 
   get count(): number {
-    return this.terms.length;
+    return this.sessionSnapshotOverride?.count ?? this.terms.length;
+  }
+
+  /** Number of sessions whose PTY is still alive. */
+  liveCount(): number {
+    return this.sessionSnapshotOverride?.liveCount ?? this.actualSessionSnapshot().liveCount;
+  }
+
+  /** Subscribe to session/liveness transitions; current state is immediate and listener changes apply next transition. */
+  onSessionsChanged(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    this.withSessionSnapshot(this.actualSessionSnapshot(), listener);
+    return () => this.sessionListeners.delete(listener);
+  }
+
+  private notifySessionsChanged(): void {
+    this.sessionNotifications.push({ ...this.actualSessionSnapshot(), listeners: [...this.sessionListeners] });
+    if (this.drainingSessionNotifications) return;
+
+    this.drainingSessionNotifications = true;
+    try {
+      while (this.sessionNotifications.length > 0) {
+        const notification = this.sessionNotifications.shift()!;
+        for (const listener of notification.listeners) {
+          this.withSessionSnapshot(notification, listener);
+        }
+      }
+    } finally {
+      this.drainingSessionNotifications = false;
+    }
+  }
+
+  private actualSessionSnapshot(): SessionSnapshot {
+    return { count: this.terms.length, liveCount: this.terms.filter((term) => term.alive).length };
+  }
+
+  private withSessionSnapshot(snapshot: SessionSnapshot, listener: () => void): void {
+    const previous = this.sessionSnapshotOverride;
+    this.sessionSnapshotOverride = snapshot;
+    try {
+      listener();
+    } finally {
+      this.sessionSnapshotOverride = previous;
+    }
+  }
+
+  private finishSpawn(t: Term, succeeded: boolean, error?: unknown): void {
+    if (!t.spawnPending || !this.terms.includes(t)) return;
+    t.spawnPending = false;
+    t.alive = succeeded;
+    if (!succeeded) t.term.write(`\r\n\x1b[31mfailed to start shell: ${error}\x1b[0m\r\n`);
+    this.notifySessionsChanged();
+  }
+
+  private markExited(t: Term): void {
+    if (!this.terms.includes(t) || (!t.alive && !t.spawnPending)) return;
+    t.alive = false;
+    t.spawnPending = false;
+    t.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+    this.renderTabs();
+    this.notifySessionsChanged();
+  }
+
+  private removeSession(t: Term): boolean {
+    const index = this.terms.indexOf(t);
+    if (index < 0) return false;
+    t.spawnPending = false;
+    this.terms.splice(index, 1);
+    this.notifySessionsChanged();
+    return true;
+  }
+
+  private resetSessions(): void {
+    for (const term of this.terms) term.spawnPending = false;
+    this.terms = [];
+    this.active = null;
+    this.seq = 0;
+    this.notifySessionsChanged();
   }
 
   private focusGroup(side: TerminalGroupSide): void {
@@ -225,8 +540,9 @@ export class TerminalManager {
   async create(sideArg?: TerminalGroupSide, cwd?: string): Promise<void> {
     const num = ++this.seq; // display number, resets per workspace
     const id = newPtyId();
+    const sessionCwd = cwd ?? this.cwd;
     const term = new Terminal({
-      theme: THEME,
+      theme: buildTermTheme(),
       fontFamily: this.fontFamily,
       fontSize: this.fontSize,
       cursorBlink: !this.reducedMotion && !this.blinkPaused,
@@ -239,15 +555,11 @@ export class TerminalManager {
     const search = new SearchAddon();
     term.loadAddon(search);
 
-    // Load web-links addon; redirect to onLinkActivate hook if set, else system open.
-    const webLinks = new WebLinksAddon((_event: MouseEvent, uri: string) => {
-      if (this.onLinkActivate) {
-        this.onLinkActivate(uri);
-      } else {
-        // Fallback: open in system browser.
-        // (Group 5 will repoint this to mini-browser)
-        window.open(uri, "_blank");
-      }
+    // Load web-links addon; only modifier-clicks activate (Decision 9 — plain click is a no-op),
+    // routed by classifyLink to the embedded browser (localhost) or OS browser (external).
+    const webLinks = new WebLinksAddon((event: MouseEvent, uri: string) => {
+      if (!isMod(event)) return;
+      this.onUrlActivate?.(uri, classifyLink(uri));
     });
     term.loadAddon(webLinks);
 
@@ -258,11 +570,23 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: true, agentAttached: false, cmdHistory: [], currentInput: "" };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: false, spawnPending: true, agentAttached: false, cmdHistory: [], currentInput: "", cwd: sessionCwd };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
     this.renderGroups();
+
+    // File-path link provider (WebLinksAddon's regex is URL-only): resolves and validates
+    // path-ish tokens on the hovered line, surfacing only real files as clickable links.
+    term.registerLinkProvider(
+      new FileLinkProvider(
+        term,
+        () => t.cwd,
+        () => this.cwd,
+        fileMtime,
+        (absPath, line) => this.onFileLinkActivate?.(absPath, line),
+      ),
+    );
     term.onData((d) => {
       // Only track a shell command line while the normal buffer is active.
       // Full-screen programs (vim/less/fzf/htop) switch to the alternate
@@ -408,10 +732,13 @@ export class TerminalManager {
     // fit() can report 0 before first paint; fall back to a sane size.
     const rows = term.rows || 24;
     const cols = term.cols || 80;
-    await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref).catch((e) =>
-      term.write(`\r\n\x1b[31mfailed to start shell: ${e}\x1b[0m\r\n`),
-    );
-    this.activate(t);
+    try {
+      await ptySpawn(id, cwd ?? this.cwd, rows, cols, this.shellPref);
+      this.finishSpawn(t, true);
+    } catch (e) {
+      this.finishSpawn(t, false, e);
+    }
+    if (this.terms.includes(t)) this.activate(t);
   }
 
   /** Strict busy check for one terminal (kernel foreground-pgrp; errors read as idle). */
@@ -549,7 +876,7 @@ export class TerminalManager {
     void ptyKill(t.id).catch(() => {});
     t.term.dispose();
     t.el.remove();
-    this.terms.splice(this.terms.indexOf(t), 1);
+    this.removeSession(t);
     const wasActive = this.active === t;
     const side = groupSideForItem(this.groups, t) ?? "left";
     this.groups = removeItemFromGroups(this.groups, t);
@@ -576,9 +903,6 @@ export class TerminalManager {
       t.term.dispose();
       t.el.remove();
     }
-    this.terms = [];
-    this.active = null;
-    this.seq = 0;
     this.cwd = cwd;
     this.groups = { left: [], right: [] };
     this.activeByGroup = { left: null, right: null };
@@ -587,6 +911,7 @@ export class TerminalManager {
     this.bodyHosts.right.innerHTML = "";
     this.renderGroups();
     this.renderTabs();
+    this.resetSessions();
     if (create) await this.create();
   }
 
@@ -604,45 +929,48 @@ export class TerminalManager {
     }
   }
 
-  /** Toggle maximize for a specific group; in split view only that group expands. */
-  toggleMaximize(side: TerminalGroupSide): void {
-    const inSplit = this.groups.right.length > 0;
-    const isAlreadyMaximized = this.maximizedGroup === side;
+  /** Current terminal maximize state, suitable for snapshot/restore by layout owners. */
+  getMaximizeState(): TerminalMaximizeState {
+    return this.maximizedGroup;
+  }
 
-    if (isAlreadyMaximized) {
-      // Restore
+  /** Apply an exact maximize state through the same DOM path as the terminal controls. */
+  setMaximizeState(next: TerminalMaximizeState): void {
+    if (this.maximizedGroup === next) return;
+    const inSplit = this.groups.right.length > 0;
+    const previous = this.maximizedGroup;
+
+    if (previous !== null && inSplit) {
+      const other = previous === "left" ? "right" : "left";
+      this.groupHosts[other].classList.remove("hidden");
+    }
+
+    if (next === null) {
       this.maximizedGroup = null;
-      this.mainEl.classList.remove('terminal-maximized');
+      this.mainEl.classList.remove("terminal-maximized");
       this.area.style.flex = this.savedFlex;
-      if (inSplit) {
-        // Unhide the other group
-        const other = side === 'left' ? 'right' : 'left';
-        this.groupHosts[other].classList.remove('hidden');
-      }
     } else {
-      // Maximize this group
-      if (this.maximizedGroup !== null) {
-        // Un-hide previously hidden group before switching
-        const prev = this.maximizedGroup === 'left' ? 'right' : 'left';
-        this.groupHosts[prev].classList.remove('hidden');
-      }
-      this.maximizedGroup = side;
-      // Save inline flex set by drag-resizer before applying CSS class
-      this.savedFlex = this.area.style.flex;
-      this.area.style.flex = '';
-      this.mainEl.classList.add('terminal-maximized');
+      if (previous === null) this.savedFlex = this.area.style.flex;
+      this.maximizedGroup = next;
+      this.area.style.flex = "";
+      this.mainEl.classList.add("terminal-maximized");
       if (inSplit) {
-        const other = side === 'left' ? 'right' : 'left';
-        this.groupHosts[other].classList.add('hidden');
+        const other = next === "left" ? "right" : "left";
+        this.groupHosts[other].classList.add("hidden");
       }
     }
     this.renderMaximizeButtons();
     this.refit();
   }
 
+  /** Toggle maximize for a specific group; in split view only that group expands. */
+  toggleMaximize(side: TerminalGroupSide): void {
+    this.setMaximizeState(this.maximizedGroup === side ? null : side);
+  }
+
   /** Update maximize button icons per group based on current maximized state. */
   private renderMaximizeButtons(): void {
-    for (const side of ['left', 'right'] as const) {
+    for (const side of ["left", "right"] as const) {
       const btn = this.maximizeBtns[side];
       if (!btn) continue;
       const isMax = this.maximizedGroup === side;
@@ -725,7 +1053,7 @@ export class TerminalManager {
           });
         });
         const label = document.createElement("span");
-        label.textContent = t.title + (t.alive ? "" : " (exited)");
+        label.textContent = t.title + (t.alive || t.spawnPending ? "" : " (exited)");
         tab.onclick = () => this.activate(t);
         if (t === this.activeByGroup[side]) {
           const ti = document.createElement("span");

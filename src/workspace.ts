@@ -369,6 +369,18 @@ export async function isWorkspaceTrusted(root: string, backend: TrustBackend = d
   return pathIsTrusted(await loadTrusted(backend), root);
 }
 
+/** A deferred workspace effect belongs only to the open request that still
+ * owns both the active generation and root. Every post-await UI/native claim
+ * (trust, automations, Git DOM, MCP, watcher) shares this predicate. */
+export function workspaceEffectCurrent(
+  generation: number,
+  activeGeneration: number,
+  root: string,
+  activeRoot: string | null,
+): boolean {
+  return generation === activeGeneration && root === activeRoot;
+}
+
 /** Mark `root` trusted and persist to the shared backend. Callers must only
  *  invoke this from the explicit File▸Open dialog or the Trust toast — never
  *  from a recents re-select or any other open path. */

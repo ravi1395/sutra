@@ -217,6 +217,8 @@ function baseTasksPanelOptions(overrides: Partial<TasksPanelOptions> & Pick<Task
     cancelWorktreeSetup: async () => false,
     isWorktreeSetupActive: () => false,
     confirmDiscard: async () => false,
+    commitHandoff: async () => ({ sha: "" }),
+    unstageHandoffExtras: async () => {},
     ...overrides,
   };
 }
@@ -235,6 +237,50 @@ function selectAgentAndFindStart(container: FakeElement, agentId: string): FakeE
   assert.ok(startBtn, "Start button must render for a ready task");
   return startBtn!;
 }
+
+test("an older reload that finishes reconciliation reread last cannot replace the newer reload", async () => {
+  const dom = setupTasksPanelDom();
+  try {
+    const staleReread = deferred<string>();
+    const staleRereadStarted = deferred<void>();
+    let reads = 0;
+    dom.installInvoke(async (cmd) => {
+      switch (cmd) {
+        case "trust_list": return ["/root"];
+        case "read_file":
+          reads++;
+          if (reads === 1) return serializeTasks([task({ id: "task-a", title: "A initial" })]);
+          if (reads === 2) {
+            staleRereadStarted.resolve();
+            return staleReread.promise;
+          }
+          return serializeTasks([task({ id: "task-b", title: "B current" })]);
+        case "pty_list_agents": return [];
+        case "git_branch": return null;
+        default: throw new Error(`unmocked invoke command in tasks-panel test: ${cmd}`);
+      }
+    });
+    const snapshots: string[][] = [];
+    const handle = mountTasksPanel(baseTasksPanelOptions({
+      container: new FakeElement("div") as unknown as HTMLElement,
+      getRoot: () => "/root",
+      deliverPrompt: async () => ({ ok: true }),
+      updateTaskMetadata: async () => true,
+      onTasksChanged: (tasks) => snapshots.push(tasks.map((entry) => entry.title)),
+    }));
+
+    const reloadA = handle.reload();
+    await staleRereadStarted.promise;
+    await handle.reload();
+    assert.deepEqual(snapshots.at(-1), ["B current"]);
+
+    staleReread.resolve(serializeTasks([task({ id: "task-a", title: "A reconciled" })]));
+    await reloadA;
+    assert.deepEqual(snapshots.at(-1), ["B current"]);
+  } finally {
+    dom.restore();
+  }
+});
 
 test("start() cancels delivery, and leaves the claim in place, when trust is revoked between the persisted claim and the send", async () => {
   const dom = setupTasksPanelDom();
@@ -590,7 +636,7 @@ test("handoffReceiptEvidence has a distinct label per outcome and no checkId", (
   const external = handoffReceiptEvidence({ sha: "abc123", subject: "Ship it", exportedOnly: true, recordedAt: 10 });
   assert.equal(own.kind, "manual");
   assert.equal("checkId" in own ? own.checkId : undefined, undefined);
-  assert.notEqual(own.label, external.label);
+  assert.notEqual(own.label, (external as { label: string }).label);
   assert.match((own as { note?: string }).note ?? "", /abc123/);
 });
 

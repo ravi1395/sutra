@@ -92,12 +92,20 @@ export function firstHunkLineFromTabs(
   return first ? first.newFrom + 1 : null;
 }
 
+/** Branch-review baseline for one tab: null means unavailable; a present null
+ * commit lookup means the path was added after merge-base and uses "". */
+export function scopedBaselineForPath(baselines: ReadonlyMap<string, string | null>, path: string): string | null {
+  return baselines.has(path) ? (baselines.get(path) ?? "") : null;
+}
+
 const setDiffMarks = StateEffect.define<readonly LineMark[]>();
 const setLens = StateEffect.define<LensSpec | null>();
 
 interface LensSpec extends LensModel {
   anchorLine: number;
-  onRevert: () => void;
+  // Absent while a scoped (branch-review) baseline is active: the lens is
+  // display-only — reverting would rewrite committed work out of the buffer.
+  onRevert?: () => void;
 }
 
 class DiffMarker extends GutterMarker {
@@ -136,7 +144,7 @@ const diffField = StateField.define<RangeSet<GutterMarker>>({
 class LensWidget extends WidgetType {
   constructor(
     private spec: LensSpec,
-    private onRevert: () => void,
+    private onRevert: (() => void) | undefined,
   ) {
     super();
   }
@@ -145,6 +153,7 @@ class LensWidget extends WidgetType {
     return (
       this.spec.title === other.spec.title &&
       this.spec.attribution === other.spec.attribution &&
+      !this.onRevert === !other.onRevert &&
       this.spec.oldLines.join("\n") === other.spec.oldLines.join("\n") &&
       this.spec.newLines.join("\n") === other.spec.newLines.join("\n")
     );
@@ -158,14 +167,18 @@ class LensWidget extends WidgetType {
     head.className = "lens-head";
     const title = document.createElement("span");
     title.textContent = this.spec.title;
-    const revert = document.createElement("button");
-    revert.className = "lens-revert";
-    revert.textContent = "Revert";
-    revert.onclick = (event) => {
-      event.stopPropagation();
-      this.onRevert();
-    };
-    head.append(title, revert);
+    head.append(title);
+    const onRevert = this.onRevert;
+    if (onRevert) {
+      const revert = document.createElement("button");
+      revert.className = "lens-revert";
+      revert.textContent = "Revert";
+      revert.onclick = (event) => {
+        event.stopPropagation();
+        onRevert();
+      };
+      head.append(revert);
+    }
     root.append(head);
 
     const body = document.createElement("div");
@@ -417,20 +430,20 @@ function cssVar(name: string, fallback: string): string {
 }
 
 function cmThreadTheme(): Extension {
-  const washi = document.documentElement.classList.contains("theme-washi");
-  const fg = cssVar("--fg", washi ? "#1f231f" : "#e8eae4");
-  const fgDim = cssVar("--fg-dim", washi ? "#6e7268" : "#8b9189");
-  const fgFaint = cssVar("--fg-faint", washi ? "#9c988a" : "#565c54");
-  const bg = cssVar("--bg-1", washi ? "#f5f2eb" : "#131614");
-  const bg2 = cssVar("--bg-2", washi ? "#f1ede3" : "#0e110f");
-  const line = cssVar("--line", washi ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
-  const em = cssVar("--em", washi ? "#0f8a5f" : "#4ade93");
-  const synKw = cssVar("--syn-kw", washi ? "#0f8a5f" : "#5cc99b");
-  const synType = cssVar("--syn-type", washi ? "#3b6aa0" : "#86aedc");
-  const synStr = cssVar("--syn-str", washi ? "#b07b2e" : "#d9b47c");
+  const light = document.documentElement.classList.contains("theme-light");
+  const fg = cssVar("--fg", light ? "#1f231f" : "#e8eae4");
+  const fgDim = cssVar("--fg-dim", light ? "#6e7268" : "#8b9189");
+  const fgFaint = cssVar("--fg-faint", light ? "#9c988a" : "#565c54");
+  const bg = cssVar("--bg-1", light ? "#f5f2eb" : "#131614");
+  const bg2 = cssVar("--bg-2", light ? "#f1ede3" : "#0e110f");
+  const line = cssVar("--line", light ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
+  const em = cssVar("--em", light ? "#0f8a5f" : "#4ade93");
+  const synKw = cssVar("--syn-kw", light ? "#0f8a5f" : "#5cc99b");
+  const synType = cssVar("--syn-type", light ? "#3b6aa0" : "#86aedc");
+  const synStr = cssVar("--syn-str", light ? "#b07b2e" : "#d9b47c");
   const synComment = cssVar("--syn-comment", fgFaint);
-  const cursorLine = washi ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
-  const selection = washi ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
+  const cursorLine = light ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
+  const selection = light ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
 
   return [
     EditorView.theme(
@@ -451,7 +464,7 @@ function cmThreadTheme(): Extension {
         ".cm-searchMatch": { backgroundColor: "rgba(227,179,65,0.22)" },
         ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: selection },
       },
-      { dark: !washi },
+      { dark: !light },
     ),
     syntaxHighlighting(
       HighlightStyle.define([
@@ -623,11 +636,13 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners, the pending lang debounce, and the CM view. */
+  /** Release document-level listeners, the pending lang debounce, the CM view, and any open preview. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
     if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
+    this.previewCtl?.dispose();
+    this.previewCtl = null;
   }
 
   /** Debounce lang_did_change so typing doesn't flood the engine; fires after 200 ms. */
@@ -808,11 +823,16 @@ export class Pane {
       effects: setLens.of({
         ...model,
         anchorLine: hunk.newTo > hunk.newFrom ? hunk.newTo - 1 : hunk.newFrom,
-        onRevert: () => {
-          this.mgr.setFocused(this);
-          this.mgr.revertHunk(hunk);
-          this.closeLens();
-        },
+        // Branch-review scope is display-only: no Revert affordance — the
+        // baseline is the merge-base, so reverting would rewrite committed
+        // work out of the buffer.
+        onRevert: this.mgr.scopedReadOnly
+          ? undefined
+          : () => {
+              this.mgr.setFocused(this);
+              this.mgr.revertHunk(hunk);
+              this.closeLens();
+            },
       }),
     });
   }
@@ -986,6 +1006,7 @@ export class Pane {
     this.closeLens();
     this.clearConflictBanners();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1005,6 +1026,7 @@ export class Pane {
     const kind = previewKind(source.name);
     if (!kind) return;
     this.previewSource = source;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind, kind === "html" ? { htmlMode: "srcdoc" } : undefined);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1024,6 +1046,7 @@ export class Pane {
     const { PreviewController } = await import("./preview");
     // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
     this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1043,6 +1066,7 @@ export class Pane {
   hidePreview(): void {
     this.closeLens();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1071,9 +1095,13 @@ export class Pane {
 
   renderTabs(): void {
     this.tabsEl.innerHTML = "";
+    const graphite = document.documentElement.classList.contains("view-graphite");
+    const north = document.documentElement.classList.contains("view-north");
     if (this.previewSource) {
       const el = document.createElement("div");
-      el.className = "tab active preview-tab";
+      el.className = graphite
+        ? "tab active preview-tab graphite-tab"
+        : north ? "tab active preview-tab north-trail-tab" : "tab active preview-tab";
       const name = document.createElement("span");
       name.textContent = previewTabName(this.previewSource.name);
       const close = document.createElement("button");
@@ -1089,7 +1117,11 @@ export class Pane {
     }
     for (const tab of this.tabs) {
       const el = document.createElement("div");
-      el.className = "tab" + (tab === this.active ? " active" : "");
+      el.className = graphite
+        ? "tab graphite-tab" + (tab === this.active ? " active" : "")
+        : north
+          ? "tab north-trail-tab" + (tab === this.active ? " active" : "")
+          : "tab" + (tab === this.active ? " active" : "");
       el.addEventListener("pointerdown", (e) => {
         if ((e.target as Element).closest(".tab-close")) return;
         beginSplitPointerDrag({
@@ -1386,7 +1418,43 @@ export class EditorManager {
     return [{ startLine: 0, endLine: Math.max(0, lineCount - 1), agent: "AI" }];
   }
 
+  // Branch-review scoped baselines: while non-null, tabs whose path has an
+  // entry diff against these merge-base blobs instead of git HEAD. A null
+  // entry = file absent at the scope base (added on branch) → "" baseline,
+  // whole-file adds. The read-only latch is deliberately separate: branch
+  // entry must disable hunk revert before these async blobs arrive.
+  private scopedBaselines: Map<string, string | null> | null = null;
+  private branchScopeReadOnly = false;
+
+  /** Install (or clear, with null) the branch-review baseline map; repaints
+   * every visible pane's gutter immediately (split view included), hidden
+   * background tabs on activation. */
+  setScopedBaselines(map: Map<string, string | null> | null): void {
+    this.scopedBaselines = map;
+    for (const pane of this.panes) this.recomputeDiffFor(pane);
+  }
+
+  /** Lock or unlock branch-review hunk revert independently of baseline I/O. */
+  setBranchScopeReadOnly(readOnly: boolean): void {
+    this.branchScopeReadOnly = readOnly;
+    for (const pane of this.panes) pane.closeLens();
+  }
+
+  /** True while a scoped (branch-review) baseline is active — gutter lens
+   * drops its Revert affordance and revertHunk refuses. */
+  get scopedReadOnly(): boolean {
+    return this.branchScopeReadOnly;
+  }
+
   private baselineOf(tab: Tab): string | null {
+    if (this.scopedBaselines && tab.path) {
+      // A missing entry means the baseline fetch failed or has not completed.
+      // Do not silently fall back to HEAD: that would misrepresent a branch
+      // review as an ordinary working-tree diff.
+      // A present null, however, is a successful lookup of a file absent at
+      // merge-base and deliberately means the empty-string baseline.
+      return scopedBaselineForPath(this.scopedBaselines, tab.path);
+    }
     return tab.override ?? tab.gitHead;
   }
 
@@ -1425,6 +1493,29 @@ export class EditorManager {
     if (line !== undefined) this.revealLine(line);
     // Notify the language engine that this document is now open (version 0 = initial load).
     langDidOpen(path, content, 0).catch(() => {});
+  }
+
+  /** Show immutable scoped content (for example, a deleted branch file) without
+   * reading the current worktree path or exposing save/edit controls. */
+  openReadOnlySnapshot(path: string, content: string, line?: number): void {
+    const pane = this.focused;
+    const name = `${path.split("/").pop() ?? path} (snapshot)`;
+    const tab: Tab = {
+      id: `t${++idSeq}`,
+      path: null,
+      name,
+      state: pane.makeState(content, name),
+      dirty: false,
+      gitHead: null,
+      override: null,
+      savedContent: content,
+      lastMtime: null,
+      hunks: [],
+      readOnly: true,
+    };
+    pane.addTab(tab);
+    this.activateInPane(pane, tab);
+    if (line !== undefined) this.revealLine(line);
   }
 
   /** Open latest disk content for review without overwriting a dirty human buffer. */
@@ -1652,7 +1743,12 @@ export class EditorManager {
 
   /** Recompute diff markers + hunks for the focused active tab. */
   recomputeDiff(): void {
-    const pane = this.focused;
+    this.recomputeDiffFor(this.focused);
+  }
+
+  /** Per-pane recompute — baseline swaps (scoped baselines install/clear)
+   * must repaint BOTH visible split panes, not just the focused one. */
+  private recomputeDiffFor(pane: Pane): void {
     const active = pane.active;
     if (!active) return;
     const baseline = this.baselineOf(active);
@@ -1786,8 +1882,11 @@ export class EditorManager {
     this.onDocChanged?.();
   }
 
-  /** Revert one hunk in the focused pane back to baseline (newline-safe). */
+  /** Revert one hunk in the focused pane back to baseline (newline-safe).
+   * Refused while a scoped (branch-review) baseline is active — that baseline
+   * is the merge-base, and reverting to it would rewrite committed work. */
   revertHunk(h: Hunk): void {
+    if (this.scopedReadOnly) return;
     const pane = this.focused;
     const cur = pane.getContent().split("\n");
     const next = [...cur.slice(0, h.newFrom), ...h.oldText, ...cur.slice(h.newTo)].join("\n");

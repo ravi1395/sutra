@@ -179,6 +179,7 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .manage(proxy::ProxyServerState::default())
         .manage(watcher::WatcherState::default())
+        .manage(watcher::WorkspaceGenerationState::default())
         .manage(LaunchPath::default())
         .setup(move |app| {
             // Desktop-only self-updater: registered here so the chain stays
@@ -294,6 +295,8 @@ pub fn run() {
             git::git_branch,
             git::git_ahead_behind,
             git::git_changed_files,
+            git::git_branch_diff_files,
+            git::git_commit_content,
             git::git_worktrees,
             git::git_branches,
             git::git_checkout,
@@ -326,6 +329,7 @@ pub fn run() {
             turns::turn_rollback,
             turns::turn_test_record,
             turns::turn_disk_hashes,
+            turns::turn_file_content,
             turns::hook_install,
             turns::hook_status,
             turns::list_worktree_roots,
@@ -347,6 +351,7 @@ pub fn run() {
             search::list_files,
             watcher::watch_start,
             watcher::watch_stop,
+            watcher::workspace_generation_next,
             take_launch_path,
             clipboard_write,
             spawn_window,

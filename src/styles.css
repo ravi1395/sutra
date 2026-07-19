@@ -1,5 +1,5 @@
-/* Ink + washi token system. Legacy --bg/--accent aliases keep every unconverted
-   rule rendering while the new token layer drives the thread redesign. */
+/* Ink + washi token system. Every rule consumes semantic tokens defined once
+   here (:root = ink) and overridden in .theme-washi; no legacy aliases. */
 @font-face { font-family: "Instrument Sans"; src: url("/src/assets/fonts/InstrumentSans-Variable.woff2") format("woff2"); font-weight: 400 600; font-display: swap; }
 @font-face { font-family: "Fraunces"; src: url("/src/assets/fonts/Fraunces-Italic-Variable.woff2") format("woff2"); font-weight: 400 500; font-style: italic; font-display: swap; }
 @font-face {
@@ -9,23 +9,60 @@
   font-style: normal;
   font-display: swap;
 }
+@font-face {
+  font-family: "Mona Sans";
+  src: url("/src/assets/fonts/MonaSans-Variable.woff2") format("woff2");
+  font-weight: 400 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("/src/assets/fonts/SchibstedGrotesk-Variable.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/src/assets/fonts/HankenGrotesk-Variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg-0: #101311; --bg-1: #131614; --bg-2: #0e110f; --bg-3: #161a17; --bg-4: #1f2420;
   --line: rgba(255,255,255,0.05); --line-menu: rgba(255,255,255,0.10);
   --fg: #e8eae4; --fg-dim: #8b9189; --fg-faint: #565c54; --fg-ghost: #3e443e;
+  --term-bg: var(--bg-2); --term-fg: var(--fg);
   --em: #4ade93; --em-dim: #1f8a63; --em-wash: rgba(74,222,147,0.10); --em-wash-row: rgba(74,222,147,0.08);
   --syn-kw: #5cc99b; --syn-type: #86aedc; --syn-str: #d9b47c; --syn-comment: var(--fg-faint);
   --added: #e3b341; --modified: #4493f8; --deleted: #f0716a;
+  /* Git-diff paint only. App-wide status tokens above remain status-owned. */
+  --diff-add: #e3b341; --diff-mod: #4493f8; --diff-del: #f0716a;
+  --diff-add-wash: rgba(227, 179, 65, 0.12); --diff-del-wash: rgba(240, 113, 106, 0.08);
+  --diff-file-mod: #3c94ff; --diff-file-add: #d4c562; --diff-file-del: #d74e42;
   --bg-drawer: var(--bg-2); --bg-whisper: var(--bg-2);
   --r-lg: 12px; --r-md: 8px; --r-sm: 5px;
   --ui: "Instrument Sans", system-ui, sans-serif;
   --voice: "Fraunces", Georgia, serif;
   --mono: "Spline Sans Mono", ui-monospace, Menlo, monospace;
-  /* legacy aliases — keep every unconverted rule working */
-  --bg: var(--bg-1); --bg-alt: var(--bg-2); --bg-bar: var(--bg-2);
-  --border: var(--line); --accent: var(--em); --accent-hi: var(--em-dim);
-  --line-soft: var(--line);
+  /* text color for controls filled with --em/--em-dim (accent-filled buttons/badges) */
+  --on-em: var(--bg-1);
+  /* full-viewport backdrop behind modals/palette/drawers */
+  --scrim: rgba(0, 0, 0, 0.45);
+  /* elevation shadow color for panels/modals that opt into a themed (non-literal) shadow */
+  --shadow: rgba(0, 0, 0, 0.45);
+  /* floating panel surfaces (annotation list, etc.) */
+  --panel-bg: var(--bg-3);
+  /* ANSI-16 terminal palette (consumed by terminal.ts buildTermTheme, Phase 2) */
+  --ansi-black: #3a3a34; --ansi-red: #e5484d; --ansi-green: #4ade93;
+  --ansi-yellow: #e3b341; --ansi-blue: #4493f8; --ansi-magenta: #a78bfa;
+  --ansi-cyan: #4ec9b0; --ansi-white: #d4d4d4;
+  --ansi-bright-black: #6b7280; --ansi-bright-red: #ff6b6b; --ansi-bright-green: #6fe7ab;
+  --ansi-bright-yellow: #f0cc6c; --ansi-bright-blue: #6cb6ff; --ansi-bright-magenta: #c4a7fa;
+  --ansi-bright-cyan: #7ee2cc; --ansi-bright-white: #ffffff;
   font-family: var(--ui); font-size: 13px;
 }
 .theme-washi {
@@ -35,7 +72,501 @@
   --em: #0f8a5f; --em-dim: #0c6b4a; --em-wash: rgba(15,138,95,0.10); --em-wash-row: rgba(15,138,95,0.08);
   --syn-kw: #0f8a5f; --syn-type: #3b6aa0; --syn-str: #b07b2e; --syn-comment: var(--fg-faint);
   --bg-drawer: #efebe0; --bg-whisper: #f1ede3;
+  --on-em: var(--bg-1);
+  --scrim: rgba(31, 35, 31, 0.3);
+  --shadow: rgba(31, 35, 31, 0.22);
+  --panel-bg: var(--bg-3);
+  /* ANSI-16 tuned darker/saturated for legibility on a light background */
+  --ansi-black: #33322c; --ansi-red: #b3261e; --ansi-green: #0f8a5f;
+  --ansi-yellow: #8a6a1f; --ansi-blue: #2b5fad; --ansi-magenta: #7c4fd1;
+  --ansi-cyan: #0f7a72; --ansi-white: #5b5b52;
+  --ansi-bright-black: #7a7a6e; --ansi-bright-red: #d1453d; --ansi-bright-green: #17a374;
+  --ansi-bright-yellow: #a8842f; --ansi-bright-blue: #3f74c9; --ansi-bright-magenta: #9568df;
+  --ansi-bright-cyan: #148f85; --ansi-bright-white: #2a2a24;
 }
+
+/* ── W2/T3 North Light: cool porcelain frame, raised white sheets, one ultramarine signal. ── */
+:root.view-north {
+  --bg-0: #eef1f6; --bg-1: #ffffff; --bg-2: #f8f9fb; --bg-3: #f3f5f8; --bg-4: #e8ecf2;
+  --line: #d6dbe4; --line-menu: #bcc5d4;
+  --fg: #303745; --fg-dim: #667085; --fg-faint: #8992a2; --fg-ghost: #b6bdc8;
+  --term-bg: #171d27; --term-fg: #edf1f7; --term-dim: #aeb8c7; --term-line: #303a4a;
+  --em: #315bd6; --em-dim: #274aa9; --em-wash: rgba(49, 91, 214, 0.09); --em-wash-row: rgba(49, 91, 214, 0.07);
+  --syn-kw: #5c3f9b; --syn-type: #246a83; --syn-str: #27734f; --syn-comment: #667085;
+  --diff-add: #21845b; --diff-mod: #a96516; --diff-del: #c73a3a;
+  --diff-add-wash: rgba(33, 132, 91, 0.12); --diff-del-wash: rgba(199, 58, 58, 0.10);
+  --diff-file-mod: #a96516; --diff-file-add: #21845b; --diff-file-del: #c73a3a;
+  --bg-drawer: #ffffff; --bg-whisper: #f8f9fb;
+  --on-em: #ffffff; --scrim: rgba(31, 40, 55, 0.30); --shadow: rgba(31, 40, 55, 0.12); --panel-bg: #ffffff;
+  --sheet-shadow: 0 1px 2px rgba(31, 40, 55, 0.05), 0 4px 16px rgba(31, 40, 55, 0.06);
+  --term-shadow: 0 1px 2px rgba(8, 12, 18, 0.24), 0 4px 16px rgba(8, 12, 18, 0.24);
+  --r-lg: 10px; --r-md: 8px; --r-sm: 5px;
+  --ui: "Schibsted Grotesk", system-ui, sans-serif;
+  --ansi-black: #4f5866; --ansi-red: #e06c75; --ansi-green: #58b487;
+  --ansi-yellow: #d69e2e; --ansi-blue: #78a9ff; --ansi-magenta: #b58ae5;
+  --ansi-cyan: #57b7c3; --ansi-white: #d9e0ea;
+  --ansi-bright-black: #7e8999; --ansi-bright-red: #f08088; --ansi-bright-green: #75cb9a;
+  --ansi-bright-yellow: #eab95a; --ansi-bright-blue: #9bbcff; --ansi-bright-magenta: #cfacf3;
+  --ansi-bright-cyan: #7bced7; --ansi-bright-white: #ffffff;
+}
+
+:root.view-north.variant-night {
+  --bg-0: #252a33; --bg-1: #303640; --bg-2: #2a3039; --bg-3: #282e37; --bg-4: #3a424e;
+  --line: #444d5b; --line-menu: #586374;
+  --fg: #edf1f7; --fg-dim: #b1bac8; --fg-faint: #858f9f; --fg-ghost: #626d7b;
+  --term-bg: #161b22; --term-fg: #edf1f7; --term-dim: #b5becb; --term-line: #303a4a;
+  --em: #8da9ff; --em-dim: #6f8fe9; --em-wash: rgba(141, 169, 255, 0.14); --em-wash-row: rgba(141, 169, 255, 0.10);
+  --syn-kw: #c4a7ff; --syn-type: #8fd1e3; --syn-str: #8ad1a2; --syn-comment: #aeb8c7;
+  --diff-add: #63c78e; --diff-mod: #e0ad51; --diff-del: #ee7777;
+  --diff-add-wash: rgba(99, 199, 142, 0.14); --diff-del-wash: rgba(238, 119, 119, 0.13);
+  --diff-file-mod: #e0ad51; --diff-file-add: #63c78e; --diff-file-del: #ee7777;
+  --bg-drawer: #303640; --bg-whisper: #2a3039;
+  --on-em: #161b22; --scrim: rgba(8, 11, 16, 0.58); --shadow: rgba(8, 11, 16, 0.40); --panel-bg: #303640;
+  --sheet-shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 22px rgba(0, 0, 0, 0.35);
+  --term-shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 22px rgba(0, 0, 0, 0.35);
+  --ansi-black: #596475; --ansi-red: #f08a91; --ansi-green: #71d39b;
+  --ansi-yellow: #e7ba64; --ansi-blue: #9ab5ff; --ansi-magenta: #d1adf5;
+  --ansi-cyan: #83d3dd; --ansi-white: #dce3ed;
+  --ansi-bright-black: #8995a6; --ansi-bright-red: #ffabb0; --ansi-bright-green: #93e1b4;
+  --ansi-bright-yellow: #f5d07d; --ansi-bright-blue: #b7c9ff; --ansi-bright-magenta: #e1c4fb;
+  --ansi-bright-cyan: #a6e3ea; --ansi-bright-white: #ffffff;
+}
+
+/* ── W1/T1 Graphite: Primer-dark flat plane. ── */
+:root.view-graphite {
+  --bg-0: #0d1117; --bg-1: #0d1117; --bg-2: #10151c; --bg-3: #161b22; --bg-4: #21262d;
+  --line: #21262d; --line-menu: #30363d;
+  --fg: #e6edf3; --fg-dim: #9198a1; --fg-faint: #6e7681; --fg-ghost: #484f58;
+  --term-bg: #0d1117; --term-fg: #e6edf3;
+  --em: #58a6ff; --em-dim: #388bfd; --em-wash: rgba(88, 166, 255, 0.12); --em-wash-row: rgba(88, 166, 255, 0.08);
+  --syn-kw: #ff7b72; --syn-type: #79c0ff; --syn-str: #a5d6ff; --syn-comment: #8b949e;
+  --diff-add: #3fb950; --diff-mod: #d29922; --diff-del: #f85149;
+  --diff-add-wash: rgba(63, 185, 80, 0.13); --diff-del-wash: rgba(248, 81, 73, 0.13);
+  --diff-file-mod: #d29922; --diff-file-add: #3fb950; --diff-file-del: #f85149;
+  --graphite-tab-active: #f78166;
+  --bg-drawer: #10151c; --bg-whisper: #10151c;
+  --on-em: #0d1117; --scrim: rgba(1, 4, 9, 0.6); --shadow: rgba(1, 4, 9, 0.45); --panel-bg: #161b22;
+  --r-lg: 6px; --r-md: 6px; --r-sm: 3px;
+  --ui: "Mona Sans", system-ui, sans-serif;
+  --ansi-black: #484f58; --ansi-red: #ff7b72; --ansi-green: #3fb950;
+  --ansi-yellow: #d29922; --ansi-blue: #58a6ff; --ansi-magenta: #bc8cff;
+  --ansi-cyan: #39c5cf; --ansi-white: #b1bac4;
+  --ansi-bright-black: #6e7681; --ansi-bright-red: #ffa198; --ansi-bright-green: #56d364;
+  --ansi-bright-yellow: #e3b341; --ansi-bright-blue: #79c0ff; --ansi-bright-magenta: #d2a8ff;
+  --ansi-bright-cyan: #56d4dd; --ansi-bright-white: #f0f6fc;
+}
+
+/* ── W3/T8a Stanza palette: petrol dusk / sea-glass dawn, one verdigris signal. ──
+   All literals derived from design/views/stanza.html oklch values (converted to
+   sRGB hex) and contrast-tuned; every core pair measured ≥4.5:1 (terminal ≥7:1). */
+:root.view-stanza {
+  --bg-0: #0b1a1d; --bg-1: #071417; --bg-2: #0b1a1d; --bg-3: #112124; --bg-4: #18282c;
+  --line: #233337; --line-menu: #32464a;
+  --fg: #dce7e7; --fg-dim: #8fa3a4; --fg-faint: #728486; --fg-ghost: #5b6d6f;
+  --term-bg: #071417; --term-fg: #dce7e7;
+  --em: #63ccc0; --em-dim: #009b8f; --em-wash: rgba(99, 204, 192, 0.12); --em-wash-row: rgba(99, 204, 192, 0.08);
+  --syn-kw: #e39e86; --syn-type: #90b5dc; --syn-str: #99c68f; --syn-comment: #708385;
+  --diff-add: #62c37a; --diff-mod: #e7b643; --diff-del: #f66d67;
+  --diff-add-wash: rgba(98, 195, 122, 0.12); --diff-del-wash: rgba(246, 109, 103, 0.08);
+  --diff-file-mod: #e7b643; --diff-file-add: #62c37a; --diff-file-del: #f66d67;
+  --bg-drawer: #0b1a1d; --bg-whisper: #0b1a1d;
+  --on-em: #071417; --scrim: rgba(7, 20, 23, 0.6); --shadow: rgba(7, 20, 23, 0.45); --panel-bg: #112124;
+  --r-lg: 10px; --r-md: 8px; --r-sm: 5px;
+  --ui: "Hanken Grotesk", system-ui, sans-serif;
+  --ansi-black: #2c3b3e; --ansi-red: #f66d67; --ansi-green: #62c37a;
+  --ansi-yellow: #e7b643; --ansi-blue: #6dabdf; --ansi-magenta: #b88fe6;
+  --ansi-cyan: #3ebfc6; --ansi-white: #cfdada;
+  --ansi-bright-black: #4c5b5f; --ansi-bright-red: #ff8e86; --ansi-bright-green: #7cdd93;
+  --ansi-bright-yellow: #f9d46b; --ansi-bright-blue: #8cc4f4; --ansi-bright-magenta: #d0aafc;
+  --ansi-bright-cyan: #6bd8de; --ansi-bright-white: #f5f9f9;
+}
+
+/* Stanza Dawn: same rooms in sea-glass morning light. Deep-teal signal darkened
+   past the mock's #007570 (4.70:1 on its own wash) to hold ≥5:1 on paper + wash;
+   terminal keeps a dark teal well like North day. */
+:root.view-stanza.variant-dawn {
+  --bg-0: #e8f3f2; --bg-1: #f9fdfc; --bg-2: #e8f3f2; --bg-3: #f6fbfb; --bg-4: #d3e1e0;
+  --line: #c6d7d6; --line-menu: #97a9a8;
+  --fg: #0e2830; --fg-dim: #476065; --fg-faint: #536b6f; --fg-ghost: #5f767a;
+  --term-bg: #001415; --term-fg: #e9f0f0;
+  --em: #00706b; --em-dim: #005955; --em-wash: rgba(0, 112, 107, 0.10); --em-wash-row: rgba(0, 112, 107, 0.08);
+  --syn-kw: #9a4729; --syn-type: #32618e; --syn-str: #357339; --syn-comment: #5f767a;
+  --diff-add: #007f35; --diff-mod: #936500; --diff-del: #c9302d;
+  --diff-add-wash: rgba(0, 127, 53, 0.12); --diff-del-wash: rgba(201, 48, 45, 0.10);
+  --diff-file-mod: #936500; --diff-file-add: #007f35; --diff-file-del: #c9302d;
+  --bg-drawer: #e8f3f2; --bg-whisper: #e8f3f2;
+  --on-em: #ffffff; --scrim: rgba(14, 40, 48, 0.30); --shadow: rgba(14, 40, 48, 0.12); --panel-bg: #f6fbfb;
+  --ansi-black: #364548; --ansi-red: #d9544b; --ansi-green: #399d57;
+  --ansi-yellow: #ca9d33; --ansi-blue: #3e8cc9; --ansi-magenta: #9a6ec9;
+  --ansi-cyan: #1c989e; --ansi-white: #c5d0d0;
+  --ansi-bright-black: #57676a; --ansi-bright-red: #f9786c; --ansi-bright-green: #69c27e;
+  --ansi-bright-yellow: #e2c162; --ansi-bright-blue: #73b1e6; --ansi-bright-magenta: #bc97e8;
+  --ansi-bright-cyan: #5dbcc1; --ansi-bright-white: #f2f6f6;
+}
+
+/* xterm's bundled CSS hard-codes black behind its DOM renderer. Canvas sessions
+   receive --term-bg through Terminal.options.theme; this keeps the DOM fallback
+   (and IME composition overlay) on that same token without touching Classic. */
+:root.view-north #term-host .xterm .xterm-viewport,
+:root.view-north #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+:root.view-graphite #term-host .xterm .xterm-viewport,
+:root.view-graphite #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+:root.view-stanza #term-host .xterm .xterm-viewport,
+:root.view-stanza #term-host .xterm .composition-view {
+  background-color: var(--term-bg);
+}
+
+/* The North drawer host is created before the persisted view loads. Keep that
+   dynamic overlay inert by default; every visible/layout rule remains North-scoped. */
+.north-sidebar-overlay,
+#ledger { display: none; }
+
+/* ── W2/T3 North Light sheet paint. Existing hosts stay in their current ownership. ── */
+:root.view-north #titlebar {
+  background: var(--bg-0);
+  border-bottom-color: transparent;
+  padding: 0 16px;
+}
+:root.view-north #body {
+  position: relative;
+  gap: 10px;
+  padding: 0 10px 10px;
+  background: var(--bg-0);
+}
+:root.view-north #body > #sidebar,
+:root.view-north #vresizer {
+  display: none;
+}
+:root.view-north .north-sidebar-overlay:not(.hidden) {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 10px;
+  background: var(--scrim);
+  transition: opacity 160ms ease-out;
+}
+:root.view-north .north-sidebar-overlay #sidebar {
+  width: min(340px, calc(100% - 20px));
+  max-width: 100%;
+  min-height: 0;
+  flex: 0 1 340px;
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
+}
+:root.view-north #sidebar,
+:root.view-north #main {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sheet-shadow);
+}
+:root.view-north #ledger:not(.hidden) {
+  width: 272px;
+  max-width: 272px;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 1 272px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sheet-shadow);
+}
+:root.view-north .ledger-header {
+  flex: 0 0 auto;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+:root.view-north .ledger-title {
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+:root.view-north .ledger-shortcut {
+  padding: 2px 5px;
+  color: var(--fg-faint);
+  font: 10px var(--ui);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-turns {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+:root.view-north .ledger-empty {
+  padding: 18px 10px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+:root.view-north .ledger-turn {
+  margin-bottom: 7px;
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+:root.view-north .ledger-turn-summary {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 7px;
+  align-items: center;
+  padding: 0 9px;
+  color: var(--fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+:root.view-north button.ledger-turn-summary:hover,
+:root.view-north button.ledger-turn-summary:focus-visible {
+  background: var(--em-wash-row);
+}
+:root.view-north .ledger-turn-id {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root.view-north .ledger-phase,
+:root.view-north .ledger-chevron {
+  color: var(--fg-faint);
+  font-size: 10px;
+}
+:root.view-north .ledger-running .ledger-phase {
+  color: var(--em);
+}
+:root.view-north .ledger-running .ledger-phase::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: 1px;
+  background: var(--em);
+  border-radius: 50%;
+}
+:root.view-north .ledger-struck .ledger-turn-id,
+:root.view-north .ledger-struck .ledger-file {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+:root.view-north .ledger-turn-details {
+  padding: 0 9px 9px;
+  border-top: 1px solid var(--line);
+}
+:root.view-north .ledger-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 0;
+}
+:root.view-north .ledger-badge {
+  padding: 2px 6px;
+  color: var(--fg-dim);
+  font-size: 9px;
+  line-height: 1.4;
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-test-pass,
+:root.view-north .ledger-review-accepted {
+  color: var(--em);
+}
+:root.view-north .ledger-test-fail,
+:root.view-north .ledger-review-unresolved {
+  color: var(--deleted);
+}
+:root.view-north .ledger-test-running {
+  color: var(--em);
+}
+:root.view-north .ledger-files {
+  max-height: 154px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+:root.view-north .ledger-file {
+  padding: 3px 0;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root.view-north .ledger-file::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--fg-ghost);
+}
+:root.view-north .ledger-file-empty {
+  color: var(--fg-faint);
+}
+:root.view-north .ledger-actions {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+}
+:root.view-north .ledger-action {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 6px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:root.view-north .ledger-action:hover:not(:disabled),
+:root.view-north .ledger-action:focus-visible:not(:disabled) {
+  color: var(--em);
+  border-color: var(--em-dim);
+}
+:root.view-north .ledger-action-danger:hover:not(:disabled),
+:root.view-north .ledger-action-danger:focus-visible:not(:disabled) {
+  color: var(--deleted);
+  border-color: var(--deleted);
+}
+:root.view-north .ledger-action:disabled {
+  color: var(--fg-ghost);
+  cursor: default;
+  opacity: .65;
+}
+:root.view-north #sidebar-header,
+:root.view-north .pane-tabs,
+:root.view-north #whisper-bar,
+:root.view-north #composer-header,
+:root.view-north #diff-header,
+:root.view-north #browser-header {
+  background: var(--bg-2);
+}
+:root.view-north #sidebar-header,
+:root.view-north .pane-tabs,
+:root.view-north #composer-header,
+:root.view-north #diff-header,
+:root.view-north #browser-header {
+  border-color: var(--line);
+}
+:root.view-north .pane-tabs {
+  padding: 0 14px;
+}
+:root.view-north .tab.active {
+  border-bottom-color: var(--em);
+}
+:root.view-north .tab.north-trail-tab {
+  position: relative;
+  border-bottom-color: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+}
+:root.view-north .tab.north-trail-tab:hover { color: var(--fg); }
+:root.view-north .tab.north-trail-tab.active {
+  color: var(--fg);
+  font-weight: 600;
+}
+:root.view-north .tab.north-trail-tab.active::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--em);
+}
+:root.view-north #editor-area,
+:root.view-north #panes,
+:root.view-north .pane,
+:root.view-north .pane-host,
+:root.view-north .editor-shell,
+:root.view-north .code-host,
+:root.view-north .preview-host {
+  background: var(--bg-1);
+}
+:root.view-north #terminal-area {
+  margin: 0 10px 10px;
+  background: var(--term-bg);
+  border: 1px solid var(--term-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--term-shadow);
+  color: var(--term-fg);
+}
+:root.view-north #terminal-seam,
+:root.view-north .term-group-tabs,
+:root.view-north .term-group-body,
+:root.view-north #term-host {
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border-color: var(--term-line);
+}
+:root.view-north .term-tab,
+:root.view-north .term-add,
+:root.view-north .term-maximize {
+  color: var(--term-dim);
+  background: transparent;
+}
+:root.view-north .term-tab.active {
+  color: var(--term-fg);
+  background: var(--em-wash);
+  box-shadow: inset 0 -2px 0 var(--em);
+}
+:root.view-north #composer-pane,
+:root.view-north #diff-pane,
+:root.view-north #browser-area {
+  background: var(--bg-1);
+  border-color: var(--line);
+}
+:root.view-north #composer-pane,
+:root.view-north #diff-pane {
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  box-shadow: var(--sheet-shadow);
+}
+:root.view-north #browser-area {
+  margin: 0 10px 10px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  box-shadow: var(--sheet-shadow);
+}
+:root.view-north .browser-url-input,
+:root.view-north .browser-btn {
+  background: var(--bg-1);
+  border-color: var(--line);
+}
+:root.view-north .browser-frame {
+  background: var(--bg-1);
+}
+
+/* fixed: box-shadow colors below stay literal rgba(0,0,0,X) black across both themes by convention —
+   ambient elevation shadows read as dark regardless of surface theme (standard UI practice); the two
+   new motion surfaces (palette, tag-manager modal) opt into the themed var(--shadow) instead. */
 
 * {
   box-sizing: border-box;
@@ -46,7 +577,7 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg-1);
   color: var(--fg);
 }
 
@@ -309,7 +840,7 @@ button {
   cursor: pointer;
 }
 button:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 
 /* menu bar */
@@ -418,7 +949,7 @@ button:hover {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--fg-dim, #8a8f98);
+  color: var(--fg-dim);
 }
 .gitbar-section:not(:first-child) {
   margin-top: 4px;
@@ -433,7 +964,7 @@ button:hover {
   white-space: nowrap;
 }
 .gitbar-worktree:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 .gitbar-worktree.current {
   background: var(--em-wash);
@@ -587,7 +1118,7 @@ button:hover {
   align-items: center;
   justify-content: center;
   background: var(--em);
-  color: #0c0d0e;
+  color: var(--on-em);
   flex: 0 0 auto;
 }
 .auto-run:hover {
@@ -620,7 +1151,7 @@ button:hover {
   cursor: pointer;
 }
 .auto-dd-row:hover {
-  background: var(--bg-4, #26282b);
+  background: var(--bg-4);
 }
 .auto-dd-row.cur {
   background: var(--em-wash);
@@ -687,6 +1218,7 @@ button:hover {
   background: var(--bg-2);
   border-top: 1px solid var(--em-dim);
   border-bottom: 1px solid var(--line);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .auto-drawer-row {
   display: flex;
@@ -763,7 +1295,7 @@ button:hover {
 }
 .auto-drawer-acts .save {
   background: var(--em);
-  color: #0c0d0e;
+  color: var(--on-em);
   border: 1px solid var(--em-dim);
   font-weight: 600;
 }
@@ -912,7 +1444,7 @@ button:hover {
 }
 .po-sep {
   height: 1px;
-  background: var(--line-soft);
+  background: var(--line);
   margin: 6px 8px;
 }
 
@@ -1040,7 +1572,7 @@ button:hover {
   overflow: hidden;
   position: relative;
   background: var(--bg-drawer);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 #terminal-area.terminal-collapsed {
   flex: 0 0 30px;
@@ -1060,7 +1592,7 @@ button:hover {
   background: transparent;
 }
 .resizer-v:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 .resizer-h {
   flex: 0 0 4px;
@@ -1068,7 +1600,7 @@ button:hover {
   background: transparent;
 }
 .resizer-h:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 .hidden {
   display: none !important;
@@ -1180,6 +1712,8 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* fixed: file-type icon colors are per-language brand/convention colors (VS Code-style), intentionally
+   fixed across themes — not part of the ink/washi surface palette (decisions log #5) */
 .tree-icon.type-folder {
   color: #d7ba2a;
 }
@@ -1221,7 +1755,7 @@ button:hover {
 }
 .tree-edit-input {
   padding: 2px 4px;
-  background: var(--bg);
+  background: var(--bg-1);
   border: 1px solid var(--em);
   border-radius: 2px;
   font-size: 12.5px;
@@ -1230,7 +1764,7 @@ button:hover {
 }
 
 .tree-create-error {
-  color: var(--danger, #e24b4a);
+  color: var(--deleted);
   font-size: 11px;
   padding: 1px 0 4px;
 }
@@ -1242,6 +1776,46 @@ button:hover {
   color: inherit;
 }
 
+/* ── W1/T2 Graphite structure: flat tree + text status badges only. ── */
+:root.view-graphite .tree {
+  padding: 6px 0;
+  font-family: var(--ui);
+}
+:root.view-graphite .tree-row {
+  height: 24px;
+  gap: 5px;
+  padding-right: 10px;
+  background: transparent;
+}
+:root.view-graphite .tree-row:hover,
+:root.view-graphite .tree-row.multi-selected {
+  background: var(--bg-3);
+}
+:root.view-graphite .tree-row.active,
+:root.view-graphite .tree-row.multi-selected.active {
+  --tree-active-stitch: 0px;
+  border-left: 0;
+  background: var(--em-wash-row);
+}
+:root.view-graphite .tree-icon {
+  display: none;
+}
+:root.view-graphite .tree-dot {
+  width: auto;
+  height: auto;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border-radius: 0;
+  background: none;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+:root.view-graphite .tree-dot.modified::after { content: "M"; color: var(--diff-mod); }
+:root.view-graphite .tree-dot.added::after { content: "A"; color: var(--diff-add); }
+:root.view-graphite .tree-dot.deleted::after { content: "D"; color: var(--diff-del); }
+
 /* ---- editor tabs ---- */
 .pane-tabs {
   flex: 0 0 32px;
@@ -1249,7 +1823,7 @@ button:hover {
   align-items: stretch;
   gap: 18px;
   background: var(--bg-2);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
   overflow-x: auto;
   padding: 0 14px;
 }
@@ -1301,6 +1875,37 @@ button:hover {
 }
 .tab .tab-close:hover {
   opacity: 1;
+}
+
+/* ── W1/T2 Graphite structure: GitHub-style location underline. ── */
+:root.view-graphite .pane-tabs {
+  gap: 4px;
+  padding: 0 12px;
+  background: var(--bg-0);
+}
+:root.view-graphite .tab.graphite-tab {
+  position: relative;
+  gap: 7px;
+  padding: 0 12px;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+}
+:root.view-graphite .tab.graphite-tab:hover { color: var(--fg); }
+:root.view-graphite .tab.graphite-tab.active {
+  padding-bottom: 0;
+  border-bottom: 0;
+  color: var(--fg);
+  font-weight: 500;
+}
+:root.view-graphite .tab.graphite-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--graphite-tab-active);
 }
 
 .pane-host {
@@ -1390,7 +1995,7 @@ button:hover {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #fff;
+  background: var(--bg-1);
 }
 /* markdown render styling lives inside .preview-host (Phase 5 injects content) */
 .pane-splitter {
@@ -1399,9 +2004,11 @@ button:hover {
   background: transparent;
 }
 .pane-splitter:hover {
-  background: var(--accent);
+  background: var(--em);
 }
 
+/* Git-diff paint is separate from app-wide --added/--modified/--deleted status semantics.
+   Classic keeps the literals below through :root; each view may only re-value --diff-*. */
 /* ---- diff gutter colors ---- */
 .cm-diff-gutter {
   width: 4px;
@@ -1411,13 +2018,13 @@ button:hover {
   cursor: pointer;
 }
 .cm-diff-added {
-  background: var(--added);
+  background: var(--diff-add);
 }
 .cm-diff-modified {
-  background: var(--modified);
+  background: var(--diff-mod);
 }
 .cm-diff-deleted {
-  box-shadow: 0 -2px 0 var(--deleted);
+  box-shadow: 0 -2px 0 var(--diff-del);
 }
 
 /* ---- inline diff lens ---- */
@@ -1458,12 +2065,12 @@ button:hover {
   min-width: max-content;
 }
 .lens-row.old {
-  background: rgba(240, 113, 106, 0.08);
-  color: color-mix(in srgb, var(--deleted) 72%, var(--fg));
+  background: var(--diff-del-wash);
+  color: color-mix(in srgb, var(--diff-del) 72%, var(--fg));
 }
 .lens-row.new {
-  background: rgba(227, 179, 65, 0.12);
-  color: color-mix(in srgb, var(--added) 72%, var(--fg));
+  background: var(--diff-add-wash);
+  color: color-mix(in srgb, var(--diff-add) 72%, var(--fg));
 }
 .lens-footer {
   padding: 6px 10px 8px;
@@ -1512,6 +2119,7 @@ button:hover {
   overflow: hidden;
 }
 #diff-pane {
+  position: relative; /* positioning context for .turn-dropdown's max-height: 40% */
   flex: 0 0 45%;
   display: flex;
   flex-direction: column;
@@ -1529,6 +2137,20 @@ button:hover {
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
+#diff-title { flex: 1; }
+#diff-scope-toggle {
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin-right: 8px;
+}
+#diff-scope-toggle:hover { color: var(--fg); }
+#diff-scope-toggle.on { color: var(--em); border-color: var(--em); }
 #diff-close {
   border: none;
   background: none;
@@ -1574,13 +2196,13 @@ button:hover {
   font-size: 11px;
 }
 .diff-file-status.status-m {
-  color: #3c94ff;
+  color: var(--diff-file-mod);
 }
 .diff-file-status.status-a {
-  color: #d4c562;
+  color: var(--diff-file-add);
 }
 .diff-file-status.status-d {
-  color: #d74e42;
+  color: var(--diff-file-del);
 }
 .diff-file-name {
   flex: 1;
@@ -1622,9 +2244,9 @@ button:hover {
   height: 6px;
   border-radius: 50%;
 }
-.diff-hunk-dot.modified { background: var(--modified); }
-.diff-hunk-dot.added { background: var(--added); }
-.diff-hunk-dot.deleted { background: var(--deleted); }
+.diff-hunk-dot.modified { background: var(--diff-mod); }
+.diff-hunk-dot.added { background: var(--diff-add); }
+.diff-hunk-dot.deleted { background: var(--diff-del); }
 .diff-hunk-empty {
   padding: 4px 8px 4px 28px;
   font-size: 11px;
@@ -1636,6 +2258,8 @@ button:hover {
   padding: 10px;
 }
 
+/* fixed: merge-conflict red (rgba(215,78,66,*)) is an intentional fixed-severity accent, independent
+   of ink/washi surface tokens — matches the diff/deleted-red invariant (decisions log #4) */
 /* merge conflict controls */
 .conflict-banner {
   display: flex;
@@ -1692,6 +2316,42 @@ button:hover {
   flex: 1;
   border-top: 1px dashed color-mix(in srgb, var(--fg-faint) 24%, transparent);
 }
+
+/* ── W1/T2 Graphite structure: dynamic Terminal/Problems band. ── */
+:root.view-graphite #terminal-area.terminal-collapsed #terminal-seam {
+  display: none;
+}
+:root.view-graphite .graphite-band {
+  display: flex;
+  flex: 0 0 35px;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+:root.view-graphite .graphite-band-tab {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+}
+:root.view-graphite .graphite-band-tab:hover { background: transparent; color: var(--fg); }
+:root.view-graphite .graphite-band-tab.active { color: var(--fg); font-weight: 500; }
+:root.view-graphite .graphite-band-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--graphite-tab-active);
+}
 #term-host {
   flex: 1;
   min-width: 0;
@@ -1709,7 +2369,7 @@ button:hover {
   flex-basis: 50%;
 }
 .term-group-right {
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--line);
 }
 .term-group.hidden {
   display: none;
@@ -1799,7 +2459,7 @@ button:hover {
   display: none;
 }
 .term-tab[data-side="right"] {
-  border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--border));
+  border-left: 1px solid color-mix(in srgb, var(--em) 35%, var(--line));
 }
 /* Maximized terminal: hide editor and resizer, let terminal fill #main */
 #main.terminal-maximized #editor-area  { display: none; }
@@ -1808,7 +2468,7 @@ button:hover {
 .term-maximize {
   border: none;
   border-radius: 0;
-  background: var(--bg-bar);
+  background: var(--bg-2);
   padding: 0 8px;
   cursor: pointer;
   color: var(--fg-faint);
@@ -1953,6 +2613,10 @@ button:hover {
 }
 
 /* ---- whisper bar ---- */
+/* Sanctioned base rule: the host is always mounted, so Classic must hide it before any view class exists. */
+#north-seam {
+  display: none;
+}
 #whisper-bar {
   flex: 0 0 27px;
   display: flex;
@@ -1965,6 +2629,72 @@ button:hover {
   border-top: 1px solid var(--line);
   color: var(--fg-faint);
   font-size: 11.5px;
+}
+:root.view-north #whisper-bar {
+  display: none;
+}
+:root.view-north #north-seam {
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 10px 10px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  box-shadow: var(--sheet-shadow);
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+:root.view-north .north-seam-whisper {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+:root.view-north .north-surface-pills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+:root.view-north .north-surface-pill {
+  border: 1px solid var(--line-menu);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font: inherit;
+  line-height: 18px;
+  padding: 0 7px;
+  cursor: pointer;
+}
+:root.view-north .north-surface-pill:hover {
+  border-color: var(--em);
+  color: var(--em);
+}
+:root.view-north .north-surface-pill.live::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 4px 1px 0;
+  border-radius: 999px;
+  background: var(--em);
+  animation: north-surface-live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes north-surface-live-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root.view-north .north-surface-pill.live::before {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 .whisper-left,
 .whisper-right {
@@ -2019,9 +2749,9 @@ button:hover {
   margin-left: auto;
   flex: 0 0 6px;
 }
-.tree-dot.modified { background: var(--modified); }
-.tree-dot.added { background: var(--added); }
-.tree-dot.deleted { background: var(--deleted); }
+.tree-dot.modified { background: var(--diff-mod); }
+.tree-dot.added { background: var(--diff-add); }
+.tree-dot.deleted { background: var(--diff-del); }
 
 /* ---- folder search view ---- */
 #search-view {
@@ -2071,7 +2801,7 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   background: var(--bg-3);
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
 }
 .search-file-header:hover {
   color: var(--em);
@@ -2124,11 +2854,12 @@ button:hover {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(8, 10, 9, 0.55);
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 80px;
+  transition: opacity 120ms ease-out;
 }
 .palette-container {
   width: min(430px, calc(100vw - 28px));
@@ -2136,8 +2867,9 @@ button:hover {
   border: 1px solid var(--line-menu);
   border-radius: var(--r-md);
   overflow: hidden;
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
   box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.45),
+    0 24px 70px var(--shadow),
     inset 0 1px 0 color-mix(in srgb, var(--em) 12%, transparent);
 }
 .palette-input {
@@ -2264,15 +2996,17 @@ button:hover {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: opacity 140ms ease-out;
 }
 .prompt-box {
   background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
   padding: 16px;
   min-width: 280px;
   display: flex;
@@ -2300,7 +3034,7 @@ button:hover {
   border: 1px solid var(--line);
   cursor: pointer;
   background: var(--em);
-  color: #fff;
+  color: var(--on-em);
   font-family: inherit;
 }
 .prompt-btn.secondary {
@@ -2389,7 +3123,7 @@ button:hover {
   flex-direction: column;
   min-width: 0;
   background: var(--bg-1);
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--line);
 }
 #browser-area.hidden {
   display: none;
@@ -2400,8 +3134,8 @@ button:hover {
   align-items: center;
   gap: 6px;
   padding: 0 8px;
-  background: var(--bg-bar);
-  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
 }
 .browser-btn {
   flex: 0 0 32px;
@@ -2424,7 +3158,7 @@ button:hover {
 }
 .browser-btn.active {
   background: var(--em);
-  color: var(--bg);
+  color: var(--on-em);
   border-color: var(--em);
 }
 .browser-url-input {
@@ -2446,14 +3180,31 @@ button:hover {
 .browser-url-input::placeholder {
   color: var(--fg-faint);
 }
+.browser-url-input.browser-url-error {
+  border-color: var(--deleted);
+}
+.browser-url-input.browser-url-error::placeholder {
+  color: var(--deleted);
+}
 .browser-frame {
   flex: 1;
   border: 0;
   background: white;
   min-height: 0;
+  min-width: 0;
 }
 #browser-resizer.hidden {
   display: none;
+}
+#browser-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  min-width: 0;
+}
+#browser-body.dock-left {
+  flex-direction: row-reverse;
 }
 
 /* ---- task control plane ---- */
@@ -2579,7 +3330,7 @@ button:hover {
   border-radius: var(--r-sm);
   font-size: 12px;
 }
-.task-acceptance-blocker { color: var(--warn, #d99a36); }
+.task-acceptance-blocker { color: var(--added); }
 .task-acceptance-ready { color: var(--fg-dim); flex: 1; }
 .task-acceptance-receipt { color: var(--fg-dim); font-family: var(--mono); }
 .task-acceptance-gate.is-accepted { border-color: var(--em-dim); }
@@ -2595,11 +3346,12 @@ button:hover {
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  transition: opacity 140ms ease-out;
 }
 .settings-modal {
   width: 560px;
@@ -2612,6 +3364,7 @@ button:hover {
   flex-direction: column;
   overflow: hidden;
   font-family: var(--ui);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .settings-header {
   display: flex;
@@ -2719,6 +3472,7 @@ button:hover {
   transition: left 0.12s;
 }
 .settings-toggle.on { background: var(--em-dim); }
+/* fixed: toggle knob stays white by convention (iOS-style switch); --em-dim is dark-saturated-enough in both themes for contrast */
 .settings-toggle.on::after { left: 16px; background: #fff; }
 .settings-note { font-size: 11px; color: var(--fg-dim); margin-top: 4px; }
 .settings-shortcuts { display: flex; flex-direction: column; gap: 6px; }
@@ -2765,7 +3519,7 @@ button:hover {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--em);
 }
 
 /* ── About panel (reuses .settings-* modal grammar) ── */
@@ -2782,6 +3536,9 @@ button:hover {
 .about-links { display: flex; gap: 8px; margin-top: 12px; }
 .about-links .settings-reset { margin-top: 0; }
 
+/* fixed: debugger affordance colors (breakpoint red, agent-violet, paused-line yellow, inline-hint
+   teal, chip tan) are fixed semantic signal colors — VS Code-debugger convention, intentionally NOT
+   tied to the ink/washi surface palette so severity/kind reads identically in both themes */
 /* Debugger: breakpoint gutter, paused line, inline value hints */
 .cm-bp-gutter { width: 14px; cursor: pointer; }
 .cm-bp-verified { color: #e51400; }
@@ -2793,16 +3550,17 @@ button:hover {
 
 /* Debugger sidebar slot + panels */
 .debugger-sidebar-slot { transition: flex-basis 0.15s ease; min-height: 0; min-width: 0; }
-.debugger-sidebar-slot.open { border-left: 1px solid var(--border, #2a2a2a); }
+.debugger-sidebar-slot.open { border-left: 1px solid var(--line); }
 .debugger-sidebar-slot.dragging { transition: none; }
 .debugger-sidebar { display: flex; flex-direction: column; height: 100%; overflow: auto; font-size: 12px; }
-.dbg-panel { border-bottom: 1px solid var(--border, #2a2a2a); padding: 6px 8px; }
+.dbg-panel { border-bottom: 1px solid var(--line); padding: 6px 8px; }
 .dbg-panel h3 { font-size: 11px; text-transform: uppercase; opacity: 0.7; margin: 0 0 4px; }
 .dbg-list { list-style: none; margin: 0; padding: 0; }
 .dbg-list li { padding: 2px 0; }
-/* Breakpoint-row chips: were declared in the panel but never styled — bare text until now. */
-.dbg-chip { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; text-transform: uppercase; letter-spacing: 0.3px; vertical-align: middle; background: var(--bg-1, #2a2a2a); color: var(--fg-dim, #aaa); }
-.dbg-chip-cond { color: var(--modified, #4493f8); }
+/* Breakpoint-row chips: were declared in the panel but never styled — bare text until now.
+   fixed: chip colors reuse the same fixed debugger-signal palette noted above. */
+.dbg-chip { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; text-transform: uppercase; letter-spacing: 0.3px; vertical-align: middle; background: var(--bg-1); color: var(--fg-dim); }
+.dbg-chip-cond { color: var(--modified); }
 .dbg-chip-hit { color: #4ec9b0; }
 .dbg-chip-log { color: #d7ba7d; }
 /* Violet + filled = agent-attributed, matches .dbg-console-agent / .agent-badge. */
@@ -2811,9 +3569,9 @@ button:hover {
 .dbg-watch-rm { float: right; background: none; border: none; cursor: pointer; opacity: 0.6; }
 .dbg-watch-add { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; }
 .dbg-console { font-family: var(--mono, monospace); white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 0; }
-.dbg-console-error { color: var(--danger, #e24b4a); }
+.dbg-console-error { color: var(--deleted); }
 /* Eval results stand apart from plain adapter output. */
-.dbg-console-result { color: var(--modified, #4493f8); }
+.dbg-console-result { color: var(--modified); }
 /* Violet = agent-attributed (MCP) console lines — matches .agent-badge. */
 .dbg-console-agent { color: #a78bfa; }
 .dbg-console-input { width: 100%; background: transparent; border: none; outline: none; opacity: 0.7; font-family: var(--mono, monospace); }
@@ -2888,7 +3646,7 @@ button:hover {
   font-size: 11px;
   padding: 1px 6px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -2918,7 +3676,7 @@ button:hover {
   font-size: 11px;
   padding: 3px 10px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -3082,7 +3840,7 @@ button:hover {
   color: var(--fg);
 }
 .cmp-suggest-item:hover,
-.cmp-suggest-item.active { background: var(--em-dim); color: var(--bg); }
+.cmp-suggest-item.active { background: var(--em-dim); color: var(--on-em); }
 .cmp-chip-rail {
   display: flex;
   flex-wrap: wrap;
@@ -3155,7 +3913,7 @@ button:hover {
   font-size: 11.5px;
   padding: 3px 10px;
   background: var(--em-dim);
-  color: var(--bg);
+  color: var(--on-em);
   border: none;
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -3265,7 +4023,7 @@ button:hover {
 .cmp-status {
   padding: 4px 8px;
   font-size: 11px;
-  color: #f87171;
+  color: var(--deleted);
   background: var(--bg-1);
   border-top: 1px solid var(--line);
   flex: 0 0 auto;
@@ -3274,18 +4032,20 @@ button:hover {
 /* ── Tag Manager modal ───────────────────────────────────────────────────────── */
 .tm-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: var(--scrim);
   z-index: 9000;
   display: flex; align-items: center; justify-content: center;
+  transition: opacity 140ms ease-out;
 }
 .tm-modal {
-  background: var(--bg);
+  background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   width: 480px; max-width: 95vw;
   max-height: 80vh;
   display: flex; flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 32px var(--shadow);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .tm-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -3342,7 +4102,7 @@ button:hover {
 .tm-status { font-size: 11px; color: var(--fg-dim); flex: 1; }
 .tm-save {
   font-size: 12px; padding: 4px 14px;
-  background: var(--em-dim); color: var(--bg);
+  background: var(--em-dim); color: var(--on-em);
   border: none; border-radius: var(--r-sm);
   cursor: pointer; font-weight: 600;
 }
@@ -3394,16 +4154,32 @@ button:hover {
 .tm-tpl-order { width: 100%; }
 
 /* ---- annotation side list ---- */
-.annotation-list { position: absolute; right: 0; top: 0; width: 260px; overflow: auto; background: var(--panel-bg, #1e1e1e); }
+.annotation-list { flex: 0 0 248px; overflow: auto; background: var(--panel-bg); border-left: 1px solid var(--line); }
+#browser-body.dock-left .annotation-list { border-left: 0; border-right: 1px solid var(--line); }
+.annotation-list.collapsed { flex-basis: 26px; overflow: hidden; }
+.ann-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--em-dim); }
+.ann-rail-head .rail-btn { background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
+.ann-rail-head .rail-btn:hover { color: var(--em); }
+.ann-rail-title { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--em); }
+.ann-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; cursor: pointer; height: 100%; }
+.ann-spine .ann-spine-badge { width: 18px; height: 18px; border-radius: 50%; background: var(--em); color: var(--on-em); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
 .annotation-row { display: flex; gap: 6px; align-items: center; padding: 4px 6px; cursor: pointer; }
 .annotation-row:hover { background: var(--em-wash-row); }
 .annotation-row.stale { opacity: 0.5; }
 .ann-armed { padding: 5px 8px; font-size: 11px; color: var(--em); background: var(--em-wash); }
+/* fixed: marker badge — saturated red + white number is a fixed marker-number chip, mirrors the conflict/diff-red invariant, legible on both themes */
 .ann-num { background: #e11; color: #fff; border-radius: 50%; width: 18px; height: 18px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
 .ann-hint { padding: 6px 8px; font-size: 11px; color: var(--em); border-bottom: 1px solid var(--em-dim); display: flex; align-items: center; gap: 5px; }
 .ann-hint::before { content: "→"; opacity: 0.7; }
 .ann-sel { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--fg-dim); }
-.ann-fb { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg); }
+.ann-fb { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg); cursor: text; }
+.ann-fb.empty { color: var(--fg-dim); font-style: italic; }
+.ann-fb-edit { flex: 1 1 auto; min-width: 0; font-size: 12px; font-family: inherit; color: var(--fg); background: transparent; border: 1px solid var(--em-dim); border-radius: 3px; padding: 2px 4px; resize: none; min-height: 2.4em; }
+.ann-fb-edit:focus { outline: none; border-color: var(--em); }
+.ann-sent { flex: 0 0 auto; color: var(--em); font-size: 11px; }
+.ann-hint.untrusted { color: var(--fg-dim); }
+.ann-hint.untrusted::before { content: "⚠"; }
+.ann-hint.pulled::before { content: "✓"; }
 .ann-del { flex: 0 0 auto; background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 12px; padding: 0 2px; }
 .ann-del:hover { color: var(--fg); }
 
@@ -3560,6 +4336,8 @@ button:hover {
   cursor: pointer;
 }
 .turn-header:hover { background: var(--bg-3); }
+.turn-header--rolled-back { opacity: 0.55; }
+.turn-header--rolled-back .turn-header-label { text-decoration: line-through; }
 .turn-chip--pass { color: var(--em); border-color: var(--em-dim); }
 .turn-chip--fail { color: var(--deleted); border-color: color-mix(in srgb, var(--deleted) 55%, transparent); }
 .turn-chip--running { color: var(--modified); border-color: color-mix(in srgb, var(--modified) 55%, transparent); }
@@ -3574,13 +4352,13 @@ button:hover {
 .rollback-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  transition: opacity 140ms ease-out;
 }
-.theme-washi .rollback-overlay { background: rgba(31, 35, 31, 0.3); }
 .rollback-file-row {
   display: flex;
   align-items: center;
@@ -3602,6 +4380,7 @@ button:hover {
   flex-direction: column;
   overflow: hidden;
   font-family: var(--ui);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
 }
 .rollback-title {
   padding: 10px 14px;
@@ -3633,9 +4412,57 @@ button:hover {
   border-top: 1px solid var(--line-menu);
 }
 
-/* -- turn strip: turn headers above the changed-file list -- */
+/* -- turn strip: collapsed summary row + on-demand dropdown, above the
+   changed-file list (turn-UX rehaul P1: replaces the old per-turn stack) -- */
 #turn-strip:empty { display: none; }
 #turn-strip { border-bottom: 1px solid var(--line); }
+.turn-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.turn-summary:hover { background: var(--bg-3); }
+.turn-summary-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-summary-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--modified);
+  animation: turn-summary-pulse 1.2s ease-in-out infinite;
+}
+@keyframes turn-summary-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.turn-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 40%;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.85);
+}
+.turn-dropdown-footer {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-align: center;
+  cursor: pointer;
+}
+.turn-dropdown-footer:hover { background: var(--bg-3); color: var(--fg-dim); }
+/* Live top row for the still-open turn (P3): reuses .turn-header's layout but
+   isn't clickable — no onSelect wired, so no hover/pointer affordance either. */
+.turn-header--live { cursor: default; }
+.turn-header--live:hover { background: var(--bg-2); }
 .turn-rollback {
   margin-left: auto;
   font-size: 11px;
@@ -3649,6 +4476,44 @@ button:hover {
 }
 .turn-rollback:hover:not(:disabled) { color: var(--fg); background: var(--bg-4); }
 .turn-rollback:disabled { opacity: 0.45; cursor: default; }
+
+/* -- turn-scoped diff breadcrumb (turn-UX rehaul P2) — replaces .turn-summary
+   atop the diff pane while a turn's before/after snapshot is being reviewed;
+   visually consistent with .turn-summary (same row shape/colors). -- */
+.turn-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-2);
+}
+.turn-breadcrumb-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-breadcrumb-exit {
+  font-size: 11px;
+  font-family: var(--ui);
+  color: var(--fg-dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.turn-breadcrumb-exit:hover { color: var(--fg); }
+
+/* Row-level fallback marker: this file's turn snapshot was unavailable
+   (>10MB cap / unsafe / GC'd / non-UTF-8), so its diff shown is git-HEAD
+   rather than the turn's own before/after. */
+.diff-file-badge {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--fg-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 4px;
+  white-space: nowrap;
+}
 
 /* -- sessions panel (right host) + aggregate strip -- */
 #sessions-panel-host {
@@ -3690,4 +4555,150 @@ body.app-hidden *,
 body.app-hidden *::before,
 body.app-hidden *::after {
   animation-play-state: paused !important;
+}
+
+/* Reduced motion: zero every transition added for palette/drawer/modal-scrim open-close polish.
+   Splitter/resizer selectors (.resizer-v, .resizer-h, .pane-splitter, #hresizer, #browser-resizer,
+   #diff-resizer) intentionally carry NO transition at all (60fps drag invariant) so they are absent
+   from this list on purpose, not by omission. */
+@media (prefers-reduced-motion: reduce) {
+  .palette-overlay,
+  .palette-container,
+  .prompt-overlay,
+  .prompt-box,
+  .settings-overlay,
+  .settings-modal,
+  .tm-overlay,
+  .tm-modal,
+  .rollback-overlay,
+  .rollback-dialog,
+  .auto-drawer,
+  .north-sidebar-overlay,
+  .north-sidebar-drawer {
+    transition: none;
+  }
+}
+
+/* ── W3/T7 Stanza rooms: room tablist + hearth strip. ── */
+/* Sanctioned base rule: the tablist is a dynamic host built only on stanza entry;
+   keep it inert should any transitional frame render it without the root class. */
+.room-tablist {
+  display: none;
+}
+:root.view-stanza .room-tablist {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--ui);
+}
+:root.view-stanza .room-tab {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--ui);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 150ms ease-out;
+}
+:root.view-stanza .room-tab:hover {
+  background: transparent;
+  color: var(--fg);
+}
+:root.view-stanza .room-tab.active {
+  color: var(--fg);
+  font-weight: 550;
+}
+:root.view-stanza .room-tab.active::before {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--em);
+}
+/* Run pulse: live terminal session(s) behind the Run room. */
+:root.view-stanza .room-tab-live::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 0 1px 5px;
+  border-radius: 999px;
+  background: var(--em);
+  animation: stanza-room-live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes stanza-room-live-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+/* Review dot: linked turns awaiting review disposition. */
+:root.view-stanza .room-tab-dot::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 0 1px 5px;
+  border-radius: 999px;
+  background: var(--diff-mod);
+}
+/* Hearth strip: CSS-only restyle of the existing whisper-bar chip host — a
+   warm, inset footer band; no new DOM, Classic keeps its own base rule. */
+:root.view-stanza #whisper-bar {
+  flex: 0 0 30px;
+  margin: 0 10px 8px;
+  padding: 0 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root.view-stanza .room-tab {
+    transition: none;
+  }
+  :root.view-stanza .room-tab-live::after {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── W3/T8b Stanza shelf: stacked Files/Outline/Search co-display (Write room). ──
+   No new tree/outline/search instances: #tree, .outline-content and #search-view
+   are the exact nodes OutlineView/SearchPanel already own. shelf-active only
+   resizes them into even thirds and reveals the three label headers (new DOM,
+   plain text, no new instances) main.ts reparented beside each section. */
+:root.view-stanza #sidebar.shelf-active #tree,
+:root.view-stanza #sidebar.shelf-active .outline-content {
+  flex: 1 1 0;
+  min-height: 64px;
+  overflow: auto;
+}
+:root.view-stanza #sidebar.shelf-active #search-view {
+  flex: 1 1 0;
+  min-height: 64px;
+}
+:root.view-stanza .shelf-label {
+  flex: 0 0 auto;
+  padding: 6px 14px 4px;
+  border-top: 1px solid var(--line);
+  font-family: var(--ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+:root.view-stanza .shelf-label-first {
+  border-top: none;
 }

@@ -342,7 +342,7 @@ test("explicit acceptance records immutable evidence metadata and new linked wor
   assert.equal(reviewable.status, "needs_review", "the pure reducer has no external side effect");
   assert.throws(() => acceptTask(task({ status: "needs_review", requiredChecks: [{ kind: "manual", id: "visual", label: "Visual QA" }] }), 202), /unchecked/i);
 
-  const superseded = attachTurnToTask(accepted, { id: 15, testStatus: { state: "none" } }, 203);
+  const superseded = attachTurnToTask(accepted, { id: 15 }, 203);
   assert.equal(superseded.status, "needs_review");
   assert.equal(superseded.acceptedAt, 202, "the prior acceptance receipt remains auditable");
   assert.equal(superseded.acceptedEvidenceDigest, accepted.acceptedEvidenceDigest);

@@ -1,8 +1,20 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { cssVar, onThemeChange } from "./theme-tokens";
 
 export type PreviewKind = "md" | "html" | "diagram";
+
+type DiagramRenderer = (source: string, id: string) => Promise<string>;
+
+const latestRenderForElement = new WeakMap<HTMLElement, symbol>();
+let nextDiagramRenderId = 0;
+
+async function renderDiagram(source: string, id: string): Promise<string> {
+  const mermaid = (await import("mermaid")).default;
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
+  return (await mermaid.render(id, source)).svg;
+}
 
 export function previewKind(name: string): PreviewKind | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -12,7 +24,22 @@ export function previewKind(name: string): PreviewKind | null {
   return null;
 }
 
-const MD_STYLE = `
+/**
+ * Build the Markdown preview <style> block from the current ink/washi CSS tokens. The render
+ * target (srcdoc-equivalent innerHTML swap) can't cascade parent custom properties in, so
+ * colors are resolved via cssVar() and baked into the string at generation time; callers must
+ * regenerate (not cache) this on every render to stay in sync with the active theme.
+ */
+export function buildMdStyle(): string {
+  // Fallbacks mirror styles.css's ink (`:root`) defaults — never the retired fixed
+  // dark-theme palette this block used to hardcode.
+  const bg = cssVar("--bg-1", "#131614");
+  const fg = cssVar("--fg", "#e8eae4");
+  const em = cssVar("--em", "#4ade93");
+  const codeBg = cssVar("--bg-3", "#161a17");
+  const line = cssVar("--line", "rgba(255,255,255,0.05)");
+  const fgDim = cssVar("--fg-dim", "#8b9189");
+  return `
 .sutra-md-preview {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.65;
@@ -21,55 +48,79 @@ const MD_STYLE = `
   margin: 0 auto;
   padding: 24px 32px;
   box-sizing: border-box;
-  background: #1e1e2e;
-  color: #cdd6f4;
+  background: ${bg};
+  color: ${fg};
 }
 .sutra-md-preview h1,
 .sutra-md-preview h2,
 .sutra-md-preview h3,
 .sutra-md-preview h4,
 .sutra-md-preview h5,
-.sutra-md-preview h6 { color: #89b4fa; margin-top: 1.4em; }
-.sutra-md-preview a { color: #89dceb; }
+.sutra-md-preview h6 { color: ${em}; margin-top: 1.4em; }
+.sutra-md-preview a { color: ${em}; }
 .sutra-md-preview code {
-  background: #313244;
+  background: ${codeBg};
   border-radius: 4px;
   padding: 2px 5px;
   font-size: 0.875em;
   font-family: monospace;
 }
-.sutra-md-preview pre { background: #181825; border-radius: 6px; padding: 16px; overflow-x: auto; }
+.sutra-md-preview pre { background: ${codeBg}; border-radius: 6px; padding: 16px; overflow-x: auto; }
 .sutra-md-preview pre code { background: transparent; padding: 0; }
-.sutra-md-preview blockquote { border-left: 3px solid #6c7086; margin: 0; padding-left: 16px; color: #a6adc8; }
+.sutra-md-preview blockquote { border-left: 3px solid ${line}; margin: 0; padding-left: 16px; color: ${fgDim}; }
 .sutra-md-preview table { border-collapse: collapse; width: 100%; }
 .sutra-md-preview th,
-.sutra-md-preview td { border: 1px solid #45475a; padding: 8px 12px; }
-.sutra-md-preview th { background: #313244; }
+.sutra-md-preview td { border: 1px solid ${line}; padding: 8px 12px; }
+.sutra-md-preview th { background: ${codeBg}; }
 .sutra-md-preview img { max-width: 100%; }
-.sutra-md-preview hr { border: none; border-top: 1px solid #45475a; }
+.sutra-md-preview hr { border: none; border-top: 1px solid ${line}; }
 `;
+}
 
 export class PreviewController {
   private frame: HTMLIFrameElement | null = null;
+  private lastMdText: string | null = null;
+  private disposeTheme: (() => void) | null = null;
+  private disposed = false;
 
   constructor(
     private el: HTMLElement,
     private kind: PreviewKind,
-    private opts?: { htmlMode?: "url" | "srcdoc" },
-  ) {}
+    private opts?: { htmlMode?: "url" | "srcdoc"; renderDiagram?: DiagramRenderer },
+  ) {
+    // Mirrors editor.ts's Pane.themeObserver (per-instance MutationObserver via
+    // onThemeChange). editor.ts disposes the previous controller at every
+    // previewCtl replace/exit/destroy site — see dispose() below.
+    if (this.kind === "md") {
+      this.disposeTheme = onThemeChange(() => {
+        if (this.lastMdText !== null) void this.render(this.lastMdText);
+      });
+    }
+  }
+
+  /** Stop reacting to ink/washi toggles; idempotent. */
+  dispose(): void {
+    this.disposed = true;
+    this.disposeTheme?.();
+    this.disposeTheme = null;
+  }
 
   async render(text: string): Promise<void> {
+    if (this.disposed) return;
+    const renderToken = Symbol();
+    latestRenderForElement.set(this.el, renderToken);
     if (this.kind === "md") {
+      this.lastMdText = text;
       const raw = marked.parse(text) as string;
       const safe = DOMPurify.sanitize(raw);
-      this.el.innerHTML = `<style>${MD_STYLE}</style><div class="sutra-md-preview">${safe}</div>`;
+      this.el.innerHTML = `<style>${buildMdStyle()}</style><div class="sutra-md-preview">${safe}</div>`;
       this.interceptMarkdownLinks();
       return;
     }
     if (this.kind === "diagram") {
-      const mermaid = (await import("mermaid")).default;
-      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
-      const { svg } = await mermaid.render("sutra-diagram", text);
+      const id = `sutra-diagram-${++nextDiagramRenderId}`;
+      const svg = await (this.opts?.renderDiagram ?? renderDiagram)(text, id);
+      if (this.disposed || latestRenderForElement.get(this.el) !== renderToken) return;
       this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
       return;
     }

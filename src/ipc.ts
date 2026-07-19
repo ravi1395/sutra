@@ -79,6 +79,19 @@ export interface ChangedFile {
 export const gitChangedFiles = (root: string) =>
   invoke<ChangedFile[]>("git_changed_files", { root });
 
+// Branch-review scope: files changed vs merge-base of HEAD and main/master.
+// `oid` is the merge-base commit — pass it to gitCommitContent for hunk bases
+// so the list and the hunks share one immutable baseline.
+export interface BranchDiffFiles {
+  base: string;
+  oid: string;
+  files: ChangedFile[];
+}
+export const gitBranchDiffFiles = (root: string) =>
+  invoke<BranchDiffFiles>("git_branch_diff_files", { root });
+export const gitCommitContent = (root: string, oid: string, path: string) =>
+  invoke<string | null>("git_commit_content", { root, oid, path });
+
 export interface WorktreeInfo {
   name: string;
   path: string;
@@ -180,13 +193,16 @@ export const proxyUrl = (target: string) =>
   invoke<string>("proxy_url", { target });
 
 export const mcpServerUrl = () => invoke<string>("mcp_server_url");
-export const mcpSetRoot = (root: string) => invoke<void>("mcp_set_root", { root });
+export const workspaceGenerationNext = () => invoke<number>("workspace_generation_next");
+export const mcpSetRoot = (root: string, generation: number) => invoke<void>("mcp_set_root", { root, generation });
 export const mcpWriteAgentConfig = (root: string) =>
   invoke<string[]>("mcp_write_agent_config", { root });
 
-export const watchStart = (root: string) => invoke<void>("watch_start", { root });
-export const watchStop = () => invoke<void>("watch_stop");
+export const watchStart = (root: string, generation: number) => invoke<void>("watch_start", { root, generation });
+export const watchStop = (generation: number) => invoke<void>("watch_stop", { generation });
 export interface FsChangedPayload {
+  root: string;
+  generation: number;
   paths: string[];
 }
 export const onFsChanged = (cb: (payload: FsChangedPayload) => void): Promise<UnlistenFn> =>
@@ -447,6 +463,7 @@ export interface TurnFileEntry { path: string; beforeHash?: string | null; after
 export interface Turn { id: number; root: string; agentKind: string; boundarySource: "hook" | "quiet" | "open" | "rollback"; openedAt: number; closedAt?: number | null; files: TurnFileEntry[]; testStatus?: TestStatus | null; rolledBack: boolean }
 export interface TurnPollResult { openTurn?: Turn | null; closed: Turn[] }
 export interface RollbackResult { restored: string[]; failed: { path: string; error: string }[] }
+export interface TurnFileContent { before: string | null; after: string | null; snapshotted: boolean }
 export interface WorktreeRoot { path: string; branch: string }
 export interface HookStatus { claude: boolean; codex: boolean }
 
@@ -484,6 +501,10 @@ export async function turnTestRecord(root: string, turnId: number, status: TestS
 /** Current on-disk xxh3 hashes for `paths` under `root`; null = absent/unreadable. */
 export async function turnDiskHashes(root: string, paths: string[]): Promise<[string, string | null][]> {
   return invoke<[string, string | null][]>("turn_disk_hashes", { root, paths });
+}
+/** Read-only before/after snapshot content for one file in one turn (turn-diff view). */
+export async function turnFileContent(root: string, turnId: number, path: string): Promise<TurnFileContent> {
+  return invoke<TurnFileContent>("turn_file_content", { root, turnId, path });
 }
 export async function hookInstall(root: string, agent: "claude" | "codex"): Promise<boolean> {
   return invoke<boolean>("hook_install", { root, agent });

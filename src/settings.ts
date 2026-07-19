@@ -1,6 +1,15 @@
 // Persisted user settings (editor, terminal, behavior) and pure clamp/update helpers.
 import { settingsGet, settingsSet } from "./ipc";
 
+export type ViewId = "classic" | "north" | "graphite" | "stanza";
+export type ViewVariant = "ink" | "washi" | "day" | "night" | "dusk" | "dawn" | "dark";
+export const VIEW_VARIANTS: Record<ViewId, ViewVariant[]> = {
+  classic: ["ink", "washi"],
+  north: ["day", "night"],
+  graphite: ["dark"],
+  stanza: ["dusk", "dawn"],
+};
+
 export interface UserSettings {
   editorFontSize: number;
   editorFontFamily: string;
@@ -14,9 +23,12 @@ export interface UserSettings {
   restoreSession: boolean;
   agentTracking: boolean;
   autosaveOnBlur: boolean;
-  theme: "ink" | "washi";
+  view: ViewId;
+  theme: ViewVariant;
   diagnosticsEnabled: boolean;
   quietWindowMs: number; // harness v2 turn quiet-window; clamped 3000–60000
+  annotationDockSide: "left" | "right";
+  annotationRailCollapsed: boolean;
 }
 
 // Whitelists: every multi-choice setting validates against one of these.
@@ -46,9 +58,12 @@ export const DEFAULT_SETTINGS: UserSettings = {
   restoreSession: true,
   agentTracking: true,
   autosaveOnBlur: false,
+  view: "classic",
   theme: "ink",
   diagnosticsEnabled: true,
   quietWindowMs: 10000,
+  annotationDockSide: "right",
+  annotationRailCollapsed: false,
 };
 
 // Legacy localStorage key — read once (loadSettings) to port a pre-migration
@@ -78,8 +93,25 @@ function pickBool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function pickDockSide(value: unknown, fallback: "left" | "right"): "left" | "right" {
+  return value === "left" ? "left" : value === "right" ? "right" : fallback;
+}
+
 export function clampSettings(value: Partial<UserSettings>): UserSettings {
   const d = DEFAULT_SETTINGS;
+  const view = pick(Object.keys(VIEW_VARIANTS) as ViewId[], value.view, d.view);
+  // Legacy settings stored only ink/washi. Preserve washi specifically; every
+  // other missing-view value maps to classic/ink. Explicit views use only their
+  // own variant set.
+  //
+  // legacy-migration branch: reachable only for persisted payloads predating `view`;
+  // in-session callers always spread a full UserSettings — do not call with partial
+  // patches. A partial `{theme: "night"}` (no `view`) still routes through this branch
+  // and forces view="classic"/theme="ink", discarding a structurally-valid modern
+  // theme value — see tests/settings.test.ts boundary pin.
+  const theme = value.view === undefined
+    ? value.theme === "washi" ? "washi" : "ink"
+    : pick(VIEW_VARIANTS[view], value.theme, VIEW_VARIANTS[view][0]);
   return {
     editorFontSize: clampFontSize(value.editorFontSize, d.editorFontSize),
     editorFontFamily: pick(FONT_FAMILIES, value.editorFontFamily, d.editorFontFamily),
@@ -93,10 +125,20 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
     restoreSession: pickBool(value.restoreSession, d.restoreSession),
     agentTracking: pickBool(value.agentTracking, d.agentTracking),
     autosaveOnBlur: pickBool(value.autosaveOnBlur, d.autosaveOnBlur),
-    theme: value.theme === "washi" ? "washi" : "ink",
+    view,
+    theme,
     diagnosticsEnabled: pickBool(value.diagnosticsEnabled, d.diagnosticsEnabled),
     quietWindowMs: clampQuietWindow(value.quietWindowMs, d.quietWindowMs),
+    annotationDockSide: pickDockSide(value.annotationDockSide, d.annotationDockSide),
+    annotationRailCollapsed: pickBool(value.annotationRailCollapsed, d.annotationRailCollapsed),
   };
+}
+
+export function viewClasses(view: ViewId, theme: ViewVariant): string[] {
+  if (view === "classic") return theme === "washi" ? ["theme-washi", "theme-light"] : [];
+  if (view === "north") return theme === "day" ? ["view-north", "theme-light"] : ["view-north", "variant-night"];
+  if (view === "graphite") return ["view-graphite"];
+  return theme === "dawn" ? ["view-stanza", "variant-dawn", "theme-light"] : ["view-stanza"];
 }
 
 /** Merge a partial patch into current settings and re-clamp the result. Pure. */

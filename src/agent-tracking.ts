@@ -1,4 +1,4 @@
-import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, Turn, TurnPollResult } from "./ipc";
+import type { AgentChange, AgentTrackingStatus, ChangedFile, Diagnostic, TestStatus, Turn, TurnFileEntry, TurnPollResult } from "./ipc";
 import { getDiagnosticsFor } from "./diagnostics";
 
 export interface ReviewFile extends ChangedFile {
@@ -96,6 +96,53 @@ export function markRolledBack(root: string, turnId: number): void {
   if (turn) turn.rolledBack = true;
 }
 
+/** Optimistically stamp `turnId`'s live test status in the local cache — the
+ * counterpart to turnTestRecord's backend write. turn_poll is consume-once
+ * (setTurnState), so without this the chip (turnChipClass/turnHeaderEl) only
+ * catches up on the next replaceTurns (rollback) or workspace reopen. Unknown
+ * turn id is a no-op: the runner event may race a turn the client hasn't
+ * learned about yet. */
+export function setTurnTestStatus(root: string, turnId: number, status: TestStatus): void {
+  const turn = turnsByRoot.get(root)?.find((t) => t.id === turnId);
+  if (turn) turn.testStatus = status;
+}
+
+/** Launch a turn's auto-test: stamp "running" locally, persist it, then start
+ * the runner. If either the record or the launch fails, degrade to a terminal
+ * "fail" status (locally + best-effort backend record) — a runner that never
+ * started emits no completion event, so a swallowed error here would leave the
+ * chip stuck on "running" forever. "fail" over "skipped": a launch failure
+ * needs attention, and the outputTail disambiguates it from a real test fail.
+ * IPC deps are injected so this sequence is unit-testable without Tauri. */
+export async function launchTurnTest(
+  root: string,
+  turnId: number,
+  record: (root: string, turnId: number, status: TestStatus) => Promise<void>,
+  run: () => Promise<void>,
+  rerender: () => void,
+): Promise<void> {
+  const runningStatus: TestStatus = { state: "running", outputTail: "" };
+  setTurnTestStatus(root, turnId, runningStatus);
+  rerender();
+  try {
+    await record(root, turnId, runningStatus);
+    await run();
+  } catch (error) {
+    const failedStatus: TestStatus = { state: "fail", exitCode: null, outputTail: `test runner failed to start: ${String(error)}` };
+    setTurnTestStatus(root, turnId, failedStatus);
+    rerender();
+    await record(root, turnId, failedStatus).catch(() => {});
+  }
+}
+
+/** Final chip state for a completed test:<root>:<turnId> runner. A cancelled
+ * run's verdict is unknown — "skipped", never pass/fail; a deadline kill is a
+ * "fail" even if the killed process managed to exit 0. */
+export function runnerDoneTestState(p: { exitCode: number | null; timedOut: boolean; cancelled: boolean }): TestStatus["state"] {
+  if (p.cancelled) return "skipped";
+  return p.exitCode === 0 && !p.timedOut ? "pass" : "fail";
+}
+
 /** Of `ids`, the turn-test runner ids a cancel actually KILLED (returned true).
  * Only these may be suppressed in onRunnerDone — poisoning an id with nothing
  * running (cancel → false, e.g. a still-open newer turn whose test hasn't
@@ -150,19 +197,132 @@ export function hunkDiagBadge(diags: Diagnostic[], hunkFrom: number, hunkTo: num
   return diags.filter((d) => d.line >= hunkFrom && d.line <= hunkTo).length;
 }
 
-/** `.turn-header` row (`Turn {id} · {agent} · {n} files · chip`) for the review
- * list; chip title carries the test output tail (popover), Rollback disabled
- * while any turn is still open (agent mid-write). */
+/** `agentKind == "unknown"` (quiet-window boundaries have no Stop-hook
+ * reporter, so attribution is genuinely absent) degrades to the user-facing
+ * "agent" label rather than surfacing the internal sentinel. */
+export function agentLabel(agentKind: string): string {
+  return agentKind === "unknown" ? "agent" : agentKind;
+}
+
+/** Coarse relative-time bucket from `fromMs` to `nowMs`: "just now" (<60s),
+ * "{n}m ago" (<60m), "{n}h ago" (<24h), else "{n}d ago". Never negative. */
+export function relTime(fromMs: number, nowMs: number): string {
+  const deltaS = Math.max(0, Math.floor((nowMs - fromMs) / 1000));
+  if (deltaS < 60) return "just now";
+  const deltaM = Math.floor(deltaS / 60);
+  if (deltaM < 60) return `${deltaM}m ago`;
+  const deltaH = Math.floor(deltaM / 60);
+  if (deltaH < 24) return `${deltaH}h ago`;
+  return `${Math.floor(deltaH / 24)}d ago`;
+}
+
+const isSyntheticTurn = (t: Turn) => t.boundarySource === "rollback";
+
+/** Closed (non-open, non-synthetic-rollback) turns, newest-closed first. */
+export function closedTurns(turns: Turn[]): Turn[] {
+  return turns
+    .filter((t) => !isSyntheticTurn(t) && t.closedAt != null)
+    .sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
+}
+
+/** The still-open turn for a root, if any (`closedAt == null`). */
+export function openTurnOf(turns: Turn[]): Turn | undefined {
+  return turns.find((t) => t.closedAt == null);
+}
+
+/** Last `limit` closed turns, newest first — dropdown contents. */
+export function recentClosedTurns(turns: Turn[], limit = 6): Turn[] {
+  return closedTurns(turns).slice(0, limit);
+}
+
+/** Count of closed turns beyond the dropdown's current `limit` (visible-count)
+ * — the footer's remaining-count label; 0 once paging has revealed all. */
+export function olderTurnsCount(turns: Turn[], limit = 6): number {
+  return Math.max(0, closedTurns(turns).length - limit);
+}
+
+export type TurnSummaryState =
+  | { kind: "hidden" }
+  | { kind: "open"; fileCount: number }
+  | { kind: "resting"; count: number; agent: string; relTime: string; chipClass: string; chipLabel: string };
+
+/** Resting-vs-open-vs-hidden state for the `.turn-summary` row, derived from
+ * `turns` as of `nowMs`. `count` is non-synthetic CLOSED turns only. */
+export function turnSummaryState(turns: Turn[], nowMs: number): TurnSummaryState {
+  const open = openTurnOf(turns);
+  if (open) return { kind: "open", fileCount: open.files.length };
+  const closed = closedTurns(turns);
+  if (closed.length === 0) return { kind: "hidden" };
+  const latest = closed[0];
+  return {
+    kind: "resting",
+    count: closed.length,
+    agent: agentLabel(latest.agentKind),
+    relTime: relTime(latest.closedAt ?? latest.openedAt, nowMs),
+    chipClass: turnChipClass(latest),
+    chipLabel: latest.testStatus?.state ?? "",
+  };
+}
+
+/** `.turn-summary` row: `⟲ {N} turns · {agent} · {relTime} [chip]` at rest, or
+ * a pulsing-dot "turn open · {n} files…" while a turn is open. Caller wires
+ * `onClick` (dropdown toggle) and hides the row itself (e.g. leaves the
+ * mount point empty) when state is "hidden". */
+export function turnSummaryEl(turns: Turn[], nowMs: number, onClick: () => void): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "turn-summary";
+  row.onclick = onClick;
+  const state = turnSummaryState(turns, nowMs);
+  if (state.kind === "hidden") {
+    row.style.display = "none";
+    return row;
+  }
+  const label = document.createElement("span");
+  label.className = "turn-summary-label";
+  if (state.kind === "open") {
+    const dot = document.createElement("span");
+    dot.className = "turn-summary-dot";
+    row.appendChild(dot);
+    const n = state.fileCount;
+    label.textContent = `turn open · ${n} file${n === 1 ? "" : "s"}…`;
+    row.appendChild(label);
+    return row;
+  }
+  const n = state.count;
+  label.textContent = `⟲ ${n} turn${n === 1 ? "" : "s"} · ${state.agent} · ${state.relTime}`;
+  row.appendChild(label);
+  if (state.chipLabel) {
+    const chip = document.createElement("span");
+    chip.className = `turn-chip ${state.chipClass}`;
+    chip.textContent = state.chipLabel;
+    row.appendChild(chip);
+  }
+  return row;
+}
+
+/** `.turn-header` row (`Turn {id} · {agent} · {n} files · {relTime} [chip] [↶]`)
+ * used both standalone and as a `.turn-dropdown` row; chip title carries the
+ * test output tail (popover). Rolled-back turns render dimmed + strikethrough
+ * with the rollback button hidden entirely (nothing left to roll back).
+ * Otherwise Rollback is disabled while any turn is still open (agent mid-write).
+ * `onSelect`, if given, fires on a row-body click (turn-scoped diff entry) —
+ * the rollback button's own click already stops propagation, so it never
+ * reaches this handler. */
 export function turnHeaderEl(
   turn: Turn,
   allTurns: Turn[],
+  nowMs: number,
   onRollback: (turn: Turn) => void,
+  onSelect?: (turn: Turn) => void,
 ): HTMLElement {
   const header = document.createElement("div");
-  header.className = "turn-header";
+  header.className = "turn-header" + (turn.rolledBack ? " turn-header--rolled-back" : "");
+  if (onSelect) header.onclick = () => onSelect(turn);
   const label = document.createElement("span");
+  label.className = "turn-header-label";
   const n = turn.files.length;
-  label.textContent = `Turn ${turn.id} · ${turn.agentKind} · ${n} file${n === 1 ? "" : "s"}`;
+  const when = relTime(turn.closedAt ?? turn.openedAt, nowMs);
+  label.textContent = `Turn ${turn.id} · ${agentLabel(turn.agentKind)} · ${n} file${n === 1 ? "" : "s"} · ${when}`;
   header.appendChild(label);
   const chipClass = turnChipClass(turn);
   if (chipClass) {
@@ -172,16 +332,197 @@ export function turnHeaderEl(
     chip.title = turn.testStatus!.outputTail; // output-tail popover
     header.appendChild(chip);
   }
-  const rollback = document.createElement("button");
-  rollback.className = "turn-rollback";
-  rollback.textContent = turn.rolledBack ? "rolled back" : "rollback";
-  rollback.disabled = !isRollbackable(turn, allTurns);
-  rollback.onclick = (ev) => {
-    ev.stopPropagation();
-    onRollback(turn);
-  };
-  header.appendChild(rollback);
+  if (!turn.rolledBack) {
+    const rollback = document.createElement("button");
+    rollback.className = "turn-rollback";
+    rollback.textContent = "rollback";
+    rollback.disabled = !isRollbackable(turn, allTurns);
+    rollback.onclick = (ev) => {
+      ev.stopPropagation();
+      onRollback(turn);
+    };
+    header.appendChild(rollback);
+  }
   return header;
+}
+
+/** Live top row for the still-open turn inside `.turn-dropdown`: pulsing dot +
+ * `turn open · {n} files…`, no rollback button, no click handler at all — an
+ * open turn is already a no-op for `enterTurnScope`, but this row doesn't even
+ * wire `onSelect` so there's no scoped-mode attempt to no-op in the first
+ * place. Reuses `.turn-summary-dot`'s pulse animation. */
+export function turnLiveRowEl(turn: Turn): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "turn-header turn-header--live";
+  const dot = document.createElement("span");
+  dot.className = "turn-summary-dot";
+  row.appendChild(dot);
+  const label = document.createElement("span");
+  label.className = "turn-header-label";
+  const n = turn.files.length;
+  label.textContent = `turn open · ${n} file${n === 1 ? "" : "s"}…`;
+  row.appendChild(label);
+  return row;
+}
+
+/** `.turn-dropdown` overlay: an open turn's live row (if any) atop the last
+ * `visibleCount` closed turns (newest first) via `turnHeaderEl`, plus an
+ * "{n} older turns…" footer when more exist. Clicking the footer calls
+ * `onLoadMore` (paging — the caller grows `visibleCount` and re-renders) and
+ * must not bubble into anything that would dismiss the dropdown or select a
+ * turn, so its own click handler stops propagation same as the rollback
+ * button. `onSelect` threads through to each closed-turn row for turn-scoped
+ * diff entry. */
+export function turnDropdownEl(
+  turns: Turn[],
+  nowMs: number,
+  onRollback: (turn: Turn) => void,
+  onSelect?: (turn: Turn) => void,
+  visibleCount = 6,
+  onLoadMore?: () => void,
+): HTMLElement {
+  const dropdown = document.createElement("div");
+  dropdown.className = "turn-dropdown";
+  const open = openTurnOf(turns);
+  if (open) dropdown.appendChild(turnLiveRowEl(open));
+  for (const turn of recentClosedTurns(turns, visibleCount)) {
+    dropdown.appendChild(turnHeaderEl(turn, turns, nowMs, onRollback, onSelect));
+  }
+  const older = olderTurnsCount(turns, visibleCount);
+  if (older > 0) {
+    const footer = document.createElement("div");
+    footer.className = "turn-dropdown-footer";
+    footer.textContent = `${older} older turn${older === 1 ? "" : "s"}…`;
+    if (onLoadMore) {
+      footer.onclick = (ev) => {
+        ev.stopPropagation();
+        onLoadMore();
+      };
+    }
+    dropdown.appendChild(footer);
+  }
+  return dropdown;
+}
+
+// --- Turn-scoped diff mode (turn-UX rehaul P2) ---
+
+export type DiffScope =
+  | { kind: "workspace" }
+  | { kind: "turn"; turnId: number }
+  | { kind: "branch" };
+
+/** Enter turn-scoped diff mode for `turn`; a no-op (returns `current`
+ * unchanged, by reference) for the still-open (unclosed) turn — scoped
+ * review only applies to a turn whose before/after snapshots are final.
+ * Callers detect the no-op via `result === current`. */
+export function enterTurnScope(current: DiffScope, turn: Turn): DiffScope {
+  if (turn.closedAt == null) return current;
+  return { kind: "turn", turnId: turn.id };
+}
+
+/** Exit any scoped diff mode (turn or branch) back to the normal
+ * working-tree view. */
+export function exitTurnScope(): DiffScope {
+  return { kind: "workspace" };
+}
+
+/** Enter branch-review diff mode: file list + hunks against the merge-base
+ * of HEAD and main/master instead of git HEAD. Read-only (no accept/reject —
+ * committed work can't be hunk-reverted from the panel). */
+export function enterBranchScope(): DiffScope {
+  return { kind: "branch" };
+}
+
+/** Render-relevant signature for `.turn-strip`: identical output across two
+ * calls means nothing a rebuild would visibly change. Covers turn identity +
+ * mutable fields (closedAt/rolledBack/testStatus/files.length — the last so
+ * an in-progress open turn's live "N files…" count keeps advancing as the
+ * agent touches more files, not just closed-turn transitions), scope,
+ * dropdown open state and paging, plus a minute-granularity time bucket
+ * roughly matching `relTime`'s own display precision (phase-offset from each
+ * turn's own closedAt, so an individual row's bucket can flip up to ~59s
+ * before this key catches up — acceptable slack for a coarse minutes label,
+ * and any real change still forces an immediate rebuild regardless). */
+export function turnStripRenderKey(
+  turns: Turn[],
+  scope: DiffScope,
+  dropdownOpen: boolean,
+  visibleCount: number,
+  nowMs: number,
+): string {
+  const turnsKey = turns
+    .map((t) => `${t.id}:${t.closedAt ?? "open"}:${t.rolledBack ? 1 : 0}:${t.testStatus?.state ?? ""}:${t.files.length}`)
+    .join(",");
+  const scopeKey = scope.kind === "turn" ? `turn:${scope.turnId}` : scope.kind;
+  const minuteBucket = Math.floor(nowMs / 60000);
+  return `${turnsKey}|${scopeKey}|${dropdownOpen ? 1 : 0}|${visibleCount}|${minuteBucket}`;
+}
+
+/** Synchronous A/D/M inference for a turn's file-list row status, from the
+ * manifest's before/after hash presence alone (no blob read). Only trusted
+ * when `entry.snapshotted`: an unsnapshotted entry's `afterHash: null` can
+ * mean a genuine deletion OR an unrelated read failure (oversized/unreadable
+ * at turn-close — see turns.rs), so it degrades to "M" rather than guessing;
+ * the row's `~HEAD` fallback badge covers the ambiguity. */
+export function turnFileStatus(entry: TurnFileEntry): "A" | "D" | "M" {
+  if (!entry.snapshotted) return "M";
+  if (entry.beforeHash == null) return "A";
+  if (entry.afterHash == null) return "D";
+  return "M";
+}
+
+/** `.turn-breadcrumb` bar shown atop the diff pane while turn-scoped:
+ * `Viewing Turn {id} · ✕ back to working tree` plus a rollback button —
+ * hidden if `turn` is already rolled back, disabled while any turn is open
+ * (same `isRollbackable` lock as `turnHeaderEl`). Replaces `.turn-summary`
+ * for the duration of the scope. */
+export function turnBreadcrumbEl(
+  turn: Turn,
+  allTurns: Turn[],
+  onExit: () => void,
+  onRollback: (turn: Turn) => void,
+): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "turn-breadcrumb";
+  const label = document.createElement("span");
+  label.className = "turn-breadcrumb-label";
+  label.textContent = `Viewing Turn ${turn.id} ·`;
+  bar.appendChild(label);
+  const exit = document.createElement("button");
+  exit.className = "turn-breadcrumb-exit";
+  exit.textContent = "✕ back to working tree";
+  exit.onclick = onExit;
+  bar.appendChild(exit);
+  if (!turn.rolledBack) {
+    const rollback = document.createElement("button");
+    rollback.className = "turn-rollback";
+    rollback.textContent = "rollback";
+    rollback.disabled = !isRollbackable(turn, allTurns);
+    rollback.onclick = () => onRollback(turn);
+    bar.appendChild(rollback);
+  }
+  return bar;
+}
+
+/** `.turn-breadcrumb`-styled bar shown atop the diff pane while branch-scoped:
+ * `Branch diff vs {base} @ {short-oid} · ✕ back to working tree`. `base` null
+ * until the first fetch resolves (label shows an ellipsis placeholder). */
+export function branchBreadcrumbEl(
+  base: { label: string; oid: string } | null,
+  onExit: () => void,
+): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "turn-breadcrumb branch-breadcrumb";
+  const label = document.createElement("span");
+  label.className = "turn-breadcrumb-label";
+  label.textContent = base ? `Branch diff vs ${base.label} @ ${base.oid.slice(0, 7)} ·` : "Branch diff …";
+  bar.appendChild(label);
+  const exit = document.createElement("button");
+  exit.className = "turn-breadcrumb-exit";
+  exit.textContent = "✕ back to working tree";
+  exit.onclick = onExit;
+  bar.appendChild(exit);
+  return bar;
 }
 
 /** `.hunk-diag-badge` count element for a hunk row, sourced from the live

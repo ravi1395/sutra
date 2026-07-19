@@ -40,6 +40,11 @@ export function routeKey(targetOrigin: string, loc: LocationShape, opts: RouteOp
   return opts.hashRouting ? `${base}${loc.hash}` : base;
 }
 
+/** Resolved theme colors pushed host→agent over the existing postMessage channel
+ *  (see annotations.ts pushTheme / annotation-agent.ts case "theme"); the agent has
+ *  no CSS-var access of its own since it runs in a cross-origin proxied iframe. */
+export interface AnnotationTheme { bg: string; fg: string; em: string; emDim: string }
+
 export interface Hints { testid?: string; role?: string; aria?: string; text?: string }
 export interface Annotation {
   n: number; selector: string; tag: string; html: string;
@@ -73,6 +78,16 @@ export function reduce(state: Annotation[], action: AnnAction): Annotation[] {
           : a,
       );
   }
+}
+
+/** Coarse relative-time label for the annotation rail's "agent pulled …" status. */
+export function formatAgo(deltaMs: number): string {
+  const s = Math.max(0, Math.floor(deltaMs / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
 }
 
 export function isTrustedMessage(

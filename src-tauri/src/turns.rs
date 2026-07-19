@@ -848,6 +848,65 @@ pub fn turn_disk_hashes(
     Ok(out)
 }
 
+/// Before/after blob content for one file in one turn, for the frontend's
+/// turn-diff view. `snapshotted: false` (with both contents `None`) is a soft
+/// signal to fall back to a HEAD diff, never a hard error — an
+/// `unsafe_before` entry or a GC'd/corrupt blob are both "can't show this"
+/// rather than "something broke".
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFileContent {
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub snapshotted: bool,
+}
+
+/// Read a blob's bytes as UTF-8 text; `None` on a missing/corrupt object or
+/// non-UTF-8 content (binary files aren't diffable as text anyway).
+fn read_blob_utf8(store: &BlobStore, hash: &str) -> Option<String> {
+    store.get(hash).and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+/// Read-only before/after content for `path` in turn `turn_id`, from the
+/// snapshot blob store. Never mutates the manifest or store.
+#[tauri::command]
+pub fn turn_file_content(root: String, turn_id: u64, path: String) -> Result<TurnFileContent, String> {
+    // Same lock discipline as turn_list: a read must not interleave with an
+    // in-progress append/rewrite from a writer holding this lock.
+    let _roots = ROOTS.lock().unwrap();
+    let turns = load_manifest(&root);
+    let turn = turns
+        .iter()
+        .find(|t| t.id == turn_id)
+        .ok_or_else(|| format!("turn {turn_id} not found for root"))?;
+    let file = turn
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| format!("path {path} not touched by turn {turn_id}"))?;
+
+    if !file.snapshotted || file.unsafe_before {
+        return Ok(TurnFileContent { before: None, after: None, snapshotted: false });
+    }
+
+    let store = blob_store(&root);
+    let before = match &file.before_hash {
+        None => None, // file was created in this turn
+        Some(hash) => match read_blob_utf8(&store, hash) {
+            Some(text) => Some(text),
+            None => return Ok(TurnFileContent { before: None, after: None, snapshotted: false }),
+        },
+    };
+    let after = match &file.after_hash {
+        None => None, // file was deleted in this turn
+        Some(hash) => match read_blob_utf8(&store, hash) {
+            Some(text) => Some(text),
+            None => return Ok(TurnFileContent { before: None, after: None, snapshotted: false }),
+        },
+    };
+    Ok(TurnFileContent { before, after, snapshotted: true })
+}
+
 /// Restore the selected `paths` of turn `turn_id` from its snapshots.
 #[tauri::command]
 pub fn turn_rollback(root: String, turn_id: u64, paths: Vec<String>) -> Result<RollbackResult, String> {
@@ -1700,5 +1759,113 @@ mod tests {
         assert!(merge_stop_hook(serde_json::json!("nope")).is_err()); // string
         assert!(merge_stop_hook(serde_json::json!({ "hooks": [] })).is_err()); // hooks not object
         assert!(merge_stop_hook(serde_json::json!({ "hooks": { "Stop": "x" } })).is_err()); // Stop not array
+    }
+
+    // T2(a): a normal turn's before/after blobs both exist → both returned as
+    // text, snapshotted true.
+    #[test]
+    fn turn_file_content_returns_before_and_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h0 = store.put(b"before-text").unwrap();
+        let h1 = store.put(b"after-text").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("a.rs", Some(&h0), Some(&h1))])).unwrap();
+
+        let content = turn_file_content(root, 1, "a.rs".to_string()).unwrap();
+        assert_eq!(content.before.as_deref(), Some("before-text"));
+        assert_eq!(content.after.as_deref(), Some("after-text"));
+        assert!(content.snapshotted);
+    }
+
+    // T2(b): before_hash=None means the file was created during the turn — no
+    // before content to show.
+    #[test]
+    fn turn_file_content_created_file_has_no_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h1 = store.put(b"new-file-text").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("new.rs", None, Some(&h1))])).unwrap();
+
+        let content = turn_file_content(root, 1, "new.rs".to_string()).unwrap();
+        assert_eq!(content.before, None);
+        assert_eq!(content.after.as_deref(), Some("new-file-text"));
+        assert!(content.snapshotted);
+    }
+
+    // T2(c): after_hash=None means the file was deleted during the turn — no
+    // after content to show.
+    #[test]
+    fn turn_file_content_deleted_file_has_no_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h0 = store.put(b"gone-file-text").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("gone.rs", Some(&h0), None)])).unwrap();
+
+        let content = turn_file_content(root, 1, "gone.rs".to_string()).unwrap();
+        assert_eq!(content.before.as_deref(), Some("gone-file-text"));
+        assert_eq!(content.after, None);
+        assert!(content.snapshotted);
+    }
+
+    // T2(d): snapshotted=false (oversized) or unsafe_before both surface as
+    // snapshotted:false with no content, never an error — the frontend falls
+    // back to a HEAD diff.
+    #[test]
+    fn turn_file_content_unsnapshotted_or_unsafe_before_yields_no_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+
+        let mut oversized = turn_fixture(1, vec![("big.bin", None, Some("hafter"))]);
+        oversized.files[0].snapshotted = false;
+        append_manifest(&root, &oversized).unwrap();
+
+        let mut unsafe_turn = turn_fixture(2, vec![("unsafe.rs", None, Some("hafter2"))]);
+        unsafe_turn.files[0].unsafe_before = true;
+        append_manifest(&root, &unsafe_turn).unwrap();
+
+        let big = turn_file_content(root.clone(), 1, "big.bin".to_string()).unwrap();
+        assert!(!big.snapshotted);
+        assert_eq!(big.before, None);
+        assert_eq!(big.after, None);
+
+        let unsafe_content = turn_file_content(root, 2, "unsafe.rs".to_string()).unwrap();
+        assert!(!unsafe_content.snapshotted);
+        assert_eq!(unsafe_content.before, None);
+        assert_eq!(unsafe_content.after, None);
+    }
+
+    // T2(e): the manifest references a hash whose blob was GC'd off disk — read
+    // must degrade to snapshotted:false, never a hard error surfaced to the UI.
+    #[test]
+    fn turn_file_content_missing_blob_degrades_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        // Reference a hash that was never actually put() into the store.
+        append_manifest(
+            &root,
+            &turn_fixture(1, vec![("a.rs", Some("deadbeefdeadbeef"), Some("deadbeefdeadbeef"))]),
+        )
+        .unwrap();
+
+        let content = turn_file_content(root, 1, "a.rs".to_string()).unwrap();
+        assert!(!content.snapshotted);
+        assert_eq!(content.before, None);
+        assert_eq!(content.after, None);
+    }
+
+    // Unknown turn id / path both return a descriptive Err, not a panic.
+    #[test]
+    fn turn_file_content_errors_on_unknown_turn_or_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = blob_store(&root);
+        let h0 = store.put(b"x").unwrap();
+        append_manifest(&root, &turn_fixture(1, vec![("a.rs", Some(&h0), Some(&h0))])).unwrap();
+
+        assert!(turn_file_content(root.clone(), 99, "a.rs".to_string()).is_err());
+        assert!(turn_file_content(root, 1, "missing.rs".to_string()).is_err());
     }
 }

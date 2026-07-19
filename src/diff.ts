@@ -153,6 +153,14 @@ export function computeLineDiff(
   return { marks, hunks };
 }
 
+/** Hunk rows for a turn's before/after snapshot pair (turn-scoped diff view,
+ * not before-vs-current-worktree). `before`/`after` null (file created/deleted
+ * in the turn) diffs against "", so computeLineDiff naturally yields a single
+ * whole-file added/deleted hunk — no separate whole-file special-casing. */
+export function turnFileHunkRows(before: string | null, after: string | null): HunkRow[] {
+  return hunkSummaries(computeLineDiff(before ?? "", after ?? "").hunks);
+}
+
 /** Index of the hunk covering a clicked line, or -1. */
 export function hunkIndexAtLine(hunks: Hunk[], line0: number): number {
   for (let i = 0; i < hunks.length; i++) {
@@ -202,7 +210,7 @@ export class DiffViewer {
   // Render the changed-files list; each row expands (lazily) into a per-hunk
   // index, and hunk rows jump into the editor peek.
   renderFileList(
-    files: { path: string; status: string }[],
+    files: { path: string; status: string; badge?: string }[],
     active: string | null,
     handlers: {
       onFilePick: (path: string) => void;
@@ -217,7 +225,7 @@ export class DiffViewer {
       reviewable?: (path: string) => boolean;
     },
   ): void {
-    const nextKey = files.map((file) => `${file.status}\0${file.path}`).join("\0");
+    const nextKey = files.map((file) => `${file.status}\0${file.path}\0${file.badge ?? ""}`).join("\0");
     if (!this.filesEl.querySelector("#diff-empty") && nextKey === this.lastFileListKey) {
       this.syncActive(active);
       return;
@@ -254,6 +262,13 @@ export class DiffViewer {
       name.title = file.path; // Full path in tooltip
 
       row.append(chevron, status, name);
+      if (file.badge) {
+        const badge = document.createElement("span");
+        badge.className = "diff-file-badge";
+        badge.textContent = file.badge;
+        badge.title = "Turn snapshot unavailable — showing git-HEAD diff for this file";
+        row.append(badge);
+      }
       const reviewable = handlers.reviewable?.(file.path) ?? true;
       if (handlers.onAccept && reviewable) {
         const accept = document.createElement("button");

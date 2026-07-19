@@ -72,10 +72,10 @@ test("console evaluate input: absent with no session, present once a session exi
     const sidebar = new DebuggerSidebar(noopCb);
 
     sidebar.render({ ...emptyModel(), console: [{ text: "hello", kind: "output" }], hasSession: false });
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-input").length, 0, "no dead chrome — input must not be in the DOM at all");
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-input").length, 0, "no dead chrome — input must not be in the DOM at all");
 
     sidebar.render({ ...emptyModel(), console: [{ text: "hello", kind: "output" }], hasSession: true });
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-input").length, 1);
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-input").length, 1);
   } finally {
     restore();
   }
@@ -103,11 +103,11 @@ test("console entries render kind-specific classes — result/error/agent lines 
     });
     // One div per line, each carrying its kind class (AC: eval result lines must
     // not be indistinguishable from plain output; agent lines render violet).
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-line").length, 4);
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-result").length, 1);
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-error").length, 1);
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-agent").length, 1);
-    assert.equal(findAllByClass(sidebar.el, "dbg-console-result")[0].textContent, "42");
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-line").length, 4);
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-result").length, 1);
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-error").length, 1);
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-agent").length, 1);
+    assert.equal(findAllByClass(sidebar.el as unknown as FakeElement,"dbg-console-result")[0].textContent, "42");
   } finally {
     restore();
   }
@@ -131,7 +131,7 @@ test("breakpoints panel: agent-set breakpoints get an agent chip, human ones don
       ],
     });
 
-    const rows = findAllByClass(sidebar.el, "dbg-bp-row");
+    const rows = findAllByClass(sidebar.el as unknown as FakeElement,"dbg-bp-row");
     assert.equal(rows.length, 2);
     assert.equal(findAllByClass(rows[0], "dbg-chip-agent").length, 1, "MCP-set breakpoint carries the agent chip");
     assert.equal(findAllByClass(rows[0], "dbg-chip-cond").length, 1);

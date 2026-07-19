@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Design Context
+
+`PRODUCT.md` and `DESIGN.md` at repo root (via `/impeccable init`) carry strategic + visual design context — read them before UI work. Register: **product**. Platform: **web**. North star: **"Ink & Washi"** — one token set, two themes (`:root` dark ink / `.theme-washi` light paper), single jade accent (`--em`) used only for active/on state, flat surfaces except dropdowns/popovers. Anti-reference: no Electron/VS Code IDE-clone chrome. `/impeccable live` is pre-configured (`.impeccable/live/config.json`).
+
 ## Commands
 ```bash
 npm install && npm run tauri dev   # dev (first run ~2 min for git2/pty compile)

@@ -1,12 +1,12 @@
 {
   "name": "@ravi1395/sutra",
   "private": true,
-  "version": "2.3.2",
+  "version": "2.3.3",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=/tmp/sutra-tests && node --test /tmp/sutra-tests/*.test.js",
+    "test": "rm -rf /tmp/sutra-tests && esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=/tmp/sutra-tests && node --test /tmp/sutra-tests/*.test.js",
     "build:agent": "esbuild src/annotation-agent.ts --bundle --format=iife --outfile=src-tauri/agent/annotation-agent.js",
     "build": "npm run build:agent && tsc && vite build",
     "pretauri": "npm run build:agent",
@@ -55,6 +55,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@types/diff": "^7.0.2",
+    "@types/node": "^26.1.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   }

@@ -11,7 +11,7 @@ import {
 import { icon } from "./icons";
 
 export interface GitBarHandle {
-  refresh(root: string): Promise<void>;
+  refresh(root: string, isCurrent?: () => boolean): Promise<void>;
   onWorktreeSelect?: (path: string) => void;
   onBranchSelect?: (branch: string) => void;
 }
@@ -51,7 +51,9 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
     behind: number | null,
     worktrees: WorktreeInfo[],
     branches: BranchInfo[],
+    isCurrent: () => boolean,
   ): void {
+    if (!isCurrent()) return;
     container.innerHTML = "";
     if (!branch) return;
 
@@ -85,17 +87,24 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
 
     // Toggle dropdown on click.
     container.onclick = (e) => {
+      if (!isCurrent()) return;
       e.stopPropagation();
       if (dropdownOpen) {
         closeDropdown();
         return;
       }
       if (branches.length === 0 && worktrees.length === 0) return;
-      openDropdown(branch, branches, worktrees);
+      openDropdown(branch, branches, worktrees, isCurrent);
     };
   }
 
-  function openDropdown(_currentBranch: string, branches: BranchInfo[], worktrees: WorktreeInfo[]): void {
+  function openDropdown(
+    _currentBranch: string,
+    branches: BranchInfo[],
+    worktrees: WorktreeInfo[],
+    isCurrent: () => boolean,
+  ): void {
+    if (!isCurrent()) return;
     closeDropdown();
     dropdownOpen = true;
     container.classList.add("open");
@@ -121,6 +130,7 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
         name.textContent = br.name;
         row.appendChild(name);
         row.onclick = () => {
+          if (!isCurrent()) return;
           if (!br.is_current) handle.onBranchSelect?.(br.name);
           closeDropdown();
         };
@@ -150,6 +160,7 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
         pathSpan.textContent = homeCollapse(wt.path);
         row.appendChild(pathSpan);
         row.onclick = () => {
+          if (!isCurrent()) return;
           if (!wt.is_current) handle.onWorktreeSelect?.(wt.path);
           closeDropdown();
         };
@@ -173,23 +184,28 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
   }
 
   const handle: GitBarHandle = {
-    async refresh(root: string): Promise<void> {
+    async refresh(root: string, isCurrent = () => true): Promise<void> {
       try {
         const branch = await gitBranch(root);
+        if (!isCurrent()) return;
         const aheadBehind = await gitAheadBehind(root);
+        if (!isCurrent()) return;
         const worktrees = await gitWorktrees(root);
+        if (!isCurrent()) return;
         // Drop branches checked out in another worktree: they can't be checked
         // out here and already appear (with path + root-switch) under worktrees.
         const branches = (await gitBranches(root)).filter((b) => !b.in_other_worktree);
+        if (!isCurrent()) return;
         render(
           branch,
           aheadBehind?.ahead ?? null,
           aheadBehind?.behind ?? null,
           worktrees,
           branches,
+          isCurrent,
         );
       } catch {
-        render(null, null, null, [], []);
+        render(null, null, null, [], [], isCurrent);
       }
     },
   };

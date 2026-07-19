@@ -65,8 +65,10 @@ Three regions, resizable by dragging the splitters:
 The top bar contains a **workspace switcher**, git status, and editor/terminal
 tools. A minimal native macOS **Edit** menu
 provides standard cut, copy, paste, undo, redo, and select-all responders.
-Graphite palette with a single emerald accent; fonts (Hanken Grotesk UI +
-Spline Sans Mono code) are vendored locally — no runtime font network request.
+Classic's ink/washi palette uses a single jade accent; fonts (Instrument Sans
+UI + Spline Sans Mono code) are vendored locally — no runtime font network
+request. Three additional coupled views (North Light, Graphite, Stanza) are
+available; see [View switching](#view-switching) below.
 
 ## Features
 
@@ -399,7 +401,21 @@ size cap), and `unsafe` (pre-edit content was never capturable).
 ## Settings
 
 Open with the titlebar Settings button, **⌘,**, or "Settings" in the command palette. Changes apply
-instantly and persist in `localStorage` across launches.
+instantly and persist through Sutra's shared settings store across launches.
+
+### View switching
+
+The command palette switches between the coupled **Classic**, **North Light**, **Graphite**, and **Stanza** views. Use `View variant: next` to cycle only the variants valid for the active view; the selection persists per the existing single-window settings behavior.
+
+### North Light
+
+North Light is a porcelain/slate (day/night) view built from floating in-flow sheets rather than flat panels. Open files trail across the tab bar as **trail tabs**; hiding a surface (Terminal, Browser, Diff, Composer) collapses it into a restorable **surface pill** in the whisper strip instead of just disappearing. The sidebar can pop out into an overlay **drawer** — **⌘E** opens/closes it (Esc, an outside click, or opening a file also closes it); the docked Classic/Graphite/Stanza sidebar is unaffected.
+
+North Light also adds a right-side **Ledger** rail for agent turns. It opens by default for the session and toggles with **⌘L** while the North sidebar drawer and blocking overlays are closed. Running turns stay expanded; closed turns can be expanded to inspect file names, test state, and linked-task review disposition. Closed real turns reuse the existing exact-turn **Review diff** and guarded **Rollback** actions. The rail deliberately shows no line-count deltas and does not appear in Classic, Graphite, or Stanza.
+
+### Graphite
+
+Graphite is a Primer-dark flat-plane view: a single Primer blue accent (`#58a6ff`) marks active/on state, Mona Sans carries the chrome, hairline seams replace shadowed panels, and diff paint reads Git-diff green/amber/red. It never changes editor or terminal content fonts; both retain the configured monospace face. No font is loaded at runtime. Its v1 structure uses flat file-tree `M`/`A`/`D` badges, GitHub-style underline editor tabs, and a Terminal/Problems band that reuses the existing Problems panel.
 
 | Section | Options |
 |---|---|
@@ -408,6 +424,12 @@ instantly and persist in `localStorage` across launches.
 | Behavior | Restore session on launch, AI agent tracking, autosave on focus loss |
 | Shortcuts | Read-only keyboard shortcut reference |
 | About | App description, version, reset all settings |
+
+### Stanza
+
+Stanza organizes the window into four **rooms** — Write, Run, Review, Web — switched via the **hearth strip** room tablist or **⌘1**–**⌘4**; entering a room applies its fixed surface preset (sidebar, terminal, diff, browser). The hearth strip pulses a live dot on Run while a terminal session is active and shows a dot on Review while a linked turn awaits review. Stanza ships **dusk** (dark, petrol/verdigris) and **dawn** (light, sea-glass) variants and uses the bundled **Hanken Grotesk** for chrome; editor and terminal content keep their configured monospace face.
+
+The Write room's sidebar shows a **shelf**: Files, Outline, and Search stacked as three labeled sections instead of the usual exclusive Files↔Outline toggle. All three reuse the same file tree, outline panel, and search view Sutra always had — nothing is duplicated — so navigating the outline or running a search never hides the file tree. **⇧⌘F** in the Write room just focuses the always-visible Search section; outside the Write room (including other Stanza rooms) it keeps the normal behavior of opening the exclusive search view, without switching rooms. Leaving the Write room, or leaving Stanza entirely, restores the ordinary exclusive Files↔Outline sidebar.
 
 ## Keyboard shortcuts
 
@@ -526,7 +548,7 @@ read tools (keyed by request id), so concurrent prompts resolve independently.
 | `reveal_in_tree` | `path` | Expands the file tree to the path and highlights it. |
 | `show_diff` | `path` | Opens the file and jumps to its first changed git hunk. |
 | `open_terminal` | `cwd?` | Opens a new integrated terminal, optionally at a directory. |
-| `navigate_browser` | `url` | Opens a URL in the browser pane (routed through the dev proxy for localhost apps). Scheme optional, defaults to `http://`. |
+| `navigate_browser` | `url` | Opens a URL or workspace `.html` file in the browser pane. http(s) URLs route through the dev proxy (loopback targets only); a `file://` URL or workspace-relative `.html` path is served by the local preview server with the annotation agent injected. Scheme optional, defaults to `http://`. |
 
 ### Read tools (P3)
 
@@ -583,9 +605,17 @@ annotation records:
 - locator hints — `data-testid`, `role`, `aria-label`, and visible text (up to
   80 chars)
 
-Annotations appear in the side list, scoped to the current route. Ask the
-in-app agent `review my annotations` (or any prompt that calls the
-`get_annotations` MCP tool) to pull the current list into context.
+Annotations appear in the side rail, scoped to the current route. Notes stay
+editable there: click a note (or the `add note…` placeholder) to open an inline
+textarea — Enter or blur saves, Esc cancels.
+
+Ask the in-app agent `review my annotations` (or any prompt that calls the
+`get_annotations` MCP tool) to pull the current list into context. The rail
+shows delivery honestly: the header reads `Agent pulled Ns ago` after each
+fetch, and every annotation included in a pull gets a ✓ ("Read by agent").
+Editing a note clears its ✓ — the agent now holds a stale copy — until the next
+pull. In an untrusted workspace the header shows `Not shared with the agent —
+workspace untrusted` and `get_annotations` returns nothing.
 
 ### How it works
 

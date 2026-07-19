@@ -13,6 +13,8 @@ import {
   updateSettings,
   isTestAutoRunEnabled,
   setTestAutoRunEnabled,
+  VIEW_VARIANTS,
+  viewClasses,
   type UserSettings,
 } from "../src/settings";
 
@@ -135,4 +137,87 @@ test("formatOnSave defaults to true and round-trips through clampSettings", () =
   assert.equal(clampSettings({}).formatOnSave, true);
   assert.equal(clampSettings({ formatOnSave: false }).formatOnSave, false);
   assert.equal(clampSettings({ formatOnSave: "nonsense" as unknown as boolean }).formatOnSave, true);
+});
+
+test("annotation rail settings round-trip through serialize/deserialize", () => {
+  const s = clampSettings({ annotationDockSide: "left", annotationRailCollapsed: true });
+  const round = deserializeSettings(serializeSettings(s));
+  assert.equal(round.annotationDockSide, "left");
+  assert.equal(round.annotationRailCollapsed, true);
+});
+
+test("annotation rail settings default to right/expanded when keys are missing", () => {
+  const s = deserializeSettings("{}");
+  assert.equal(s.annotationDockSide, "right");
+  assert.equal(s.annotationRailCollapsed, false);
+});
+
+test("annotation rail dock side rejects garbage values", () => {
+  const s = deserializeSettings(JSON.stringify({ annotationDockSide: "up" }));
+  assert.equal(s.annotationDockSide, "right");
+});
+
+test("clamp: legacy washi → classic/washi", () => {
+  const settings = clampSettings({ theme: "washi" } as Partial<UserSettings>);
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "washi");
+});
+
+test("clamp: missing view → classic/ink", () => {
+  const settings = clampSettings({});
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "ink");
+});
+
+test("clamp: object without view but with valid modern theme still routes through legacy migration (boundary pin)", () => {
+  // "night" is a structurally valid ViewVariant (belongs to view "north"), but the
+  // clampSettings migration branch keys off `value.view === undefined`, not off
+  // whether `value.theme` is itself valid somewhere. A partial patch missing only
+  // `view` — which no in-session caller produces, but which this test pins against
+  // regression — is treated as a pre-`view` legacy payload: theme collapses to
+  // "ink" (only "washi" survives the legacy path) and view defaults to "classic",
+  // silently discarding the "night" the caller asked for. This documents the
+  // load-boundary contract clampSettings assumes: partial patches are only safe
+  // from callers that always spread a full UserSettings first.
+  const settings = clampSettings({ theme: "night" } as Partial<UserSettings>);
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "ink");
+});
+
+test("clamp: (north,washi) → day", () => {
+  const settings = clampSettings({ view: "north", theme: "washi" } as Partial<UserSettings>);
+  assert.equal(settings.view, "north");
+  assert.equal(settings.theme, "day");
+});
+
+test("clamp: (graphite,night) → dark", () => {
+  const settings = clampSettings({ view: "graphite", theme: "night" } as Partial<UserSettings>);
+  assert.equal(settings.view, "graphite");
+  assert.equal(settings.theme, "dark");
+});
+
+test("viewClasses: classic/ink empty", () => {
+  assert.deepEqual(viewClasses("classic", "ink"), []);
+});
+
+test("viewClasses: north/day has theme-light, no variant class", () => {
+  assert.deepEqual(viewClasses("north", "day"), ["view-north", "theme-light"]);
+});
+
+test("viewClasses: stanza/dawn → view-stanza+variant-dawn+theme-light", () => {
+  assert.deepEqual(viewClasses("stanza", "dawn"), ["view-stanza", "variant-dawn", "theme-light"]);
+});
+
+test("viewClasses: exclusive over all valid pairs", () => {
+  const managed = new Set(["theme-washi", "theme-light", "variant-night", "variant-dawn", "view-north", "view-graphite", "view-stanza"]);
+  for (const [view, variants] of Object.entries(VIEW_VARIANTS)) {
+    for (const theme of variants) {
+      const classes = viewClasses(view as UserSettings["view"], theme);
+      assert.equal(classes.length, new Set(classes).size);
+      assert.ok(classes.every((name) => managed.has(name)));
+      assert.equal(classes.filter((name) => name.startsWith("view-")).length, view === "classic" ? 0 : 1);
+      assert.equal(classes.filter((name) => name.startsWith("variant-")).length, theme === "night" || theme === "dawn" ? 1 : 0);
+      assert.equal(classes.filter((name) => name === "theme-washi" || name === "theme-light").length, theme === "washi" ? 2 : theme === "day" || theme === "dawn" ? 1 : 0);
+    }
+  }
 });
