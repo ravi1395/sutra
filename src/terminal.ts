@@ -141,8 +141,13 @@ export async function resolveLinkPath(
   ctx: { cwd: string | null; workspaceRoot: string | null; home: string | null },
   probe: MtimeProbe,
 ): Promise<string | null> {
-  const attempts: string[] = [path]; // absolute as-is (also the literal form for non-absolute tokens)
-  if (path === "~" || path.startsWith("~/")) {
+  const isTilde = path === "~" || path.startsWith("~/");
+  const attempts: string[] = [];
+  // Bare-literal probe only for already-absolute tokens (incl. ~-prefixed, absolute post-expansion) —
+  // a plain relative token must never hit fs::metadata as-is: that resolves against the Sutra
+  // process's launch cwd, not the terminal session's cwd, and can shadow the real match below.
+  if (path.startsWith("/") || isTilde) attempts.push(path);
+  if (isTilde) {
     if (ctx.home) attempts.push(path === "~" ? ctx.home : joinPosix(ctx.home, path.slice(2)));
   }
   if (!path.startsWith("/")) {
