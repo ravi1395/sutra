@@ -417,20 +417,20 @@ function cssVar(name: string, fallback: string): string {
 }
 
 function cmThreadTheme(): Extension {
-  const washi = document.documentElement.classList.contains("theme-washi");
-  const fg = cssVar("--fg", washi ? "#1f231f" : "#e8eae4");
-  const fgDim = cssVar("--fg-dim", washi ? "#6e7268" : "#8b9189");
-  const fgFaint = cssVar("--fg-faint", washi ? "#9c988a" : "#565c54");
-  const bg = cssVar("--bg-1", washi ? "#f5f2eb" : "#131614");
-  const bg2 = cssVar("--bg-2", washi ? "#f1ede3" : "#0e110f");
-  const line = cssVar("--line", washi ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
-  const em = cssVar("--em", washi ? "#0f8a5f" : "#4ade93");
-  const synKw = cssVar("--syn-kw", washi ? "#0f8a5f" : "#5cc99b");
-  const synType = cssVar("--syn-type", washi ? "#3b6aa0" : "#86aedc");
-  const synStr = cssVar("--syn-str", washi ? "#b07b2e" : "#d9b47c");
+  const light = document.documentElement.classList.contains("theme-light");
+  const fg = cssVar("--fg", light ? "#1f231f" : "#e8eae4");
+  const fgDim = cssVar("--fg-dim", light ? "#6e7268" : "#8b9189");
+  const fgFaint = cssVar("--fg-faint", light ? "#9c988a" : "#565c54");
+  const bg = cssVar("--bg-1", light ? "#f5f2eb" : "#131614");
+  const bg2 = cssVar("--bg-2", light ? "#f1ede3" : "#0e110f");
+  const line = cssVar("--line", light ? "rgba(31,35,31,0.08)" : "rgba(255,255,255,0.05)");
+  const em = cssVar("--em", light ? "#0f8a5f" : "#4ade93");
+  const synKw = cssVar("--syn-kw", light ? "#0f8a5f" : "#5cc99b");
+  const synType = cssVar("--syn-type", light ? "#3b6aa0" : "#86aedc");
+  const synStr = cssVar("--syn-str", light ? "#b07b2e" : "#d9b47c");
   const synComment = cssVar("--syn-comment", fgFaint);
-  const cursorLine = washi ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
-  const selection = washi ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
+  const cursorLine = light ? "rgba(31,35,31,0.04)" : "rgba(255,255,255,0.03)";
+  const selection = light ? "rgba(15,138,95,0.20)" : "rgba(74,222,147,0.22)";
 
   return [
     EditorView.theme(
@@ -451,7 +451,7 @@ function cmThreadTheme(): Extension {
         ".cm-searchMatch": { backgroundColor: "rgba(227,179,65,0.22)" },
         ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: selection },
       },
-      { dark: !washi },
+      { dark: !light },
     ),
     syntaxHighlighting(
       HighlightStyle.define([
@@ -623,11 +623,13 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners, the pending lang debounce, and the CM view. */
+  /** Release document-level listeners, the pending lang debounce, the CM view, and any open preview. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
     if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
+    this.previewCtl?.dispose();
+    this.previewCtl = null;
   }
 
   /** Debounce lang_did_change so typing doesn't flood the engine; fires after 200 ms. */
@@ -986,6 +988,7 @@ export class Pane {
     this.closeLens();
     this.clearConflictBanners();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1005,6 +1008,7 @@ export class Pane {
     const kind = previewKind(source.name);
     if (!kind) return;
     this.previewSource = source;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind, kind === "html" ? { htmlMode: "srcdoc" } : undefined);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1024,6 +1028,7 @@ export class Pane {
     const { PreviewController } = await import("./preview");
     // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
     this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1043,6 +1048,7 @@ export class Pane {
   hidePreview(): void {
     this.closeLens();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1071,9 +1077,13 @@ export class Pane {
 
   renderTabs(): void {
     this.tabsEl.innerHTML = "";
+    const graphite = document.documentElement.classList.contains("view-graphite");
+    const north = document.documentElement.classList.contains("view-north");
     if (this.previewSource) {
       const el = document.createElement("div");
-      el.className = "tab active preview-tab";
+      el.className = graphite
+        ? "tab active preview-tab graphite-tab"
+        : north ? "tab active preview-tab north-trail-tab" : "tab active preview-tab";
       const name = document.createElement("span");
       name.textContent = previewTabName(this.previewSource.name);
       const close = document.createElement("button");
@@ -1089,7 +1099,11 @@ export class Pane {
     }
     for (const tab of this.tabs) {
       const el = document.createElement("div");
-      el.className = "tab" + (tab === this.active ? " active" : "");
+      el.className = graphite
+        ? "tab graphite-tab" + (tab === this.active ? " active" : "")
+        : north
+          ? "tab north-trail-tab" + (tab === this.active ? " active" : "")
+          : "tab" + (tab === this.active ? " active" : "");
       el.addEventListener("pointerdown", (e) => {
         if ((e.target as Element).closest(".tab-close")) return;
         beginSplitPointerDrag({

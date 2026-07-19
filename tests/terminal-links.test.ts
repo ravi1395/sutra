@@ -65,6 +65,31 @@ test("resolveLinkPath: a candidate that never validates yields no link", async (
   assert.equal(resolved, null);
 });
 
+test("resolveLinkPath: a relative token never probes the bare literal (only cwd/root joins); an absolute token still probes as-is", async () => {
+  const ctx = { cwd: "/root/proj", workspaceRoot: "/root/other", home: "/home/user" };
+
+  const relCalls: string[] = [];
+  const relProbe: MtimeProbe = async (p) => {
+    relCalls.push(p);
+    throw new Error("ENOENT"); // nothing validates — only the probed set matters here
+  };
+  await resolveLinkPath("src/main.ts", ctx, relProbe);
+  assert.deepEqual(relCalls, [
+    "/root/proj/src/main.ts", // relative against session cwd
+    "/root/other/src/main.ts", // relative against workspace root
+  ]);
+
+  const absCalls: string[] = [];
+  const absProbe: MtimeProbe = async (p) => {
+    absCalls.push(p);
+    if (p === "/abs/p.ts") return 1;
+    throw new Error("ENOENT");
+  };
+  const resolved = await resolveLinkPath("/abs/p.ts", ctx, absProbe);
+  assert.equal(resolved, "/abs/p.ts");
+  assert.deepEqual(absCalls, ["/abs/p.ts"]); // absolute as-is, no cwd/root joins attempted
+});
+
 // ---- FileLinkProvider (modifier gating + range on a real one-line buffer) ----
 
 /** Minimal fake single-line, unwrapped xterm buffer sufficient for FileLinkProvider —

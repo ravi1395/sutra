@@ -13,6 +13,8 @@ import {
   updateSettings,
   isTestAutoRunEnabled,
   setTestAutoRunEnabled,
+  VIEW_VARIANTS,
+  viewClasses,
   type UserSettings,
 } from "../src/settings";
 
@@ -153,4 +155,54 @@ test("annotation rail settings default to right/expanded when keys are missing",
 test("annotation rail dock side rejects garbage values", () => {
   const s = deserializeSettings(JSON.stringify({ annotationDockSide: "up" }));
   assert.equal(s.annotationDockSide, "right");
+});
+
+test("clamp: legacy washi → classic/washi", () => {
+  const settings = clampSettings({ theme: "washi" } as Partial<UserSettings>);
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "washi");
+});
+
+test("clamp: missing view → classic/ink", () => {
+  const settings = clampSettings({});
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "ink");
+});
+
+test("clamp: (north,washi) → day", () => {
+  const settings = clampSettings({ view: "north", theme: "washi" } as Partial<UserSettings>);
+  assert.equal(settings.view, "north");
+  assert.equal(settings.theme, "day");
+});
+
+test("clamp: (graphite,night) → dark", () => {
+  const settings = clampSettings({ view: "graphite", theme: "night" } as Partial<UserSettings>);
+  assert.equal(settings.view, "graphite");
+  assert.equal(settings.theme, "dark");
+});
+
+test("viewClasses: classic/ink empty", () => {
+  assert.deepEqual(viewClasses("classic", "ink"), []);
+});
+
+test("viewClasses: north/day has theme-light, no variant class", () => {
+  assert.deepEqual(viewClasses("north", "day"), ["view-north", "theme-light"]);
+});
+
+test("viewClasses: stanza/dawn → view-stanza+variant-dawn+theme-light", () => {
+  assert.deepEqual(viewClasses("stanza", "dawn"), ["view-stanza", "variant-dawn", "theme-light"]);
+});
+
+test("viewClasses: exclusive over all valid pairs", () => {
+  const managed = new Set(["theme-washi", "theme-light", "variant-night", "variant-dawn", "view-north", "view-graphite", "view-stanza"]);
+  for (const [view, variants] of Object.entries(VIEW_VARIANTS)) {
+    for (const theme of variants) {
+      const classes = viewClasses(view as UserSettings["view"], theme);
+      assert.equal(classes.length, new Set(classes).size);
+      assert.ok(classes.every((name) => managed.has(name)));
+      assert.equal(classes.filter((name) => name.startsWith("view-")).length, view === "classic" ? 0 : 1);
+      assert.equal(classes.filter((name) => name.startsWith("variant-")).length, theme === "night" || theme === "dawn" ? 1 : 0);
+      assert.equal(classes.filter((name) => name === "theme-washi" || name === "theme-light").length, theme === "washi" ? 2 : theme === "day" || theme === "dawn" ? 1 : 0);
+    }
+  }
 });

@@ -25,6 +25,7 @@ import { mountTagManager } from "./tag-manager";
 import { IS_MAC } from "./shortcuts";
 import { readUiState, patchUiState } from "./terminal-groups";
 import { isWorkspaceTrusted } from "./workspace";
+import { DraftStateSignal } from "./north-seam";
 
 /** Native confirm via the dialog plugin — window.confirm is unreliable in
  * WKWebView (mirrors main.ts's confirmNative). */
@@ -68,7 +69,7 @@ export interface ComposerTaskDraft {
 
 export type ComposerDeliveryResult = { ok: true } | { ok: false; reason: string };
 
-export function mountComposer(opts: ComposerOptions): {
+export interface ComposerHandle {
   toggle: () => void;
   show: () => void;
   hide: () => void;
@@ -80,8 +81,12 @@ export function mountComposer(opts: ComposerOptions): {
   deliverTaskPrompt: (args: { targetId: string; prompt: string; submit: boolean }) => Promise<ComposerDeliveryResult>;
   pausePolling: () => void;
   resumePolling: () => void;
+  hasDraft: () => boolean;
+  onDraftChanged: (listener: (hasDraft: boolean) => void) => () => void;
   dispose: () => void;
-} {
+}
+
+export function mountComposer(opts: ComposerOptions): ComposerHandle {
   const { root, container, getFiles, getSelection } = opts;
 
   // ── helpers ─────────────────────────────────────────────────────────────────
@@ -126,6 +131,9 @@ export function mountComposer(opts: ComposerOptions): {
   let ctxCount: HTMLElement | null = null;
   let prevOpen = false;
   let histOpen = false;
+  let disposed = false;
+  let fileCompletionGeneration = 0;
+  const draftState = new DraftStateSignal();
 
   interface CompletionState {
     id: "context" | "task";
@@ -255,7 +263,9 @@ export function mountComposer(opts: ComposerOptions): {
 
   async function init(): Promise<void> {
     await applyDrawerHeight();
+    if (disposed) return;
     await Promise.all([reloadConfig(), reloadProfiles(), refreshAgents(), refreshAssets()]);
+    if (disposed) return;
     const saved = loadDraft(root);
     if (saved) applyDraft(saved);
     else templateName = config.templates[0]?.name ?? "";
@@ -675,16 +685,25 @@ export function mountComposer(opts: ComposerOptions): {
   // ── @ / / completion (independent per hero: ctxComp is @-only, taskComp is @+/) ─
   function handleCompletion(ta: HTMLTextAreaElement, comp: CompletionState): void {
     const ctx = completionContext(ta.value, ta.selectionStart);
-    if (!ctx || !comp.triggers.includes(ctx.trigger)) { hideSuggest(comp); return; }
+    if (!ctx || !comp.triggers.includes(ctx.trigger)) {
+      fileCompletionGeneration += 1;
+      hideSuggest(comp);
+      return;
+    }
     comp.start = ctx.start;
     if (ctx.trigger === "@") {
+      const generation = ++fileCompletionGeneration;
       void getFiles()
         .then((files) => {
+          if (disposed || generation !== fileCompletionGeneration) return;
           const matches = matchFiles(ctx.query, files);
           showSuggest(comp, matches.map((f) => basename(f)), matches.map((f) => `@${f}`));
         })
-        .catch(() => hideSuggest(comp));
+        .catch(() => {
+          if (!disposed && generation === fileCompletionGeneration) hideSuggest(comp);
+        });
     } else {
+      fileCompletionGeneration += 1;
       const aopts: AssetOption[] = assets.map((a) => ({ kind: a.kind, name: a.name, invocation: a.invocation }));
       const matches = matchAssets(ctx.query, aopts);
       showSuggest(comp, matches.map((a) => `${a.name} (${a.kind})`), matches.map((a) => assetToken(a)));
@@ -781,6 +800,7 @@ export function mountComposer(opts: ComposerOptions): {
     submitInp.checked = false;
     thinkInp.checked = false;
     targetSel.value = "";
+    draftState.update(text, chips.length);
   }
 
   // ── draft ─────────────────────────────────────────────────────────────────────
@@ -816,10 +836,12 @@ export function mountComposer(opts: ComposerOptions): {
     submit = false;
     stageInp.checked = true;
     thinkInp.checked = thinking;
+    draftState.update(text, chips.length);
   }
 
   function autosave(): void {
     saveDraft(root, captureDraft());
+    draftState.update(text, chips.length);
   }
 
   // ── status ────────────────────────────────────────────────────────────────────
@@ -941,7 +963,10 @@ export function mountComposer(opts: ComposerOptions): {
   }
 
   function dispose(): void {
+    disposed = true;
+    fileCompletionGeneration += 1;
     stopPoll();
+    draftState.clearListeners();
     window.removeEventListener("pointermove", onDrawerMove);
     window.removeEventListener("pointerup", onDrawerUp);
     container.innerHTML = "";
@@ -958,6 +983,8 @@ export function mountComposer(opts: ComposerOptions): {
     // resume only if the panel is still open.
     pausePolling: () => stopPoll(),
     resumePolling: () => { if (visible) startPoll(); },
+    hasDraft: () => draftState.hasDraft(),
+    onDraftChanged: (listener) => draftState.onChanged(listener),
     dispose,
   };
 }

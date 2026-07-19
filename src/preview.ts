@@ -77,8 +77,8 @@ export class PreviewController {
     private opts?: { htmlMode?: "url" | "srcdoc" },
   ) {
     // Mirrors editor.ts's Pane.themeObserver (per-instance MutationObserver via
-    // onThemeChange, no explicit disposal — editor.ts has no PreviewController teardown
-    // path today; dispose() below is available for a future one, and for tests).
+    // onThemeChange). editor.ts disposes the previous controller at every
+    // previewCtl replace/exit/destroy site — see dispose() below.
     if (this.kind === "md") {
       this.disposeTheme = onThemeChange(() => {
         if (this.lastMdText !== null) void this.render(this.lastMdText);
@@ -86,8 +86,7 @@ export class PreviewController {
     }
   }
 
-  /** Stop reacting to ink/washi toggles. No current caller — exposed for a future explicit
-   *  teardown path and for tests to assert the subscription is disposable. */
+  /** Stop reacting to ink/washi toggles; idempotent. */
   dispose(): void {
     this.disposeTheme?.();
     this.disposeTheme = null;

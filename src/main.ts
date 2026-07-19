@@ -6,7 +6,7 @@ import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { FileTree, OutlineView, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
+import { FileTree, OutlineView, sidebarSections, deleteConfirmMessage, dropSelectedDescendants } from "./tree";
 import {
   FILE_DRAG_TYPE,
   SPLIT_DROP_TARGET_OPTIONS,
@@ -16,7 +16,7 @@ import {
 } from "./split-drop";
 import { EditorManager, externalEditDetected, type Tab } from "./editor";
 import { SearchPanel } from "./search";
-import { TerminalManager } from "./terminal";
+import { TerminalManager, type TerminalMaximizeState } from "./terminal";
 import { DiffViewer, computeLineDiff, hunkSummaries, turnFileHunkRows } from "./diff";
 import { isFormattableExt } from "./format-ext";
 import { BrowserPane } from "./browser";
@@ -94,6 +94,7 @@ import {
   listFiles,
   langWorkspaceSymbols,
   type AgentTrackingStatus,
+  type RollbackResult,
   type TestStatus,
   type Turn,
   type TurnFileContent,
@@ -105,6 +106,7 @@ import {
   firstViewableAgentChange,
   getTurns,
   hunkDiagBadgeEl,
+  isRollbackable,
   launchTurnTest,
   markRolledBack,
   mergeChangedFiles,
@@ -176,15 +178,20 @@ import {
 } from "./workspace";
 import {
   DEFAULT_SETTINGS,
+  VIEW_VARIANTS,
   clampSettings,
   isTestAutoRunEnabled,
   loadSettings,
   nextFontSettings,
   saveSettings,
+  viewClasses,
+  type ViewId,
+  type ViewVariant,
   type UserSettings,
 } from "./settings";
 import { GLOBAL_SHORTCUT_OPTIONS, isPreviewShortcut, isMod, fmtShortcut } from "./shortcuts";
 import { LEGACY_DRAWER_H_KEY, mountComposer } from "./composer";
+import { loadDraft } from "./composer-store";
 import { mayPersistTaskForRoot, mountTasksPanel } from "./tasks-panel";
 import { serializeWorktreeTaskLink, WORKTREE_TASK_LINK_FILE, type WorktreeDispatchInput } from "./worktree-dispatch";
 import {
@@ -202,12 +209,35 @@ import {
   taskCheckEvidence,
   AUTOMATION_OUTPUT_TAIL_LIMIT,
   TASK_CHECK_TIMEOUT_MS,
+  unresolvedTurnCount,
   type Task,
 } from "./tasks";
 import { attachAnnotationToTask, detachAnnotationFromTask } from "./tasks";
 import { openSettingsModal, type ShortcutEntry } from "./settings-modal";
 import { openAboutModal, shouldShowWhatsNew, WHATS_NEW_SEEN_KEY, type AboutTab } from "./about-modal";
 import { DRAWER_KEY, clampDrawerState, patchUiState, readUiState, type DrawerState } from "./terminal-groups";
+import { onSurfaces, setSurface, type SurfaceId, type Surfaces } from "./surface-state";
+import {
+  ChipHostCache,
+  ComposerSurfaceBinding,
+  HiddenComposerSurfaceHydrator,
+  browserSurface,
+  composerSurface,
+  diffSurface,
+  restorableSurfacePills,
+  terminalSurface,
+} from "./north-seam";
+import { ComposerFileCache } from "./composer-files";
+import {
+  BLOCKING_OVERLAY_SELECTOR,
+  createDomSidebarDrawerHost,
+  createSidebarDrawer,
+  handleSidebarDrawerShortcut,
+  hasActiveBlockingOverlay,
+} from "./drawer";
+import { createTurnActions, waitForRollbackAction } from "./turn-actions";
+import { mountLedger } from "./ledger";
+import { createRoomRouter, type RoomId } from "./rooms";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -336,7 +366,9 @@ const search = new SearchPanel(
   $<HTMLButtonElement>("search-case"),
   $("search-results"),
 );
-search.onOpenMatch = (p, line) => { void editor.openFile(p, line); tree.setActive(p); };
+search.onOpenMatch = (path, line) => {
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
+};
 const browserFrame = $<HTMLIFrameElement>("browser-frame");
 const browser = new BrowserPane(
   $("browser-area"),
@@ -636,6 +668,15 @@ void onFsChanged((payload) => {
 });
 
 const whisperBar = $("whisper-bar");
+const northSeam = document.createElement("div");
+northSeam.id = "north-seam";
+const northWhisper = document.createElement("div");
+northWhisper.className = "north-seam-whisper";
+const northSurfacePills = document.createElement("div");
+northSurfacePills.className = "north-surface-pills";
+northSeam.append(northWhisper, northSurfacePills);
+whisperBar.before(northSeam);
+const whisperHostCache = new ChipHostCache(whisperBar, northWhisper);
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -643,6 +684,7 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+let latestTasks: readonly Task[] = [];
 let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
 let fsRefreshPendingRoot: string | null = null;
@@ -702,17 +744,13 @@ editor.confirmCloseTab = (tab) =>
 
 tree.onOpenFile = async (path) => {
   try {
-    await editor.openFile(path);
-    tree.setActive(path);
+    await openSidebarFile(path);
   } catch (e) {
     void alertNative(`Cannot open ${path}: ${e}`);
   }
 };
 tree.onOpenFileInPane = (path, side) => {
-  void editor
-    .openFileInSide(path, side)
-    .then(() => tree.setActive(path))
-    .catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
+  void openSidebarFileInPane(path, side).catch((e) => void alertNative(`Cannot open ${path}: ${e}`));
 };
 
 // Tree context menu actions
@@ -872,15 +910,44 @@ async function restoreWorkspaceTabs(root: string): Promise<void> {
   }
 }
 
-// Apply the active theme by toggling the washi class on the document root.
-function applyTheme(theme: "ink" | "washi"): void {
-  document.documentElement.classList.toggle("theme-washi", theme === "washi");
+const VIEW_CLASS_NAMES = [
+  "view-north", "view-graphite", "view-stanza", "theme-washi", "theme-light", "variant-night", "variant-dawn",
+];
+
+// Replace every view/variant marker as one synchronous root-class transaction.
+function applyTheme(view: ViewId, theme: ViewVariant): void {
+  const root = document.documentElement;
+  root.classList.remove(...VIEW_CLASS_NAMES);
+  root.classList.add(...viewClasses(view, theme));
 }
 
 // Pushes every settings field to its consumer (CSS vars, editor, terminals, polls).
 function applySettings(next: UserSettings): void {
-  settings = clampSettings(next);
-  applyTheme(settings.theme);
+  const clamped = clampSettings(next);
+  const previousView = settings.view;
+  const viewChanged = previousView !== clamped.view;
+  settings = clamped;
+  applyTheme(settings.view, settings.theme);
+  if (viewChanged) {
+    syncSidebarView(previousView, settings.view);
+    editor.renderAllTabs();
+    syncGraphiteBottomPanel();
+    syncRoomTablist();
+    // Leaving stanza never calls roomRouter.enterRoom (no room change fires), so the
+    // shelf needs its own sync here to restore exclusive Files<->Outline on exit.
+    syncShelfMode();
+    whisperHostCache.reset((host) => host.replaceChildren());
+    northSurfacePills.replaceChildren();
+    renderWhisperBar();
+    if (latestSurfaces) renderSurfacePills(latestSurfaces);
+    refreshTurnActionConsumers();
+    // Entering stanza applies the remembered room preset over whatever layout was
+    // in place. Boot's first applySettings call runs before persisted UI state
+    // (drawer heights) is restored — deferred there via the same guard so the
+    // preset never races that restore; leaving stanza intentionally restores nothing.
+    if (settings.view === "stanza" && uiStateLoaded) roomRouter.enterRoom(roomRouter.currentRoom());
+  }
+  terminals.retheme();
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--editor-font-size", `${settings.editorFontSize}px`);
   rootStyle.setProperty("--editor-font-family", settings.editorFontFamily);
@@ -988,6 +1055,9 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     editor.closeTabsOutsideWorkspace(dir);
     editor.setWorkspaceRoot(dir);
     currentRoot = dir;
+    resetComposerForWorkspace();
+    latestTasks = [];
+    refreshTurnActionConsumers();
     // Invalidate the previous root's symbols at the switch boundary; the
     // backend builds off-thread and generation-gates late completions.
     void langIndexBuild(dir).catch(() => {});
@@ -1027,6 +1097,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   // process. Give the new root an integrated terminal immediately; it is ready
   // for the user to launch their selected terminal-native agent there.
   if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
+  syncSurfacesFromUi();
   await recentsPush(dir, basename(dir));
   void loadRecents().then((r) => { recentsCache = r; });
   void refreshGitState(dir);
@@ -1050,6 +1121,7 @@ async function hydrateTurnsForWorkspace(root: string): Promise<void> {
     const turns = await turnList(root);
     if (currentRoot !== root) return;
     replaceTurns(root, turns);
+    refreshTurnActionConsumers();
   } catch {
     // A non-Git root or unavailable backend still opens normally; saved task
     // evidence remains visible without the live turn detail.
@@ -1076,6 +1148,7 @@ const btnTerm = $("btn-term");
 // Real value loaded async at boot (see boot() below); this placeholder
 // (closed, default height) is only visible for the instant before then.
 let drawerState: DrawerState = clampDrawerState(null);
+let uiStateLoaded = false;
 const terminalSeam = document.createElement("button");
 terminalSeam.id = "terminal-seam";
 terminalSeam.type = "button";
@@ -1103,21 +1176,39 @@ function renderTerminalSeam(): void {
   terminalSeam.append(chevron, label, rule, kbd);
 }
 
+function syncTerminalSurface(visible = drawerState.open): void {
+  setSurface("terminal", terminalSurface(visible, terminals.count, terminals.liveCount()));
+}
+
 function setTerminal(on: boolean): void {
+  const isGraphite = document.documentElement.classList.contains("view-graphite");
+  if (isGraphite) {
+    if (!on) terminals.setMaximizeState(null);
+    graphiteBottomPanel = on ? "terminal" : "problems";
+    setProblemsHost(!on);
+  }
   saveDrawerState({ ...drawerState, open: on });
   termArea.classList.toggle("terminal-collapsed", !on);
   hres.classList.toggle("hidden", !on);
   btnTerm.classList.toggle("on", on);
-  termArea.style.flex = on ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+  termArea.style.flex = on
+    ? `0 1 ${drawerState.heightPx}px`
+    : isGraphite ? "0 0 35px" : "0 0 30px";
   renderTerminalSeam();
+  renderGraphiteBottomPanel();
   if (on) {
     if (terminals.count === 0) void terminals.create();
     // Refit, then focus so keystrokes reach the shell without a manual click.
     else requestAnimationFrame(() => { terminals.refit(); terminals.focusActive(); });
   }
+  syncTerminalSurface(on);
 }
 btnTerm.onclick = () => setTerminal(!drawerState.open);
 terminals.onTabsChanged = renderTerminalSeam;
+terminals.onSessionsChanged(() => {
+  renderTerminalSeam();
+  syncTerminalSurface();
+});
 
 // ---- turn strip (harness v2 → turn-UX rehaul P1) ----
 // Collapsed to a single .turn-summary row (⟲ N turns · agent · relTime [chip])
@@ -1175,6 +1266,124 @@ function openTurnDropdown(root: string): void {
 // unit-testable without a DOM.
 let diffScope: DiffScope = { kind: "workspace" };
 
+type TurnActionTarget = { root: string; turn: Turn; turns: Turn[] };
+
+function currentTurnActionTarget(turnId: number): TurnActionTarget | null {
+  const root = currentRoot;
+  if (!root || !Number.isInteger(turnId)) return null;
+  const turns = getTurns(root);
+  const turn = turns.find((candidate) => candidate.id === turnId);
+  if (!turn || turn.rolledBack || turn.closedAt == null || turn.boundarySource === "open" || turn.boundarySource === "rollback") return null;
+  return { root, turn, turns };
+}
+
+function openTurnReviewDiff(turnId: number): void {
+  const target = currentTurnActionTarget(turnId);
+  if (!target) return;
+  const next = enterTurnScope(diffScope, target.turn);
+  if (next === diffScope) return;
+  diffScope = next;
+  diffViewer.invalidate();
+  closeTurnDropdown();
+  // setDiff owns the one file-list refresh; this also opens the pane for the
+  // future ledger caller without duplicating its existing refresh path.
+  setDiff(true);
+}
+
+function openTurnRollback(turnId: number): Promise<void> {
+  const target = currentTurnActionTarget(turnId);
+  if (!target || !isRollbackable(target.turn, target.turns)) {
+    return Promise.reject(new Error("Turn is no longer available to roll back in this workspace."));
+  }
+  const { root, turn, turns } = target;
+  return waitForRollbackAction((lifecycle) => {
+    openRollbackDialog(root, turn, {
+      turns,
+      onApply: async (paths) => {
+        try {
+          const result = await applyTurnRollback(root, turn.id, paths);
+          return result;
+        } catch (error) {
+          lifecycle.failed(error);
+          throw error;
+        }
+      },
+      getDiskHashes: async (resolvedRoot, paths) =>
+        Object.fromEntries(
+          (await turnDiskHashes(resolvedRoot, paths)).filter(([, hash]) => hash != null),
+        ) as Record<string, string>,
+      lifecycle,
+    });
+  });
+}
+
+async function applyTurnRollback(root: string, turnId: number, paths: string[]): Promise<RollbackResult> {
+  let target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Turn is no longer available to roll back in this workspace.");
+  }
+  // The rolled-back turn and any newer turn's code state is about to be
+  // replaced — cancel their in-flight test runs BEFORE restoring so a
+  // long-running suite cannot record a result against replaced code.
+  await cancelTurnTestsFrom(root, turnId);
+  target = currentTurnActionTarget(turnId);
+  if (!target || target.root !== root || !isRollbackable(target.turn, target.turns)) {
+    throw new Error("Workspace or turn state changed before rollback was applied.");
+  }
+  const { turn } = target;
+  const result = await turnRollback(root, rollbackTargetId(turn), paths);
+  // A whole-turn disposition requires every file in the clicked turn to have
+  // restored. Metadata failure must not make an already-applied Git rollback
+  // look retryable, so it remains best-effort and visibly logged.
+  if (turn.files.length > 0 && turn.files.every((file) => result.restored.includes(file.path))) {
+    await queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"))
+      .catch((error) => console.warn("Task rollback review update failed", error));
+  }
+  markRolledBack(root, turn.id);
+  try {
+    replaceTurns(root, await turnList(root));
+  } catch (error) {
+    console.warn("turnList refresh after rollback failed", error);
+  }
+  if (currentRoot === root) {
+    if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
+    diffViewer.invalidate();
+    await refreshDiffFileList();
+  }
+  return result;
+}
+
+// Declared here (not beside ROOM_TABS below) because refreshTurnActionConsumers
+// runs synchronously during module eval via mountTasksPanel's initial render —
+// a later `let` would be a TDZ ReferenceError that kills the whole boot.
+let roomTablist: HTMLElement | null = null;
+
+function refreshTurnActionConsumers(): void {
+  if (currentRoot) renderTurnStrip(currentRoot);
+  ledger.render({
+    root: currentRoot,
+    turns: currentRoot ? getTurns(currentRoot) : [],
+    tasks: latestTasks,
+  });
+  // Review-room dot rides the same task/turn refresh path — no new polling.
+  renderRoomTablist();
+}
+
+const turnActions = createTurnActions({
+  openReviewDiff: openTurnReviewDiff,
+  rollbackTurn: openTurnRollback,
+  refresh: refreshTurnActionConsumers,
+});
+
+const ledgerHost = document.createElement("aside");
+ledgerHost.id = "ledger";
+ledgerHost.setAttribute("aria-label", "Turn ledger");
+$("body").appendChild(ledgerHost);
+const ledger = mountLedger(ledgerHost, turnActions, {
+  currentRoot: () => currentRoot,
+  turnsForRoot: (root) => getTurns(root),
+});
+
 // Last render's turn-strip key (see turnStripRenderKey); root-prefixed so a
 // root switch always compares unequal even if the new root's turn shape
 // happens to coincide with the old one's.
@@ -1218,49 +1427,8 @@ function renderTurnStrip(root: string): void {
   const turns = getTurns(root);
 
   const onRollback = (turn: Turn) => {
-    openRollbackDialog(root, turn, {
-      turns,
-      onApply: async (paths) => {
-        // The rolled-back turn and any newer turn's code state is about to be
-        // replaced — cancel their in-flight test runs BEFORE restoring so a
-        // long-running suite can't finish against a tree that no longer
-        // matches what it was testing and get recorded as that turn's result.
-        await cancelTurnTestsFrom(root, turn.id);
-        const res = await turnRollback(root, rollbackTargetId(turn), paths);
-        // A turn has a rolled-back review disposition only when every file in
-        // that turn was restored. A partial rollback leaves it unresolved for
-        // later explicit review rather than claiming a false whole-turn result.
-        if (turn.files.length > 0 && turn.files.every((file) => res.restored.includes(file.path))) {
-          void queueTaskMetadataUpdate(root, (tasks) => setOwnedTurnReview(tasks, root, turn.id, "rolled_back"));
-        }
-        // turn_poll is consume-once and never re-delivers a closed turn, so
-        // rolled_back (set server-side on the manifest) would otherwise never
-        // reach turnsByRoot — re-fetch the full list so the strip reflects it
-        // immediately instead of showing a stale live Rollback button.
-        // Optimistically flag the rolled-back turn locally FIRST so the strip
-        // disables its Rollback button even if the authoritative turnList
-        // re-fetch below throws — otherwise an IPC failure would leave a live
-        // button that re-applies into a false-success no-op. A successful
-        // turnList overwrites this with the server truth.
-        markRolledBack(root, turn.id);
-        try {
-          replaceTurns(root, await turnList(root));
-        } catch (e) {
-          console.warn("turnList refresh after rollback failed", e);
-        }
-        // A rollback fired from the breadcrumb just emptied the turn it was
-        // reviewing — fall back to the normal working-tree view rather than
-        // keep the pane scoped to a now-rolled-back snapshot.
-        if (diffScope.kind === "turn" && diffScope.turnId === turn.id) diffScope = exitTurnScope();
-        diffViewer.invalidate();
-        void refreshDiffFileList();
-        return res;
-      },
-      getDiskHashes: async (r, ps) =>
-        Object.fromEntries(
-          (await turnDiskHashes(r, ps)).filter(([, hash]) => hash != null),
-        ) as Record<string, string>,
-    });
+    if (currentRoot !== root) return;
+    void turnActions.rollback(turn.id).catch(() => {});
   };
 
   // Resolve the scope BEFORE computing the render key: a vanished turn falls
@@ -1268,7 +1436,7 @@ function renderTurnStrip(root: string): void {
   let scopedTurn: Turn | undefined;
   if (diffScope.kind === "turn") {
     const scopedTurnId = diffScope.turnId;
-    scopedTurn = turns.find((t) => t.id === scopedTurnId);
+    scopedTurn = turns.find((t) => t.id === scopedTurnId && !t.rolledBack);
     if (!scopedTurn) {
       // Turn vanished from the local cache (shouldn't happen) — fall back
       // defensively instead of rendering a breadcrumb for nothing.
@@ -1304,13 +1472,8 @@ function renderTurnStrip(root: string): void {
     return;
   }
   const onSelectTurn = (turn: Turn) => {
-    const next = enterTurnScope(diffScope, turn);
-    if (next === diffScope) return; // open (unclosed) turn: ignored
-    diffScope = next;
-    diffViewer.invalidate(); // mode switch: drop the normal onExpand/onAccept closures
-    closeTurnDropdown();
-    renderTurnStrip(root);
-    void refreshDiffFileList();
+    if (currentRoot !== root) return;
+    turnActions.reviewDiff(turn.id);
   };
   // Synthetic pre-rollback turns (boundarySource "rollback") exist purely so a
   // rollback can itself be undone; they aren't a real agent turn and are
@@ -1528,7 +1691,6 @@ const btnComposer = $("btn-composer");
 
 // Recursive file walk for the composer's @file autocomplete (cached per root).
 const COMPOSER_SKIP = new Set(["node_modules", ".git", "dist", ".cache", "build", "target", ".next"]);
-let composerFileCache: string[] | null = null;
 async function walkComposerFiles(dir: string, depth: number): Promise<string[]> {
   if (depth <= 0) return [];
   const entries = await listDir(dir).catch(() => []);
@@ -1540,10 +1702,7 @@ async function walkComposerFiles(dir: string, depth: number): Promise<string[]> 
   }
   return out;
 }
-async function getComposerFiles(root: string): Promise<string[]> {
-  if (!composerFileCache) composerFileCache = await walkComposerFiles(root, 4);
-  return composerFileCache;
-}
+const composerFileCache = new ComposerFileCache((root) => walkComposerFiles(root, 4));
 
 const LANG_BY_EXT: Record<string, string> = {
   ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", rs: "rust",
@@ -1558,20 +1717,66 @@ function composerSelection(): { path: string | null; text: string; line: number;
 
 let composerPanel: ReturnType<typeof mountComposer> | null = null;
 let composerMountedRoot: string | null = null;
-function ensureComposer(): boolean {
-  if (!currentRoot) return false;
-  if (composerPanel && composerMountedRoot === currentRoot) return true;
+const composerSurfaceBinding = new ComposerSurfaceBinding();
+const hiddenComposerSurface = new HiddenComposerSurfaceHydrator(
+  (root) => loadDraft(root),
+  (ownedRoot, state) => {
+    if (currentRoot === ownedRoot && composerPanel === null && composerPane.classList.contains("hidden")) {
+      setSurface("composer", state);
+    }
+  },
+);
+
+function disposeComposerPanel(): void {
+  composerSurfaceBinding.clear();
+  hiddenComposerSurface.clear();
   composerPanel?.dispose();
-  composerFileCache = null;
-  composerMountedRoot = currentRoot;
-  composerPanel = mountComposer({
-    root: currentRoot,
+  composerPanel = null;
+  composerMountedRoot = null;
+  composerFileCache.clear();
+}
+
+function ensureComposer(): boolean {
+  const root = currentRoot;
+  if (!root) return false;
+  if (composerPanel && composerMountedRoot === root) return true;
+  disposeComposerPanel();
+  const mounted = mountComposer({
+    root,
     trusted: false, // composer.ts re-checks localStorage trust
     container: composerBody,
-    getFiles: () => getComposerFiles(currentRoot as string),
+    getFiles: () => composerFileCache.get(root),
     getSelection: composerSelection,
   });
+  composerPanel = mounted;
+  composerMountedRoot = root;
+  composerSurfaceBinding.bind(
+    root,
+    mounted,
+    () => composerPanel === mounted && !composerPane.classList.contains("hidden"),
+    (ownedRoot, state) => {
+      if (currentRoot === ownedRoot && composerPanel === mounted) setSurface("composer", state);
+    },
+  );
   return true;
+}
+
+function resetComposerForWorkspace(): void {
+  const root = currentRoot;
+  disposeComposerPanel();
+  if (!composerPane.classList.contains("hidden")) ensureComposer();
+  else {
+    setSurface("composer", composerSurface(false, false));
+    if (root) hiddenComposerSurface.hydrate(root);
+  }
+}
+
+function syncComposerSurface(visible = !composerPane.classList.contains("hidden")): void {
+  const hasDraft = composerPanel !== null
+    && composerMountedRoot === currentRoot
+    ? composerPanel.hasDraft()
+    : currentRoot !== null && hiddenComposerSurface.hasDraft(currentRoot);
+  setSurface("composer", composerSurface(visible, hasDraft));
 }
 
 function setComposer(on: boolean): void {
@@ -1581,6 +1786,7 @@ function setComposer(on: boolean): void {
   btnComposer.classList.toggle("on", on);
   if (on) composerPanel?.show();
   else composerPanel?.hide();
+  syncComposerSurface(on);
 }
 btnComposer.onclick = () => setComposer(composerPane.classList.contains("hidden"));
 $("composer-close").onclick = () => setComposer(false);
@@ -1757,7 +1963,9 @@ const tasksPanel = mountTasksPanel({
   }),
   onTasksChanged: (entries) => {
     const root = currentRoot;
-    if (root) annotations.setTaskContext(entries.filter((task) => task.root === root), annotationsAttach, annotationsDeliver, annotationsDetach);
+    latestTasks = root ? entries.filter((task) => task.root === root) : [];
+    annotations.setTaskContext(latestTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
+    refreshTurnActionConsumers();
   },
 });
 let tasksAgentRefreshTimer: number | undefined;
@@ -1777,6 +1985,7 @@ btnTasks.onclick = () => setTasks(tasksPane.classList.contains("hidden"));
 
 // ---- diff toggle ----
 const diffPane = $("diff-pane");
+diffPane.tabIndex = -1; // programmatic room-focus target only, never in tab order
 const diffRes = $("diff-resizer");
 const btnDiff = $("btn-diff");
 function setDiff(on: boolean): void {
@@ -1787,6 +1996,7 @@ function setDiff(on: boolean): void {
     editor.recomputeDiff();
     void refreshDiffFileList();
   }
+  setSurface("diff", diffSurface(on));
 }
 btnDiff.onclick = () => setDiff(diffPane.classList.contains("hidden"));
 $("diff-close").onclick = () => setDiff(false);
@@ -1801,8 +2011,51 @@ function setBrowser(on: boolean): void {
   if (on) browser.show(); else browser.hide();
   browserRes.classList.toggle("hidden", !on);
   btnBrowser.classList.toggle("on", on);
+  setSurface("browser", browserSurface(on, browser.hasHistory()));
 }
 btnBrowser.onclick = () => setBrowser(browserArea.classList.contains("hidden"));
+
+function syncBrowserSurface(): void {
+  setSurface("browser", browserSurface(!browserArea.classList.contains("hidden"), browser.hasHistory()));
+}
+
+browser.onHistoryChanged(() => syncBrowserSurface());
+
+function syncSurfacesFromUi(): void {
+  syncTerminalSurface();
+  syncComposerSurface();
+  setSurface("diff", diffSurface(!diffPane.classList.contains("hidden")));
+  syncBrowserSurface();
+}
+
+function surfaceLabel(id: SurfaceId): string {
+  return id === "terminal" ? "Terminal" : id === "browser" ? "Browser" : id === "diff" ? "Diff" : "Composer";
+}
+
+const surfaceRestorers = {
+  terminal: () => setTerminal(true),
+  browser: () => setBrowser(true),
+  diff: () => setDiff(true),
+  composer: () => setComposer(true),
+};
+
+function renderSurfacePills(all: Surfaces): void {
+  northSurfacePills.replaceChildren();
+  for (const pill of restorableSurfacePills(all, surfaceRestorers)) {
+    const button = document.createElement("button");
+    button.className = "north-surface-pill" + (pill.live ? " live" : "");
+    button.type = "button";
+    button.textContent = surfaceLabel(pill.id);
+    button.onclick = pill.restore;
+    northSurfacePills.append(button);
+  }
+}
+
+let latestSurfaces: Surfaces | null = null;
+onSurfaces((all) => {
+  latestSurfaces = all;
+  renderSurfacePills(all);
+});
 
 // ---- open-editors switcher ----
 // Toolbar button → .menu-card dropdown listing every open tab across panes;
@@ -1908,9 +2161,153 @@ btnOpenEditors.onclick = (e) => {
 // ---- sidebar toggle ----
 const sidebar = $("sidebar");
 const vres = $("vresizer");
-function setSidebar(on: boolean): void {
+const treeEl = $("tree");
+const sidebarDrawer = createSidebarDrawer(createDomSidebarDrawerHost({
+  sidebar,
+  tree: treeEl,
+  resizer: vres,
+  overlayParent: $("body"),
+  normalizeFiles: () => {
+    if (searchViewOpen) closeSearchView();
+    outlineView?.setMode("files");
+  },
+}));
+let preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+
+function setDockedSidebar(on: boolean): void {
   sidebar.classList.toggle("hidden", !on);
   vres.classList.toggle("hidden", !on);
+}
+
+function syncSidebarView(previous: ViewId, next: ViewId): void {
+  if (previous !== "north" && next === "north") {
+    preNorthSidebarVisible = !sidebar.classList.contains("hidden");
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(false);
+  } else if (previous === "north" && next !== "north") {
+    sidebarDrawer.close({ restoreFocus: false });
+    setDockedSidebar(preNorthSidebarVisible);
+  }
+}
+
+function setSidebar(on: boolean): void {
+  if (settings.view === "north") {
+    if (on) sidebarDrawer.open();
+    else sidebarDrawer.close();
+    return;
+  }
+  setDockedSidebar(on);
+}
+
+// Best-effort primary-surface focus for a room preset; each target degrades to a no-op
+// if that surface has nothing focusable yet (e.g. terminal still spinning up a session).
+function focusRoomSurface(target: "editor" | "terminal" | "diff" | "browser"): void {
+  if (target === "editor") editor.focused.view.focus();
+  else if (target === "terminal") terminals.focusActive();
+  else if (target === "browser") $<HTMLInputElement>("browser-url").focus();
+  else diffPane.focus();
+}
+
+// One shared stanza room router: presets drive the existing surface setters, never a
+// second source of truth for terminal/browser/diff/composer/sidebar visibility.
+const roomRouter = createRoomRouter({
+  setTerminal,
+  setBrowser,
+  setDiff,
+  setComposer,
+  setSidebar,
+  focus: focusRoomSurface,
+});
+
+const ROOM_TABS: readonly { id: RoomId; label: string }[] = [
+  { id: "write", label: "Write" },
+  { id: "run", label: "Run" },
+  { id: "review", label: "Review" },
+  { id: "web", label: "Web" },
+];
+// (roomTablist is declared far above, next to refreshTurnActionConsumers — TDZ.)
+
+// Active-tab highlight + Run/Review badges. Reuses terminals.liveCount() and the
+// existing latestTasks cache — no new polling.
+function renderRoomTablist(): void {
+  if (!roomTablist) return;
+  const current = roomRouter.currentRoom();
+  const runLive = terminals.liveCount() > 0;
+  const reviewDue = unresolvedTurnCount(latestTasks) > 0;
+  roomTablist.querySelectorAll<HTMLButtonElement>(".room-tab").forEach((tab) => {
+    const id = tab.dataset.room as RoomId;
+    const active = id === current;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    tab.classList.toggle("room-tab-live", id === "run" && runLive);
+    tab.classList.toggle("room-tab-dot", id === "review" && reviewDue);
+  });
+}
+
+function handleRoomTablistKeydown(event: KeyboardEvent, room: RoomId): void {
+  const index = ROOM_TABS.findIndex((tab) => tab.id === room);
+  let next: RoomId | null = null;
+  if (event.key === "ArrowRight") next = ROOM_TABS[(index + 1) % ROOM_TABS.length].id;
+  else if (event.key === "ArrowLeft") next = ROOM_TABS[(index - 1 + ROOM_TABS.length) % ROOM_TABS.length].id;
+  else if (event.key === "Home") next = ROOM_TABS[0].id;
+  else if (event.key === "End") next = ROOM_TABS[ROOM_TABS.length - 1].id;
+  if (!next) return;
+  event.preventDefault();
+  roomRouter.enterRoom(next);
+  roomTablist?.querySelector<HTMLButtonElement>(`[data-room="${next}"]`)?.focus();
+}
+
+// Builds/tears down the room tablist strip on stanza entry/exit — mirrors the
+// graphite band-tab row's dynamic-DOM lifecycle (syncGraphiteBottomPanel).
+function syncRoomTablist(): void {
+  if (!document.documentElement.classList.contains("view-stanza")) {
+    if (roomTablist) {
+      roomTablist.remove();
+      roomTablist = null;
+    }
+    return;
+  }
+  if (roomTablist) return;
+  const list = document.createElement("div");
+  list.className = "room-tablist";
+  list.setAttribute("role", "tablist");
+  list.setAttribute("aria-orientation", "horizontal");
+  list.setAttribute("aria-label", "Room");
+  for (const { id, label } of ROOM_TABS) {
+    const tab = document.createElement("button");
+    tab.className = "room-tab";
+    tab.type = "button";
+    tab.id = `room-tab-${id}`;
+    tab.dataset.room = id;
+    tab.setAttribute("role", "tab");
+    tab.textContent = label;
+    tab.onclick = () => roomRouter.enterRoom(id);
+    tab.onkeydown = (event) => handleRoomTablistKeydown(event, id);
+    list.append(tab);
+  }
+  roomTablist = list;
+  $("body").before(list);
+  renderRoomTablist();
+}
+roomRouter.onRoomChange(() => renderRoomTablist());
+// Shelf activates/deactivates on every room change within stanza (Write <-> the rest);
+// entering/leaving stanza itself is handled separately in applySettings (no room
+// change fires there — leaving stanza never calls roomRouter.enterRoom).
+roomRouter.onRoomChange(() => syncShelfMode());
+// Run-room pulse rides the existing session-liveness notifications — no new polling.
+terminals.onSessionsChanged(() => renderRoomTablist());
+
+async function openSidebarFile(path: string, line?: number): Promise<void> {
+  await editor.openFile(path, line);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
+}
+
+async function openSidebarFileInPane(path: string, side: "left" | "right"): Promise<void> {
+  await editor.openFileInSide(path, side);
+  tree.setActive(path);
+  if (sidebarDrawer.close({ restoreFocus: false })) editor.focused.view.focus();
 }
 
 function togglePreview(): void {
@@ -1920,13 +2317,24 @@ function togglePreview(): void {
 }
 
 // ---- search view toggle ----
-const treeEl = $("tree");
 const searchView = $("search-view");
 const btnSearchToggle = $("btn-search-toggle");
 let searchViewOpen = false;
 let searchIconHtml = "";
+// Set true only while the stanza Write-room shelf (T8b) is active — see
+// syncShelfMode below. Declared here (ahead of its assignment site) because
+// openSearchView/closeSearchView close over it; both only ever run after full
+// module init, by which point syncShelfMode has already been defined.
+let shelfActive = false;
 
 function openSearchView(): void {
+  // Shelf mode already co-displays Files/Outline/Search — opening search here
+  // must not collapse it back to the exclusive Files<->Outline toggle (D-item
+  // 3 of T8b); just focus the always-visible search section instead.
+  if (shelfActive) {
+    search.focus();
+    return;
+  }
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
@@ -1937,6 +2345,7 @@ function openSearchView(): void {
 }
 
 function closeSearchView(): void {
+  if (shelfActive) return; // nothing to collapse — search stays co-displayed
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
@@ -1945,7 +2354,15 @@ function closeSearchView(): void {
 }
 
 function toggleSearchView(): void {
+  if (shelfActive) return; // toggle button is hidden in shelf mode; defensive no-op
   if (searchViewOpen) closeSearchView(); else openSearchView();
+}
+
+function openSidebarSearch(): void {
+  if (settings.view === "north") setSidebar(true);
+  if (!shelfActive) outlineView?.setMode("files");
+  if (!searchViewOpen) openSearchView();
+  search.focus();
 }
 
 // ---- background-poll idle gate ----
@@ -2095,8 +2512,9 @@ async function pollAgentChanges(): Promise<void> {
     const res = await turnPoll(root);
     if (currentRoot !== root) return;
     setTurnState(root, res);
-    // Strip re-render after state update (refreshDiffFileList above ran pre-poll).
-    if (!diffPane.classList.contains("hidden")) renderTurnStrip(root);
+    // Shared turn consumers re-render after state update
+    // (refreshDiffFileList above ran pre-poll).
+    refreshTurnActionConsumers();
   } catch {
     // Poll failures must not interrupt editing.
   }
@@ -2303,6 +2721,10 @@ export async function cancelTaskRequiredCheck(task: Task, automationId: string):
 }
 
 // Auto-run the project's test automation when an agent turn closes.
+onTurnClosed((root) => {
+  if (currentRoot === root) refreshTurnActionConsumers();
+});
+
 onTurnClosed((root, turn) => {
   void (async () => {
     if (!isTestAutoRunEnabled(root)) return;
@@ -2314,7 +2736,7 @@ onTurnClosed((root, turn) => {
       turn.id,
       turnTestRecord,
       () => runnerRun(`test:${root}:${turn.id}`, test.command, root, 600000),
-      () => { if (currentRoot === root) renderTurnStrip(root); },
+      () => { if (currentRoot === root) refreshTurnActionConsumers(); },
     );
   })();
 });
@@ -2397,7 +2819,7 @@ void onRunnerDone((p) => {
   // truthful to what the runner observed even if the backend record call
   // below fails.
   setTurnTestStatus(root, turnId, finalStatus);
-  if (currentRoot === root) renderTurnStrip(root);
+  if (currentRoot === root) refreshTurnActionConsumers();
   void turnTestRecord(root, turnId, finalStatus).catch(() => {});
 });
 
@@ -2417,8 +2839,167 @@ const problemsHost = $("problems-panel-host");
 problemsHost.append(problemsPanelEl());
 const sessionsHost = $("sessions-panel-host");
 sessionsHost.append(sessionsPanelEl());
-function setProblemsPanel(on: boolean): void {
+type GraphiteBottomPanel = "terminal" | "problems";
+type GraphiteBottomSnapshot = {
+  drawer: DrawerState;
+  problemsOpen: boolean;
+  terminalMaximize: TerminalMaximizeState;
+};
+type GraphiteHostAccessibilitySnapshot = {
+  role: string | null;
+  ariaLabelledBy: string | null;
+  ariaHidden: string | null;
+  hidden: boolean;
+};
+const GRAPHITE_BOTTOM_PANELS: readonly GraphiteBottomPanel[] = ["terminal", "problems"];
+const terminalHost = $("term-host");
+let graphiteBand: HTMLElement | null = null;
+let graphiteBottomPanel: GraphiteBottomPanel = "terminal";
+let graphiteBottomSnapshot: GraphiteBottomSnapshot | null = null;
+let graphiteHostAccessibilitySnapshot: {
+  terminal: GraphiteHostAccessibilitySnapshot;
+  problems: GraphiteHostAccessibilitySnapshot;
+} | null = null;
+
+function setProblemsHost(on: boolean): void {
   problemsHost.classList.toggle("hidden", !on);
+}
+
+function renderGraphiteBottomPanel(): void {
+  if (!graphiteBand) return;
+  graphiteBand.querySelectorAll<HTMLButtonElement>(".graphite-band-tab").forEach((tab) => {
+    const active = tab.dataset.panel === graphiteBottomPanel;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  const terminalActive = graphiteBottomPanel === "terminal";
+  terminalHost.hidden = !terminalActive;
+  terminalHost.setAttribute("aria-hidden", String(!terminalActive));
+  problemsHost.hidden = terminalActive;
+  problemsHost.setAttribute("aria-hidden", String(terminalActive));
+}
+
+function setGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  setTerminal(panel === "terminal");
+}
+
+function focusGraphiteBottomPanel(panel: GraphiteBottomPanel): void {
+  setGraphiteBottomPanel(panel);
+  graphiteBand?.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)?.focus();
+}
+
+function handleGraphiteBandKeydown(event: KeyboardEvent, panel: GraphiteBottomPanel): void {
+  const index = GRAPHITE_BOTTOM_PANELS.indexOf(panel);
+  let next: GraphiteBottomPanel | null = null;
+  if (event.key === "ArrowRight") next = GRAPHITE_BOTTOM_PANELS[(index + 1) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "ArrowLeft") next = GRAPHITE_BOTTOM_PANELS[(index - 1 + GRAPHITE_BOTTOM_PANELS.length) % GRAPHITE_BOTTOM_PANELS.length];
+  else if (event.key === "Home") next = GRAPHITE_BOTTOM_PANELS[0];
+  else if (event.key === "End") next = GRAPHITE_BOTTOM_PANELS[GRAPHITE_BOTTOM_PANELS.length - 1];
+  if (!next) return;
+  event.preventDefault();
+  focusGraphiteBottomPanel(next);
+}
+
+function mountGraphitePanelAccessibility(): void {
+  const snapshot = (host: HTMLElement): GraphiteHostAccessibilitySnapshot => ({
+    role: host.getAttribute("role"),
+    ariaLabelledBy: host.getAttribute("aria-labelledby"),
+    ariaHidden: host.getAttribute("aria-hidden"),
+    hidden: host.hasAttribute("hidden"),
+  });
+  graphiteHostAccessibilitySnapshot = {
+    terminal: snapshot(terminalHost),
+    problems: snapshot(problemsHost),
+  };
+  terminalHost.setAttribute("role", "tabpanel");
+  terminalHost.setAttribute("aria-labelledby", "graphite-band-tab-terminal");
+  problemsHost.setAttribute("role", "tabpanel");
+  problemsHost.setAttribute("aria-labelledby", "graphite-band-tab-problems");
+}
+
+function clearGraphitePanelAccessibility(): void {
+  const snapshot = graphiteHostAccessibilitySnapshot;
+  graphiteHostAccessibilitySnapshot = null;
+  if (!snapshot) return;
+  const restore = (host: HTMLElement, state: GraphiteHostAccessibilitySnapshot): void => {
+    for (const [attribute, value] of [
+      ["role", state.role],
+      ["aria-labelledby", state.ariaLabelledBy],
+      ["aria-hidden", state.ariaHidden],
+    ] as const) {
+      if (value === null) host.removeAttribute(attribute);
+      else host.setAttribute(attribute, value);
+    }
+    host.hidden = state.hidden;
+  };
+  restore(terminalHost, snapshot.terminal);
+  restore(problemsHost, snapshot.problems);
+}
+
+function syncGraphiteBottomPanel(): void {
+  if (!document.documentElement.classList.contains("view-graphite")) {
+    if (graphiteBand) {
+      graphiteBand.remove();
+      graphiteBand = null;
+      clearGraphitePanelAccessibility();
+      const snapshot = graphiteBottomSnapshot;
+      graphiteBottomSnapshot = null;
+      if (snapshot) {
+        terminals.setMaximizeState(null);
+        drawerState = snapshot.drawer;
+        setTerminal(snapshot.drawer.open);
+        setProblemsHost(snapshot.problemsOpen);
+        terminals.setMaximizeState(snapshot.terminalMaximize);
+      } else {
+        termArea.style.flex = drawerState.open ? `0 1 ${drawerState.heightPx}px` : "0 0 30px";
+        renderTerminalSeam();
+      }
+    }
+    return;
+  }
+  if (!graphiteBand) {
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
+    const band = document.createElement("div");
+    band.className = "graphite-band";
+    band.setAttribute("role", "tablist");
+    band.setAttribute("aria-orientation", "horizontal");
+    for (const panel of GRAPHITE_BOTTOM_PANELS) {
+      const tab = document.createElement("button");
+      tab.className = "graphite-band-tab";
+      tab.type = "button";
+      tab.id = `graphite-band-tab-${panel}`;
+      tab.dataset.panel = panel;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", panel === "terminal" ? "term-host" : "problems-panel-host");
+      tab.textContent = panel === "terminal" ? "Terminal" : "Problems";
+      tab.onclick = () => setGraphiteBottomPanel(panel);
+      tab.onkeydown = (event) => handleGraphiteBandKeydown(event, panel);
+      band.append(tab);
+    }
+    graphiteBand = band;
+    termArea.prepend(band);
+    mountGraphitePanelAccessibility();
+    if (!drawerState.open) termArea.style.flex = "0 0 35px";
+  }
+  const panel = problemsHost.classList.contains("hidden") ? "terminal" : "problems";
+  if (uiStateLoaded) setGraphiteBottomPanel(panel);
+  else {
+    graphiteBottomPanel = panel;
+    renderGraphiteBottomPanel();
+  }
+}
+
+function setProblemsPanel(on: boolean): void {
+  if (document.documentElement.classList.contains("view-graphite")) {
+    setGraphiteBottomPanel(on ? "problems" : "terminal");
+    return;
+  }
+  setProblemsHost(on);
 }
 function setSessionsPanel(on: boolean): void {
   sessionsHost.classList.toggle("hidden", !on);
@@ -2449,7 +3030,10 @@ async function viewChangedPath(path: string): Promise<void> {
   }
 }
 
-let lastWhisperSig = "";
+function chipHost(): HTMLElement {
+  return whisperHostCache.host(document.documentElement.classList.contains("view-north"));
+}
+
 function renderWhisperBar(): void {
   const dirty = editor.tabs.some((tab) => tab.dirty);
   const activePath = editor.active?.path ?? null;
@@ -2462,10 +3046,10 @@ function renderWhisperBar(): void {
   // of the signature too — an active→inactive flip with identical leftover text must
   // still trigger the rebuild that drops it from the DOM.
   const sig = `${dirty}|${agentCopy}|${lnText}|${diagChipEl().textContent ?? ""}|${debugSession.active}:${debugChipEl().textContent ?? ""}|${aggregateStripEl().textContent ?? ""}`;
-  if (sig === lastWhisperSig) return;
-  lastWhisperSig = sig;
+  if (!whisperHostCache.shouldRender(sig)) return;
 
-  whisperBar.innerHTML = "";
+  const host = chipHost();
+  host.replaceChildren();
   const left = document.createElement("div");
   left.className = "whisper-left";
   const saveState = document.createElement("span");
@@ -2490,7 +3074,7 @@ function renderWhisperBar(): void {
   // Harness statusbar cluster: diagnostics chip, debug chip (session-only — absent, not
   // hidden, with no session), multi-session aggregate strip.
   const dbgChip = debugSession.active ? [debugChipEl()] : [];
-  whisperBar.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
+  host.append(left, diagChipEl(), ...dbgChip, aggregateStripEl(), right);
 }
 
 /** One-off error alert (e.g. branch checkout rejected on a dirty tree). */
@@ -2550,7 +3134,52 @@ window.addEventListener("dragend", clearPaneDropHint);
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
   const mod = isMod(e);
-  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S
+  // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S.
+  const blockingOverlayActive = hasActiveBlockingOverlay(
+    document.querySelectorAll<HTMLElement>(BLOCKING_OVERLAY_SELECTOR),
+  );
+  if (handleSidebarDrawerShortcut(sidebarDrawer, {
+    key: e.key,
+    code: e.code,
+    mod,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey,
+    repeat: e.repeat,
+    defaultPrevented: e.defaultPrevented,
+    target: e.target,
+    preventDefault: () => e.preventDefault(),
+    stopPropagation: () => e.stopPropagation(),
+  }, { north: settings.view === "north", blockingOverlayActive })) return;
+  if (
+    settings.view === "north"
+    && mod
+    && e.code === "KeyL"
+    && !e.shiftKey
+    && !e.altKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    ledger.toggle();
+    return;
+  }
+  // ⌘1–4 stanza room switch: physical Digit codes, stanza-only, suppressed while a
+  // blocking overlay (palette/settings/rollback/task-modal) or the drawer is open.
+  if (
+    settings.view === "stanza"
+    && e.metaKey
+    && !e.repeat
+    && !e.defaultPrevented
+    && /^Digit[1-4]$/.test(e.code)
+    && !blockingOverlayActive
+    && !sidebarDrawer.isOpen()
+  ) {
+    e.preventDefault();
+    roomRouter.enterRoom(ROOM_TABS[Number(e.code.slice(5)) - 1].id);
+    return;
+  }
   if (mod && e.code === "KeyN") {
     e.preventDefault();
     if (e.shiftKey) void spawnWindow(); // ⇧⌘N New Window
@@ -2573,7 +3202,7 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
     setTerminal(!drawerState.open);
-  } else if (mod && e.code === "KeyB") {
+  } else if (mod && e.code === "KeyB" && settings.view !== "north") {
     e.preventDefault();
     setSidebar(sidebar.classList.contains("hidden"));
   } else if (mod && e.shiftKey && e.code === "KeyP") {
@@ -2594,8 +3223,7 @@ window.addEventListener("keydown", (e) => {
     togglePreview();
   } else if (mod && e.shiftKey && e.code === "KeyF") {
     e.preventDefault();
-    if (!searchViewOpen) openSearchView();
-    search.focus();
+    openSidebarSearch();
   } else if (e.ctrlKey && e.key === "`") {
     e.preventDefault();
     setTerminal(!drawerState.open);
@@ -2713,7 +3341,9 @@ const actions = {
   toggleTerminal: () => setTerminal(!drawerState.open),
   toggleDiff: () => setDiff(diffPane.classList.contains("hidden")),
   toggleBrowser: () => setBrowser(browserArea.classList.contains("hidden")),
-  toggleSidebar: () => setSidebar(sidebar.classList.contains("hidden")),
+  toggleSidebar: () => setSidebar(settings.view === "north"
+    ? !sidebarDrawer.isOpen()
+    : sidebar.classList.contains("hidden")),
   newTerminal: () => void terminals.create(),
   increaseFontSize: () => persistSettings(nextFontSettings(settings, 1)),
   decreaseFontSize: () => persistSettings(nextFontSettings(settings, -1)),
@@ -2946,11 +3576,13 @@ const paletteCommands: Command[] = [
   { id: "font-increase", title: "Increase Font Size", run: actions.increaseFontSize },
   { id: "font-decrease", title: "Decrease Font Size", run: actions.decreaseFontSize },
   { id: "font-reset", title: "Reset Font Size", run: actions.resetFontSize },
+  { id: "view-classic", title: "View: Classic", run: () => setView("classic") },
+  { id: "view-north", title: "View: North Light", run: () => setView("north") },
+  { id: "view-graphite", title: "View: Graphite", run: () => setView("graphite") },
+  { id: "view-stanza", title: "View: Stanza", run: () => setView("stanza") },
+  { id: "view-variant-next", title: "View variant: next", run: nextViewVariant },
   { id: "new-automation", title: "New Automation…", run: () => openAutomationPanel() },
-  { id: "search", title: "Search Folder", run: () => {
-    if (!searchViewOpen) openSearchView();
-    search.focus();
-  }, shortcut: fmtShortcut("F", { shift: true }) },
+  { id: "search", title: "Search Folder", run: openSidebarSearch, shortcut: fmtShortcut("F", { shift: true }) },
   { id: "settings", title: "Settings", run: () => openSettings(), shortcut: fmtShortcut(",") },
   { id: "about", title: "About Sutra", run: () => openAbout() },
   { id: "whats-new", title: "What's New", run: () => openAbout("What's New") },
@@ -2962,6 +3594,16 @@ const paletteCommands: Command[] = [
   { id: "debug-step-out", title: "Debug: Step Out", run: () => void debugSession.stepOut(), shortcut: "⇧F11" },
   { id: "debug-stop", title: "Debug: Stop", run: () => void debugSession.stop(), shortcut: "⇧F5" },
 ];
+
+function setView(view: ViewId): void {
+  persistSettings({ ...settings, view, theme: VIEW_VARIANTS[view][0] });
+}
+
+function nextViewVariant(): void {
+  const variants = VIEW_VARIANTS[settings.view];
+  const current = variants.indexOf(settings.theme);
+  persistSettings({ ...settings, theme: variants[(current + 1) % variants.length] });
+}
 
 function recentPaletteCommands(): Command[] {
   // mountPalette's builder must stay synchronous — read the cached snapshot
@@ -3041,7 +3683,7 @@ outlineView = new OutlineView(
   () => editor.getDocumentSymbols(),
 );
 outlineView.onRevealLine = (path, line) => {
-  void editor.openFile(path, line).then(() => editor.revealLine(line));
+  void openSidebarFile(path, line).catch((error) => void alertNative(`Cannot open ${path}: ${error}`));
 };
 
 // Refresh the outline when the active file changes.
@@ -3057,6 +3699,44 @@ editor.onDocChanged = () => {
   const activePath = editor.active?.path;
   if (activePath) notifyDocChanged(activePath);
 };
+
+// ---- W3/T8b: stanza Write-room shelf ----
+// Stacked co-display of Files + Outline + Search, active only in stanza's Write
+// room (D11). Reuses the exact FileTree/OutlineView/SearchPanel DOM nodes —
+// treeEl, outlineView.panelEl and searchView — never clones or rebuilds them;
+// the only new DOM is one small label header per section, reparented beside
+// each node in the order sidebarSections("stacked") defines.
+const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline", search: "Search" };
+const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl, search: searchView };
+const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section, index) => {
+  const label = document.createElement("div");
+  label.className = index === 0 ? "shelf-label shelf-label-first hidden" : "shelf-label hidden";
+  label.textContent = SHELF_SECTION_LABEL[section];
+  SHELF_SECTION_EL[section].before(label);
+  return label;
+});
+
+/** Toggle the stanza Write-room shelf on/off: stacked Files/Outline/Search
+ *  co-display vs. the existing exclusive Files<->Outline sidebar. Called on
+ *  every stanza room change (write <-> run/review/web) and on every view
+ *  change (entering/leaving stanza). Idempotent — no-op if already in the
+ *  target state, so it's safe to call from both triggers unconditionally. */
+function syncShelfMode(): void {
+  const active = settings.view === "stanza" && roomRouter.currentRoom() === "write";
+  if (active === shelfActive) return;
+  shelfActive = active;
+  sidebar.classList.toggle("shelf-active", active);
+  for (const label of shelfLabels) label.classList.toggle("hidden", !active);
+  btnSearchToggle.classList.toggle("hidden", active);
+  if (active) {
+    outlineView.setMode("stacked");
+    searchView.classList.remove("hidden");
+  } else {
+    if (searchViewOpen) closeSearchView();
+    else searchView.classList.add("hidden");
+    outlineView.setMode("files");
+  }
+}
 
 // Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
 // by the same state notification the strip uses. Wired here (not beside the strip near
@@ -3076,15 +3756,27 @@ renderWhisperBar();
 // the user left off instead of a blank window; skips silently if the folder
 // was moved/deleted since last run.
 void (async function boot(): Promise<void> {
-  settings = await loadSettings();
-  applySettings(settings);
+  applySettings(await loadSettings());
 
   const ui = await readUiState({
     drawerRaw: localStorage.getItem(DRAWER_KEY),
     composerHRaw: localStorage.getItem(LEGACY_DRAWER_H_KEY),
   });
   drawerState = ui.terminalDrawer;
+  uiStateLoaded = true;
+  if (graphiteBand) {
+    graphiteBottomSnapshot = {
+      drawer: { ...drawerState },
+      problemsOpen: !problemsHost.classList.contains("hidden"),
+      terminalMaximize: terminals.getMaximizeState(),
+    };
+  }
   setTerminal(drawerState.open);
+  syncSurfacesFromUi();
+  // Deferred from applySettings' boot-time call (uiStateLoaded was still false
+  // there): booting straight into stanza applies the room preset only now that
+  // drawer heights/panel visibility have been restored.
+  if (settings.view === "stanza") roomRouter.enterRoom(roomRouter.currentRoom());
 
   // One-shot on upgrade: port pre-migration recents/trustedRoots into the
   // backend, then seed the trusted set from folders already in recents so

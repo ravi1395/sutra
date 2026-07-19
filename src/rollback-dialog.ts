@@ -2,6 +2,7 @@
 // turn's snapshots, dirty-buffer guard, per-file failure reporting.
 import type { RollbackResult, Turn } from "./ipc";
 import type { EditorManager } from "./editor";
+import type { RollbackActionLifecycle } from "./turn-actions";
 
 // Wired by main.ts (Task H) so the dialog can see dirty buffers without a
 // direct singleton dependency; unset (e.g. in tests) means "nothing dirty".
@@ -118,6 +119,7 @@ export async function resolveRollbackChecklist(
 /** Open the rollback overlay for `turn`; applies via `opts.onApply`.
  * Rows populate once `resolveRollbackChecklist` resolves (real human-touched
  * detection when `opts.getDiskHashes` is supplied; safe fallback otherwise).
+ * Optional lifecycle callbacks report applied, cancelled, or failed outcomes.
  * Apply stays disabled until rows load (or a load failure renders an inline
  * `.rollback-error`), and while any checked path has a dirty editor buffer.
  * Esc/backdrop close; per-file restore failures render inline. */
@@ -128,6 +130,7 @@ export function openRollbackDialog(
     turns: Turn[];
     onApply: (paths: string[]) => Promise<RollbackResult>;
     getDiskHashes?: (root: string, paths: string[]) => Promise<Record<string, string>>;
+    lifecycle?: RollbackActionLifecycle;
   },
 ): void {
   const overlay = document.createElement("div");
@@ -185,6 +188,7 @@ export function openRollbackDialog(
   // or letting the rejection go unhandled. Apply stays disabled — rowsLoaded
   // never flips true.
   function renderError(err: unknown) {
+    opts.lifecycle?.failed(err);
     checkboxes.clear();
     list.textContent = "";
     const rowEl = document.createElement("div");
@@ -202,7 +206,7 @@ export function openRollbackDialog(
   actions.className = "rollback-actions";
   const cancelBtn = document.createElement("button");
   cancelBtn.textContent = "Cancel";
-  cancelBtn.onclick = close;
+  cancelBtn.onclick = () => close();
   const applyBtn = document.createElement("button");
   applyBtn.textContent = "Apply rollback";
   applyBtn.onclick = () => void apply();
@@ -279,12 +283,15 @@ export function openRollbackDialog(
       }
       const result = await opts.onApply(paths);
       if (result.failed.length > 0) {
-        failuresEl.textContent = result.failed.map((f) => `${f.path}: ${f.error}`).join("\n");
+        const message = result.failed.map((f) => `${f.path}: ${f.error}`).join("\n");
+        failuresEl.textContent = message;
+        opts.lifecycle?.failed(new Error(message));
         applyBtn.disabled = false;
         return;
       }
-      close();
+      close("applied");
     } catch (err) {
+      opts.lifecycle?.failed(err);
       failuresEl.textContent = String(err);
       applyBtn.disabled = false;
     }
@@ -293,9 +300,14 @@ export function openRollbackDialog(
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") close();
   }
-  function close() {
+  let closed = false;
+  function close(outcome: "applied" | "cancelled" = "cancelled") {
+    if (closed) return;
+    closed = true;
     document.removeEventListener("keydown", onKeydown);
     overlay.remove();
+    if (outcome === "applied") opts.lifecycle?.applied();
+    else opts.lifecycle?.cancelled();
   }
   document.addEventListener("keydown", onKeydown);
   overlay.onmousedown = (e) => {
