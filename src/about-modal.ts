@@ -41,6 +41,16 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.3",
+    date: "2026-07-19",
+    notes: [
+      "Four new views — North Light, Graphite, and Stanza — each with day/night themes, switchable from the palette.",
+      "Diff panel gets a branch-review scope: toggle \"vs main\" for a merge-base file list and a scoped read-only gutter.",
+      "Agent turn UX rehaul — collapsible summary row, retryable rollback, and paged history.",
+      "Diff baseline fix: changed-files now compares against HEAD, not a stale checkout.",
+    ],
+  },
+  {
     version: "2.3.2",
     date: "2026-07-14",
     notes: [
