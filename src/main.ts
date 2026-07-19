@@ -944,8 +944,13 @@ function applySettings(next: UserSettings): void {
     // Entering stanza applies the remembered room preset over whatever layout was
     // in place. Boot's first applySettings call runs before persisted UI state
     // (drawer heights) is restored — deferred there via the same guard so the
-    // preset never races that restore; leaving stanza intentionally restores nothing.
+    // preset never races that restore. Exiting stanza resets the remembered room
+    // to Write (D11: no per-room persistence across a stanza exit/relaunch) —
+    // resetRoom mutates no layout itself, so exit stays a no-op visually; the next
+    // enterRoom (re-entry or relaunch) is what applies the Write preset. Drift
+    // after entry (switching rooms while inside stanza) is still allowed.
     if (settings.view === "stanza" && uiStateLoaded) roomRouter.enterRoom(roomRouter.currentRoom());
+    else if (previousView === "stanza") roomRouter.resetRoom();
   }
   terminals.retheme();
   const rootStyle = document.documentElement.style;
@@ -3169,6 +3174,7 @@ window.addEventListener("keydown", (e) => {
   // blocking overlay (palette/settings/rollback/task-modal) or the drawer is open.
   if (
     settings.view === "stanza"
+    && uiStateLoaded
     && e.metaKey
     && !e.repeat
     && !e.defaultPrevented

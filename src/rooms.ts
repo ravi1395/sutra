@@ -45,6 +45,7 @@ function safely(fn: () => void): void {
  *  primary surface last, then notifies subscribers on every entry. */
 export function createRoomRouter(deps: RoomDeps): {
   enterRoom(r: RoomId): void;
+  resetRoom(): void;
   currentRoom(): RoomId;
   onRoomChange(cb: RoomChangeListener): () => void;
 } {
@@ -63,8 +64,17 @@ export function createRoomRouter(deps: RoomDeps): {
     for (const listener of listeners) listener(room);
   }
 
+  // Resets the remembered room to "write" (D11) without touching any deps
+  // setter or focus — used on stanza exit, where no layout mutation should
+  // happen. The next enterRoom (re-entry/relaunch) applies the Write preset.
+  function resetRoom(): void {
+    current = "write";
+    for (const listener of listeners) listener(current);
+  }
+
   return {
     enterRoom,
+    resetRoom,
     currentRoom: () => current,
     onRoomChange(cb: RoomChangeListener): () => void {
       listeners.add(cb);

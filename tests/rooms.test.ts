@@ -93,3 +93,18 @@ test("sync-throwing setter leaves router responsive", () => {
     "focus:editor",
   ]);
 });
+
+test("resetRoom returns currentRoom to write and fires onRoomChange without touching setters", () => {
+  const { router, calls } = fixture();
+  const seen: string[] = [];
+  router.onRoomChange((r) => seen.push(r));
+
+  router.enterRoom("run");
+  calls.length = 0;
+  seen.length = 0;
+  router.resetRoom();
+
+  assert.equal(router.currentRoom(), "write");
+  assert.deepEqual(seen, ["write"]);
+  assert.deepEqual(calls, []);
+});
