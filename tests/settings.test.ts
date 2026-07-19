@@ -169,6 +169,21 @@ test("clamp: missing view → classic/ink", () => {
   assert.equal(settings.theme, "ink");
 });
 
+test("clamp: object without view but with valid modern theme still routes through legacy migration (boundary pin)", () => {
+  // "night" is a structurally valid ViewVariant (belongs to view "north"), but the
+  // clampSettings migration branch keys off `value.view === undefined`, not off
+  // whether `value.theme` is itself valid somewhere. A partial patch missing only
+  // `view` — which no in-session caller produces, but which this test pins against
+  // regression — is treated as a pre-`view` legacy payload: theme collapses to
+  // "ink" (only "washi" survives the legacy path) and view defaults to "classic",
+  // silently discarding the "night" the caller asked for. This documents the
+  // load-boundary contract clampSettings assumes: partial patches are only safe
+  // from callers that always spread a full UserSettings first.
+  const settings = clampSettings({ theme: "night" } as Partial<UserSettings>);
+  assert.equal(settings.view, "classic");
+  assert.equal(settings.theme, "ink");
+});
+
 test("clamp: (north,washi) → day", () => {
   const settings = clampSettings({ view: "north", theme: "washi" } as Partial<UserSettings>);
   assert.equal(settings.view, "north");

@@ -183,7 +183,15 @@ test("terminal.ts sources its xterm theme from CSS tokens, not inline hex", () =
   const terminalTs = readFileSync("src/terminal.ts", "utf8");
   assert.doesNotMatch(terminalTs, /#[0-9a-fA-F]{6}/);
   assert.match(terminalTs, /theme: buildTermTheme\(\)/);
-  assert.match(terminalTs, /onThemeChange\(\(\) => retheme\(this\.terms\)\)/);
+});
+
+test("terminal.ts retheme is driven only by main.ts's explicit applySettings call, not a self-subscribed observer", () => {
+  // Rejected approach (plans/multiview.md "Infeasible/rejected"): xterm retheme via
+  // theme-tokens.ts onThemeChange would double-fire alongside main.ts's explicit
+  // terminals.retheme() call in applySettings. TerminalManager must not import or
+  // register onThemeChange at all.
+  const terminalTs = readFileSync("src/terminal.ts", "utf8");
+  assert.doesNotMatch(terminalTs, /onThemeChange/);
 });
 
 test("North routes xterm's DOM renderer backdrop through --term-bg without changing Classic", () => {

@@ -1,7 +1,11 @@
 // Shared theme-token helpers for non-CSS consumers (xterm, canvas-drawn surfaces, inline
-// styles). main.ts flips the `theme-washi` class on documentElement on toggle; no event
-// fires, so consumers self-subscribe via a MutationObserver on the class attribute — same
-// pattern as editor.ts's private cssVar()/themeObserver, generalized for reuse (Phase 3/4/5).
+// styles). main.ts's applyTheme() flips the full view/theme class set (view-north/
+// view-graphite/view-stanza/variant-night/variant-dawn/theme-washi/theme-light) on
+// documentElement as one transaction; no event fires. Consumers without an explicit
+// call from applySettings self-subscribe via onThemeChange's MutationObserver on the
+// class attribute instead — same pattern as editor.ts's private cssVar()/themeObserver,
+// generalized for reuse (Phase 3/4/5). TerminalManager is the exception: it gets an
+// explicit retheme() call from main.ts's applySettings, so it does not use onThemeChange.
 
 /** Read a CSS custom property off :root; falls back when unresolved or outside a DOM (tests, SSR). */
 export function cssVar(name: string, fallback = ""): string {

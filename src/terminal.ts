@@ -22,7 +22,7 @@ import {
 import { icon } from "./icons";
 import { isMod } from "./shortcuts";
 import { isControlSequence } from "./terminal-input";
-import { cssVar, onThemeChange, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
+import { cssVar, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
 
 export type TerminalMaximizeState = TerminalGroupSide | null;
 
@@ -386,10 +386,6 @@ export class TerminalManager {
       if (t) this.markExited(t);
     });
 
-    // Single subscription for the (singleton) manager, not one per terminal: re-theme every
-    // live session on ink/washi toggle. A terminal spawned after a toggle already reads
-    // current tokens at construction, so it never needs a catch-up call here.
-    onThemeChange(() => retheme(this.terms));
   }
 
   /** Re-theme all live sessions after an explicit settings class transaction. */

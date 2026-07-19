@@ -103,6 +103,12 @@ export function clampSettings(value: Partial<UserSettings>): UserSettings {
   // Legacy settings stored only ink/washi. Preserve washi specifically; every
   // other missing-view value maps to classic/ink. Explicit views use only their
   // own variant set.
+  //
+  // legacy-migration branch: reachable only for persisted payloads predating `view`;
+  // in-session callers always spread a full UserSettings — do not call with partial
+  // patches. A partial `{theme: "night"}` (no `view`) still routes through this branch
+  // and forces view="classic"/theme="ink", discarding a structurally-valid modern
+  // theme value — see tests/settings.test.ts boundary pin.
   const theme = value.view === undefined
     ? value.theme === "washi" ? "washi" : "ink"
     : pick(VIEW_VARIANTS[view], value.theme, VIEW_VARIANTS[view][0]);
