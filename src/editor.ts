@@ -623,11 +623,13 @@ export class Pane {
     document.addEventListener("mousedown", this.onOutsideLensMouseDown, true);
   }
 
-  /** Release document-level listeners, the pending lang debounce, and the CM view. */
+  /** Release document-level listeners, the pending lang debounce, the CM view, and any open preview. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
     if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
+    this.previewCtl?.dispose();
+    this.previewCtl = null;
   }
 
   /** Debounce lang_did_change so typing doesn't flood the engine; fires after 200 ms. */
@@ -986,6 +988,7 @@ export class Pane {
     this.closeLens();
     this.clearConflictBanners();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
@@ -1005,6 +1008,7 @@ export class Pane {
     const kind = previewKind(source.name);
     if (!kind) return;
     this.previewSource = source;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind, kind === "html" ? { htmlMode: "srcdoc" } : undefined);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1024,6 +1028,7 @@ export class Pane {
     const { PreviewController } = await import("./preview");
     // Synthetic source: only `.name` is ever read (renderTabs/previewTabName).
     this.previewSource = { id: "agent", name: label, path: null } as unknown as Tab;
+    this.previewCtl?.dispose();
     this.previewCtl = new PreviewController(this.previewEl, kind);
     void this.previewCtl.render(text);
     this.hostEl.classList.add("hidden");
@@ -1043,6 +1048,7 @@ export class Pane {
   hidePreview(): void {
     this.closeLens();
     this.previewSource = null;
+    this.previewCtl?.dispose();
     this.previewCtl = null;
     this.hostEl.classList.remove("hidden");
     this.previewEl.classList.add("hidden");
