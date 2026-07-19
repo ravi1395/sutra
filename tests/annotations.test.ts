@@ -309,6 +309,113 @@ test("annotation messages arriving during setRoot hydration are applied after lo
   }
 });
 
+test("overlapping setRoot hydrations discard messages queued for the superseded root", async () => {
+  const writes: Record<string, string> = {};
+  const resolvers = new Map<string, (value: string) => void>();
+  const persistence: AnnotationPersistence = {
+    read: (path: string) => new Promise<string>((resolve) => { resolvers.set(path, resolve); }),
+    write: async (path, content) => { writes[path] = content; },
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo-a");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/a" },
+    });
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "picked", payload: { selector: "#a", tag: "div", html: "<div></div>", styles: {}, hints: {} } },
+    });
+
+    const hydrateB = ctx.panel.setRoot("/repo-b");
+    resolvers.get(`/repo-b/${ANNOTATIONS_FILE}`)?.(JSON.stringify({ version: 1, annotations: [] }));
+    await hydrateB;
+    resolvers.get(`/repo-a/${ANNOTATIONS_FILE}`)?.(JSON.stringify({ version: 1, annotations: [{ n: 9, selector: "#stale", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/a" }] }));
+    await hydrateA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(ctx.panel.currentRouteAnnotations(), []);
+    assert.deepEqual(writes, {});
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("late corrupt-file backup from root A cannot warn, render, or clear completed root B hydration", async () => {
+  const aPath = `/repo-a/${ANNOTATIONS_FILE}`;
+  const bPath = `/repo-b/${ANNOTATIONS_FILE}`;
+  let resolveBackup!: () => void;
+  const persistence: AnnotationPersistence = {
+    read: async (path) => {
+      if (path === aPath) return "not json";
+      if (path === bPath) return JSON.stringify({ version: 1, annotations: [{ n: 2, selector: "#b", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/b" }] });
+      throw new Error("missing");
+    },
+    write: async (path) => {
+      if (path === `${aPath}.bak`) await new Promise<void>((resolve) => { resolveBackup = resolve; });
+    },
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    const warnings: string[] = [];
+    ctx.panel.onWarnings = (received) => warnings.push(...received);
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo-a");
+    await new Promise((resolve) => setTimeout(resolve, 0)); // A is waiting on its deferred .bak write
+
+    await ctx.panel.setRoot("/repo-b");
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/b" },
+    });
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+
+    resolveBackup();
+    await hydrateA;
+
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("overlapping same-root hydrations keep only the newest generation", async () => {
+  const path = `/repo/${ANNOTATIONS_FILE}`;
+  const reads: Array<(value: string) => void> = [];
+  const persistence: AnnotationPersistence = {
+    read: (readPath) => readPath === path
+      ? new Promise<string>((resolve) => { reads.push(resolve); })
+      : Promise.reject(new Error("missing")),
+    write: async () => {},
+    createDir: async () => {},
+  };
+  const ctx = setup(persistence);
+  try {
+    ctx.panel.setTarget(ctx.first as unknown as HTMLIFrameElement, "http://app.test");
+    const hydrateA = ctx.panel.setRoot("/repo");
+    const hydrateB = ctx.panel.setRoot("/repo");
+    assert.equal(reads.length, 2);
+
+    reads[1](JSON.stringify({ version: 1, annotations: [{ n: 2, selector: "#new", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/current" }] }));
+    await hydrateB;
+    reads[0](JSON.stringify({ version: 1, annotations: [{ n: 1, selector: "#stale", tag: "div", html: "", styles: {}, hints: {}, feedback: "", route: "http://app.test/current" }] }));
+    await hydrateA;
+    ctx.message({
+      origin: "http://app.test", source: ctx.first.contentWindow as unknown as Window,
+      data: { type: "ready", route: "http://app.test/current" },
+    });
+
+    assert.deepEqual(ctx.panel.currentRouteAnnotations().map((a) => a.n), [2]);
+  } finally {
+    ctx.restore();
+  }
+});
+
 test("setRoot on a corrupt annotations file surfaces warnings and quarantines it to .bak before any save", async () => {
   const path = `/repo/${ANNOTATIONS_FILE}`;
   const writes: Record<string, string> = {};

@@ -179,6 +179,7 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .manage(proxy::ProxyServerState::default())
         .manage(watcher::WatcherState::default())
+        .manage(watcher::WorkspaceGenerationState::default())
         .manage(LaunchPath::default())
         .setup(move |app| {
             // Desktop-only self-updater: registered here so the chain stays
@@ -350,6 +351,7 @@ pub fn run() {
             search::list_files,
             watcher::watch_start,
             watcher::watch_stop,
+            watcher::workspace_generation_next,
             take_launch_path,
             clipboard_write,
             spawn_window,

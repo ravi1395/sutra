@@ -14,9 +14,40 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(400);
 // Max-wait cap: force-emit if events arrive continuously for > 2 s.
 const MAX_FLUSH: Duration = Duration::from_secs(2);
 
+/// Process-lifetime workspace generation authority. The renderer can reload
+/// while native MCP/watcher state survives, so it must obtain generations here
+/// rather than restarting a module-local counter at zero.
+#[derive(Default)]
+pub struct WorkspaceGenerationState(Mutex<u64>);
+
+impl WorkspaceGenerationState {
+    pub fn claim(&self, generation: u64) -> bool {
+        let mut active = self.0.lock().unwrap();
+        if generation < *active {
+            return false;
+        }
+        *active = generation;
+        true
+    }
+
+    fn next(&self) -> Result<u64, String> {
+        let mut active = self.0.lock().map_err(|e| e.to_string())?;
+        *active = active.checked_add(1).ok_or("workspace generation exhausted")?;
+        Ok(*active)
+    }
+}
+
+/// Reserve the next generation before a renderer starts opening a workspace.
+#[tauri::command]
+pub fn workspace_generation_next(state: State<'_, WorkspaceGenerationState>) -> Result<u64, String> {
+    state.next()
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsChangedPayload {
+    pub root: String,
+    pub generation: u64,
     pub paths: Vec<String>,
 }
 
@@ -24,18 +55,35 @@ pub struct FsChangedPayload {
 struct WatcherInner {
     watcher: Option<RecommendedWatcher>,
     stop: Option<mpsc::Sender<()>>,
+    generation: u64,
 }
 
 #[derive(Default)]
 pub struct WatcherState(Mutex<WatcherInner>);
 
+fn claim_workspace_generation(active_generation: &mut u64, generation: u64) -> bool {
+    if generation < *active_generation {
+        return false;
+    }
+    *active_generation = generation;
+    true
+}
+
 #[tauri::command]
 pub fn watch_start(
     app: AppHandle,
     state: State<'_, WatcherState>,
+    generations: State<'_, WorkspaceGenerationState>,
     root: String,
+    generation: u64,
 ) -> Result<(), String> {
+    if !generations.claim(generation) {
+        return Ok(());
+    }
     let root = PathBuf::from(root);
+    if generation < state.0.lock().unwrap().generation {
+        return Ok(());
+    }
     let (event_tx, event_rx) = mpsc::channel::<notify::Result<Event>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let mut watcher = RecommendedWatcher::new(
@@ -51,18 +99,31 @@ pub fn watch_start(
 
     {
         let mut inner = state.0.lock().unwrap();
+        if !claim_workspace_generation(&mut inner.generation, generation) {
+            return Ok(());
+        }
         stop_locked(&mut inner);
         inner.watcher = Some(watcher);
         inner.stop = Some(stop_tx);
     }
 
-    thread::spawn(move || debounce_events(app, event_rx, stop_rx));
+    thread::spawn(move || debounce_events(app, root, generation, event_rx, stop_rx));
     Ok(())
 }
 
 #[tauri::command]
-pub fn watch_stop(state: State<'_, WatcherState>) -> Result<(), String> {
+pub fn watch_stop(
+    state: State<'_, WatcherState>,
+    generations: State<'_, WorkspaceGenerationState>,
+    generation: u64,
+) -> Result<(), String> {
+    if !generations.claim(generation) {
+        return Ok(());
+    }
     let mut inner = state.0.lock().unwrap();
+    if !claim_workspace_generation(&mut inner.generation, generation) {
+        return Ok(());
+    }
     stop_locked(&mut inner);
     Ok(())
 }
@@ -76,6 +137,8 @@ fn stop_locked(inner: &mut WatcherInner) {
 
 fn debounce_events(
     app: AppHandle,
+    root: PathBuf,
+    generation: u64,
     event_rx: mpsc::Receiver<notify::Result<Event>>,
     stop_rx: mpsc::Receiver<()>,
 ) {
@@ -102,17 +165,17 @@ fn debounce_events(
             }
             Ok(Err(_)) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                emit_pending(&app, &mut pending);
+                emit_pending(&app, &root, generation, &mut pending);
                 pending_since = None;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                emit_pending(&app, &mut pending);
+                emit_pending(&app, &root, generation, &mut pending);
                 break;
             }
         }
         // Force flush if rapid events kept recv satisfied past the max-wait cap.
         if pending_since.map_or(false, |t| t.elapsed() >= MAX_FLUSH) {
-            emit_pending(&app, &mut pending);
+            emit_pending(&app, &root, generation, &mut pending);
             pending_since = None;
         }
     }
@@ -146,7 +209,7 @@ fn is_noise_path(path: &Path) -> bool {
     false
 }
 
-fn emit_pending(app: &AppHandle, pending: &mut BTreeSet<PathBuf>) {
+fn emit_pending(app: &AppHandle, root: &Path, generation: u64, pending: &mut BTreeSet<PathBuf>) {
     if pending.is_empty() {
         return;
     }
@@ -155,7 +218,14 @@ fn emit_pending(app: &AppHandle, pending: &mut BTreeSet<PathBuf>) {
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     pending.clear();
-    let _ = app.emit("fs-changed", FsChangedPayload { paths });
+    let _ = app.emit(
+        "fs-changed",
+        FsChangedPayload {
+            root: root.to_string_lossy().into_owned(),
+            generation,
+            paths,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -164,6 +234,25 @@ mod tests {
 
     fn noise(p: &str) -> bool {
         is_noise_path(Path::new(p))
+    }
+
+    #[test]
+    fn stale_watcher_generation_cannot_stop_or_replace_newer_workspace() {
+        let mut active = 2;
+        assert!(!claim_workspace_generation(&mut active, 1));
+        assert_eq!(active, 2);
+        assert!(claim_workspace_generation(&mut active, 3));
+        assert_eq!(active, 3);
+    }
+
+    #[test]
+    fn renderer_reload_allocates_after_retained_native_generation() {
+        let generations = WorkspaceGenerationState::default();
+        assert!(generations.claim(7)); // MCP/watcher ownership before reload.
+        let reloaded_generation = generations.next().unwrap();
+        assert_eq!(reloaded_generation, 8);
+        assert!(!generations.claim(7)); // delayed old claim/event is stale.
+        assert!(generations.claim(reloaded_generation)); // new MCP/watcher claim works.
     }
 
     #[test]

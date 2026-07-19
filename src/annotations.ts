@@ -50,6 +50,9 @@ export class AnnotationsPanel {
    * mutate state that setRoot is about to overwrite (or save a partial file
    * before a corrupt-file backup has been written). */
   private hydrating: Promise<void> | null = null;
+  /** Changes with every root request so messages queued behind an older
+   * hydration cannot replay into a newer root. */
+  private rootGeneration = 0;
 
   constructor(
     private iframe: HTMLIFrameElement,
@@ -99,6 +102,7 @@ export class AnnotationsPanel {
   }
 
   async setRoot(root: string | null): Promise<void> {
+    const generation = ++this.rootGeneration;
     this.root = root;
     // Clear synchronously before the async read so a root switch can never
     // expose the previous project's annotations during hydration.
@@ -114,20 +118,28 @@ export class AnnotationsPanel {
     this.hydrating = new Promise((resolve) => { resolveHydrating = resolve; });
     try {
       const loaded = await loadAnnotations(root, this.persistence);
-      if (this.root !== root) return;
+      if (!this.ownsRoot(generation, root)) return;
       if (loaded.warnings.length > 0) {
-        this.onWarnings?.(loaded.warnings);
         // Must complete before hydration releases gated messages, so a
         // corrupt file is quarantined before any save can overwrite it.
         await backupCorruptAnnotationsFile(root, this.persistence).catch((error) =>
           console.warn("Annotation backup failed", error));
+        if (!this.ownsRoot(generation, root)) return;
+        this.onWarnings?.(loaded.warnings);
       }
+      if (!this.ownsRoot(generation, root)) return;
       this.state = loaded.annotations;
       this.render();
     } finally {
-      if (this.root === root) this.hydrating = null;
+      // A same-root refresh can supersede this load too: root equality alone
+      // would let an older completion clear the newer message gate.
+      if (this.ownsRoot(generation, root)) this.hydrating = null;
       resolveHydrating();
     }
+  }
+
+  private ownsRoot(generation: number, root: string): boolean {
+    return this.rootGeneration === generation && this.root === root;
   }
 
   setTaskContext(
@@ -215,7 +227,13 @@ export class AnnotationsPanel {
     // through onMessage (not straight to handleMessage) so a root switch that
     // starts a *second* hydration while this one is queued gates it again
     // instead of firing into the stale window between the two loads.
-    if (this.hydrating) { void this.hydrating.then(() => this.onMessage(e)); return; }
+    if (this.hydrating) {
+      const generation = this.rootGeneration;
+      void this.hydrating.then(() => {
+        if (this.rootGeneration === generation) this.onMessage(e);
+      });
+      return;
+    }
     this.handleMessage(e.data as any);
   }
 

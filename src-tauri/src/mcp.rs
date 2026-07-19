@@ -139,15 +139,16 @@ async fn require_auth_token(
 /// Resolve `path` (absolute or relative to `root`) and confirm it stays inside
 /// `root`. Returns the canonical path or an error string.
 pub fn resolve_in_root(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let candidate = {
-        let p = Path::new(path);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            root.join(p)
-        }
+    resolve_path_in_root(root, Path::new(path)).map_err(|e| format!("{path}: {e}"))
+}
+
+fn resolve_path_in_root(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
     };
-    let canon = std::fs::canonicalize(&candidate).map_err(|e| format!("{path}: {e}"))?;
+    let canon = std::fs::canonicalize(&candidate).map_err(|e| e.to_string())?;
     let root_canon = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     if !canon.starts_with(&root_canon) {
         return Err("path escapes workspace root".to_string());
@@ -168,13 +169,11 @@ pub enum NavTarget {
 /// everything else falls through to the proxy URL path.
 pub fn classify_nav_target(root: &Path, raw: &str) -> Result<NavTarget, String> {
     let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("file://") {
-        // Accept both authority forms: file:///path and file://localhost/path.
-        let path = match rest.strip_prefix("localhost/") {
-            Some(p) => format!("/{p}"),
-            None => rest.to_string(),
-        };
-        let file = resolve_in_root(root, &percent_decode_path(&path))?;
+    if trimmed
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+    {
+        let file = resolve_path_in_root(root, &parse_file_url(trimmed)?)?;
         return Ok(NavTarget::PreviewFile(file));
     }
     if trimmed.contains("://") {
@@ -188,23 +187,66 @@ pub fn classify_nav_target(root: &Path, raw: &str) -> Result<NavTarget, String> 
     Ok(NavTarget::ProxyUrl(trimmed.to_string()))
 }
 
-/// Decode %XX escapes in a file-URL path (spaces etc.); invalid escapes pass through.
-fn percent_decode_path(s: &str) -> String {
+/// Parse a local file URL without treating URL syntax as a filesystem path.
+/// Only no-authority and localhost forms are local; query and fragment are not
+/// part of the path. `url::Url::to_file_path` has the same platform rules, but
+/// this small parser avoids expanding the backend's direct dependency surface.
+fn parse_file_url(raw: &str) -> Result<PathBuf, String> {
+    let rest = raw.get(5..).ok_or_else(|| "invalid file URL".to_string())?;
+    let path = if let Some(after_slashes) = rest.strip_prefix("//") {
+        let authority_end = after_slashes
+            .find(['/', '?', '#'])
+            .unwrap_or(after_slashes.len());
+        let authority = &after_slashes[..authority_end];
+        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+            return Err("file URL authority must be empty or localhost".to_string());
+        }
+        &after_slashes[authority_end..]
+    } else {
+        rest
+    };
+    let path_end = path.find(['?', '#']).unwrap_or(path.len());
+    let path = &path[..path_end];
+    if !path.starts_with('/') {
+        return Err("file URL path must be absolute".to_string());
+    }
+    let decoded = percent_decode_file_path(path)?;
+    #[cfg(windows)]
+    let decoded = decoded
+        .strip_prefix('/')
+        .filter(|p| is_windows_drive_path(p))
+        .unwrap_or(&decoded)
+        .to_string();
+    Ok(PathBuf::from(decoded))
+}
+
+#[cfg(windows)]
+fn is_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn percent_decode_file_path(s: &str) -> Result<String, String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
+        if b[i] == b'%' {
+            if i + 2 >= b.len() {
+                return Err("invalid percent escape in file URL".to_string());
             }
+            let hex = std::str::from_utf8(&b[i + 1..i + 3])
+                .map_err(|_| "invalid percent escape in file URL".to_string())?;
+            let value = u8::from_str_radix(hex, 16)
+                .map_err(|_| "invalid percent escape in file URL".to_string())?;
+            out.push(value);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).map_err(|_| "file URL path is not utf-8".to_string())
 }
 
 /// Directory for ephemeral agent-rendered HTML, under the workspace root so the
@@ -256,6 +298,8 @@ fn prune_dir(dir: &Path, keep: usize) {
 pub struct McpState {
     pub port: Arc<Mutex<Option<u16>>>,
     pub root: Arc<Mutex<Option<PathBuf>>>,
+    /// Frontend workspace owner; stale IPC root claims are ignored.
+    pub root_generation: Arc<Mutex<u64>>,
     pub pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     pub next_id: Arc<AtomicU64>,
 }
@@ -1345,9 +1389,32 @@ pub fn mcp_server_url(
 }
 
 /// Set the active workspace root the MCP tools target.
+fn claim_workspace_generation(active_generation: &mut u64, generation: u64) -> bool {
+    if generation < *active_generation {
+        return false;
+    }
+    *active_generation = generation;
+    true
+}
+
 #[tauri::command]
-pub fn mcp_set_root(state: tauri::State<McpState>, root: String) -> Result<(), String> {
+pub fn mcp_set_root(
+    state: tauri::State<McpState>,
+    generations: tauri::State<crate::watcher::WorkspaceGenerationState>,
+    root: String,
+    generation: u64,
+) -> Result<(), String> {
+    if !generations.claim(generation) {
+        return Ok(());
+    }
     let root_path = PathBuf::from(&root);
+    let mut active_generation = state.root_generation.lock().map_err(|e| e.to_string())?;
+    if !claim_workspace_generation(&mut active_generation, generation) {
+        return Ok(());
+    }
+    // Keep the generation lock through the root write. Otherwise A could claim
+    // generation 1, B could claim/set generation 2, then A could still acquire
+    // the root lock and overwrite B.
     *state.root.lock().map_err(|e| e.to_string())? = Some(root_path.clone());
     if let Some(port) = *state.port.lock().map_err(|e| e.to_string())? {
         let _ = write_endpoint_file(&root_path, port);
@@ -1475,6 +1542,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn stale_mcp_root_generation_cannot_replace_newer_workspace() {
+        let mut active = 2;
+        assert!(!claim_workspace_generation(&mut active, 1));
+        assert_eq!(active, 2);
+        assert!(claim_workspace_generation(&mut active, 3));
+        assert_eq!(active, 3);
+    }
+
+    #[test]
     fn resolve_accepts_path_inside_root() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.html"), "x").unwrap();
@@ -1551,6 +1627,32 @@ mod tests {
         let arg = format!("file://{}", file.display()).replace(' ', "%20");
         let got = classify_nav_target(dir.path(), &arg).unwrap();
         assert!(matches!(got, NavTarget::PreviewFile(p) if p.ends_with("my page.html")));
+    }
+
+    #[test]
+    fn nav_target_file_url_ignores_query_and_fragment() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("page.html");
+        std::fs::write(&file, "<p>x</p>").unwrap();
+        let arg = format!("file://{}?preview=1#section", file.display());
+
+        let got = classify_nav_target(dir.path(), &arg).unwrap();
+        assert!(matches!(got, NavTarget::PreviewFile(p) if p == file.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn nav_target_file_url_rejects_foreign_authority() {
+        let dir = tempdir().unwrap();
+        assert!(classify_nav_target(dir.path(), "file://example.test/page.html").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_url_parser_accepts_windows_drive_form() {
+        assert_eq!(
+            parse_file_url("file:///C:/workspace/page.html").unwrap(),
+            PathBuf::from(r"C:\workspace\page.html"),
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { computeLineDiff, DiffViewer, hunkIndexAtLine, hunkSummaries, lensModel, turnFileHunkRows } from "../src/diff";
+import { scopedBaselineForPath } from "../src/editor";
 
 class FakeClassList {
   private values = new Set<string>();
@@ -168,6 +170,36 @@ test("DiffViewer keeps expanded hunk rows visible across file-list rerenders", a
   }
 });
 
+test("DiffViewer.invalidate reloads expanded rows when bytes change without changing the file list", async () => {
+  const { filesEl, restore } = installDiffDom();
+  try {
+    const viewer = new DiffViewer();
+    let expansions = 0;
+    const handlers = {
+      onFilePick: () => {},
+      onExpand: async () => {
+        expansions++;
+        return [{ kind: "modified" as const, startLine: expansions, label: `line ${expansions}`, newFrom: expansions, newTo: expansions + 1, oldText: ["old"] }];
+      },
+      onHunkPick: () => {},
+    };
+    const files = [{ path: "/repo/src/app.ts", status: "M" }];
+
+    viewer.renderFileList(files, null, handlers);
+    await filesEl.querySelector(".diff-file-chevron")?.onclick?.({ stopPropagation() {} });
+    await Promise.resolve();
+    viewer.invalidate();
+    viewer.renderFileList(files, null, handlers);
+    await Promise.resolve();
+
+    assert.equal(expansions, 2);
+    assert.equal(filesEl.querySelector(".diff-hunk-list")?.classList.contains("hidden"), false);
+    assert.equal(filesEl.querySelector(".diff-hunk-label")?.textContent, "line 2");
+  } finally {
+    restore();
+  }
+});
+
 test("computeLineDiff marks a pure addition", () => {
   const { marks, hunks } = computeLineDiff("one\nthree", "one\ntwo\nthree");
 
@@ -320,4 +352,61 @@ test("DiffViewer.renderFileList: no accept/reject affordances when the handlers 
   } finally {
     restore();
   }
+});
+
+test("branch review locks revert before async baseline fetches and retains that lock on unavailable baselines", () => {
+  // main.ts is intentionally a bootstrap-only module, so this source-level
+  // regression pins its UI wiring while the executable seam remains diff.ts.
+  const main = readFileSync("src/main.ts", "utf8");
+  const editor = readFileSync("src/editor.ts", "utf8");
+
+  assert.match(main, /diffScope = enterBranchScope\(\);\s+editor\.setBranchScopeReadOnly\(true\)/);
+  assert.match(main, /const generation = \+\+branchRefreshGeneration;/);
+  assert.match(main, /editor\.setScopedBaselines\(new Map\(\)\);/);
+  assert.match(editor, /private branchScopeReadOnly = false;/);
+  assert.match(editor, /return this\.branchScopeReadOnly;/);
+  assert.match(editor, /return scopedBaselineForPath\(this\.scopedBaselines, tab\.path\);/);
+});
+
+test("scopedBaselineForPath distinguishes an added file from an unavailable baseline", () => {
+  const baselines = new Map<string, string | null>([["/repo/added.ts", null]]);
+  assert.equal(scopedBaselineForPath(baselines, "/repo/added.ts"), "");
+  assert.equal(scopedBaselineForPath(baselines, "/repo/unavailable.ts"), null);
+});
+
+test("branch onExpand uses a confirmed absent blob as an empty baseline", () => {
+  const current = "one\ntwo\n";
+  const rows = hunkSummaries(computeLineDiff("", current).hunks);
+
+  assert.deepEqual(rows.map((row) => row.kind), ["added"]);
+  assert.equal(rows[0].label, "lines 1–2");
+  const main = readFileSync("src/main.ts", "utf8");
+  assert.match(main, /const baseline = await branchBaseForPath\(path\);\s+if \(!baseline\.available\) return \[\];\s+const base = baseline\.content \?\? "";/);
+});
+
+test("branch onExpand rejects unavailable baselines without fabricating hunks and leaves them retryable", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+
+  // The branch handler's lookup result distinguishes a successful null from a
+  // rejected lookup. Only the former reaches computeLineDiff with "".
+  assert.match(main, /Promise<\{ available: true; content: string \| null \} \| \{ available: false \}>/);
+  assert.match(main, /catch \(e\) \{[\s\S]{0,300}return \{ available: false \};/);
+  assert.match(main, /if \(!baseline\.available\) return \[\];\s+const base = baseline\.content \?\? "";/);
+  assert.doesNotMatch(main, /catch \(e\) \{[\s\S]{0,300}blobCache\.set\(path,/);
+});
+
+test("scoped deleted files use immutable content and unreadable current files produce no synthetic deletion hunks", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const editor = readFileSync("src/editor.ts", "utf8");
+
+  assert.match(editor, /openReadOnlySnapshot\(path: string, content: string, line\?: number\)/);
+  assert.match(main, /const openDeletedBranchSnapshot[\s\S]{0,700}editor\.openReadOnlySnapshot\(path, base/);
+  assert.match(main, /file\?\.status === "D"[\s\S]{0,240}openDeletedBranchSnapshot\(path/);
+  assert.match(main, /content\?\.snapshotted && content\.before != null[\s\S]{0,180}openReadOnlySnapshot\(path, content\.before, startLine \+ 1\)/);
+  assert.match(main, /const current = await readFile\(path\)\.catch\(\(\) => null\);[\s\S]{0,220}if \(current == null\)[\s\S]{0,220}return \[\];/);
+});
+
+test("branch refresh invalidates identical rows so expanded hunks reflect current bytes", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  assert.match(main, /async function refreshBranchDiffFileList[\s\S]{0,7000}diffViewer\.invalidate\(\);[\s\S]{0,500}diffViewer\.renderFileList\(files, activePath/);
 });

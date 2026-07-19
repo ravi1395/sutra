@@ -39,7 +39,7 @@ export interface SidebarDrawerShortcutState {
   blockingOverlayActive: boolean;
 }
 
-export const BLOCKING_OVERLAY_SELECTOR = ".palette-overlay,.settings-overlay,.rollback-overlay,.tm-overlay";
+export const BLOCKING_OVERLAY_SELECTOR = ".palette-overlay,.settings-overlay,.rollback-overlay,.tm-overlay,dialog[open]";
 
 export interface BlockingOverlayHandle {
   readonly isConnected: boolean;

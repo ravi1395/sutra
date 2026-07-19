@@ -5,6 +5,17 @@ import { cssVar, onThemeChange } from "./theme-tokens";
 
 export type PreviewKind = "md" | "html" | "diagram";
 
+type DiagramRenderer = (source: string, id: string) => Promise<string>;
+
+const latestRenderForElement = new WeakMap<HTMLElement, symbol>();
+let nextDiagramRenderId = 0;
+
+async function renderDiagram(source: string, id: string): Promise<string> {
+  const mermaid = (await import("mermaid")).default;
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
+  return (await mermaid.render(id, source)).svg;
+}
+
 export function previewKind(name: string): PreviewKind | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "md" || ext === "markdown") return "md";
@@ -70,11 +81,12 @@ export class PreviewController {
   private frame: HTMLIFrameElement | null = null;
   private lastMdText: string | null = null;
   private disposeTheme: (() => void) | null = null;
+  private disposed = false;
 
   constructor(
     private el: HTMLElement,
     private kind: PreviewKind,
-    private opts?: { htmlMode?: "url" | "srcdoc" },
+    private opts?: { htmlMode?: "url" | "srcdoc"; renderDiagram?: DiagramRenderer },
   ) {
     // Mirrors editor.ts's Pane.themeObserver (per-instance MutationObserver via
     // onThemeChange). editor.ts disposes the previous controller at every
@@ -88,11 +100,15 @@ export class PreviewController {
 
   /** Stop reacting to ink/washi toggles; idempotent. */
   dispose(): void {
+    this.disposed = true;
     this.disposeTheme?.();
     this.disposeTheme = null;
   }
 
   async render(text: string): Promise<void> {
+    if (this.disposed) return;
+    const renderToken = Symbol();
+    latestRenderForElement.set(this.el, renderToken);
     if (this.kind === "md") {
       this.lastMdText = text;
       const raw = marked.parse(text) as string;
@@ -102,9 +118,9 @@ export class PreviewController {
       return;
     }
     if (this.kind === "diagram") {
-      const mermaid = (await import("mermaid")).default;
-      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
-      const { svg } = await mermaid.render("sutra-diagram", text);
+      const id = `sutra-diagram-${++nextDiagramRenderId}`;
+      const svg = await (this.opts?.renderDiagram ?? renderDiagram)(text, id);
+      if (this.disposed || latestRenderForElement.get(this.el) !== renderToken) return;
       this.el.innerHTML = `<div class="sutra-md-preview">${svg}</div>`;
       return;
     }

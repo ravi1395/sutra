@@ -46,6 +46,7 @@ import {
   addTrust,
   pathIsTrusted,
   seedTrusted,
+  workspaceEffectCurrent,
   type RecentWorkspace,
 } from "../src/workspace";
 import {
@@ -445,6 +446,73 @@ test("workspaceMenuModel puts current first and dedupes it from recents", () => 
   const m = workspaceMenuModel("/p/sutra", recents, 86_400_000 * 3);
   assert.equal(m[0].kind, "current");
   assert.deepEqual(m.slice(1).map(x => x.name), ["lite"]);
+});
+
+test("workspace-open ownership rejects an older request after a newer root wins", () => {
+  // A is paused at a late await; B has already become the current root. A must
+  // lose ownership even if it targets a root that was previously current.
+  assert.equal(workspaceEffectCurrent(1, 2, "/work/A", "/work/B"), false);
+  assert.equal(workspaceEffectCurrent(2, 2, "/work/B", "/work/B"), true);
+  assert.equal(workspaceEffectCurrent(2, 2, "/work/B", "/work/A"), false);
+});
+
+test("deferred workspace effects keep A out after B owns trust, DOM, MCP, and watcher", () => {
+  // Every deferred boundary receives the same captured owner tuple. This is
+  // deliberately executable: a simulated A completion cannot mutate any
+  // effect after B claims the workspace, while B still can.
+  const effects = ["trust", "automations", "git-dom-and-handlers", "mcp-root", "watcher-and-poll"];
+  const applied: string[] = [];
+  const apply = (effect: string, generation: number, root: string) => {
+    if (workspaceEffectCurrent(generation, 2, root, "/work/B")) applied.push(effect);
+  };
+  for (const effect of effects) apply(`A:${effect}`, 1, "/work/A");
+  for (const effect of effects) apply(`B:${effect}`, 2, "/work/B");
+  assert.deepEqual(applied, effects.map((effect) => `B:${effect}`));
+});
+
+test("renderer reload gets a native generation above retained MCP/watcher ownership", () => {
+  // The native allocator persists for the backend lifetime. A reload must not
+  // restart at 1 after a previous renderer claimed 7.
+  let nativeGeneration = 7;
+  const nextNativeGeneration = () => ++nativeGeneration;
+  const reloadedGeneration = nextNativeGeneration();
+  const acceptsClaim = (generation: number) => generation >= nativeGeneration;
+  assert.equal(reloadedGeneration, 8);
+  assert.equal(acceptsClaim(7), false);
+  assert.equal(acceptsClaim(reloadedGeneration), true);
+
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  assert.match(mainTs, /const requestGeneration = \+\+workspaceOpenRequestGeneration/);
+  assert.match(mainTs, /const generation = await workspaceGenerationNext\(\)/);
+  assert.match(mainTs, /await mcpSetRoot\(dir, generation\)/);
+  assert.match(mainTs, /await watchStart\(dir, generation\)/);
+});
+
+test("late A1 turn hydration cannot overwrite A2 after B intervenes", () => {
+  let activeRequest = 3; // A2 owns after A1 -> B -> A2.
+  let turns: string[] = [];
+  const hydrate = async (request: number, result: string[]) => {
+    await Promise.resolve();
+    if (request !== activeRequest) return;
+    turns = result;
+  };
+  const lateA1 = hydrate(1, ["A1"]);
+  const currentA2 = hydrate(3, ["A2"]);
+  return Promise.all([lateA1, currentA2]).then(() => {
+    assert.deepEqual(turns, ["A2"]);
+    const mainTs = readFileSync("src/main.ts", "utf8");
+    assert.match(mainTs, /async function hydrateTurnsForWorkspace\(root: string, isCurrent: \(\) => boolean\)/);
+    assert.match(mainTs, /const turns = await turnList\(root\);\s*if \(!isCurrent\(\)\) return;\s*replaceTurns\(root, turns\);\s*if \(!isCurrent\(\)\) return;\s*refreshTurnActionConsumers/);
+  });
+});
+
+test("stale workspace tab restoration removes only its clean late completion", () => {
+  const mainTs = readFileSync("src/main.ts", "utf8");
+  const restoreStart = mainTs.indexOf("async function restoreWorkspaceTabs(");
+  const restoreEnd = mainTs.indexOf("\n}\n", restoreStart) + 2;
+  const restore = mainTs.slice(restoreStart, restoreEnd);
+
+  assert.match(restore, /await editor\.openFile\(path\);[\s\S]*?if \(!isCurrent\(\)\) \{[\s\S]*?const openedTab = editor\.tabByPath\(path\);[\s\S]*?!existingTab && openedTab && !openedTab\.dirty[\s\S]*?editor\.closeTab\(openedTab\)/);
 });
 
 test("integrated agent command hint recognizes direct Claude and Codex launches", () => {

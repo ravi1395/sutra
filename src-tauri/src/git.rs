@@ -1,8 +1,14 @@
 // Git baseline lookup and working-tree status for the frontend.
-use git2::{build::CheckoutBuilder, BranchType, Reference, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
+use git2::{
+    build::CheckoutBuilder, BranchType, Reference, Repository, StatusOptions, WorktreeAddOptions,
+    WorktreePruneOptions,
+};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const MAX_READ_FILE_BYTES: usize = 10 * 1024 * 1024;
+const BYTES_PER_MB: usize = 1024 * 1024;
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct StatusEntry {
@@ -171,16 +177,24 @@ pub struct ChangedFile {
     pub status: String,
 }
 
-/// Staged + worktree deltas of `base_tree`-vs-workdir (`_with_index` so
-/// staged-only edits still report), plus untracked files from a status pass
-/// (the with-index diff excludes them). Absolute paths.
+/// Worktree deltas of `base_tree`-vs-workdir, plus untracked files from a
+/// status pass. The returned paths/statuses describe the worktree snapshot
+/// whose bytes the frontend reads; index-only state is deliberately excluded.
 fn tree_vs_workdir_files(
     repo: &Repository,
     workdir: &Path,
     base_tree: Option<&git2::Tree>,
 ) -> Result<Vec<ChangedFile>, String> {
+    // Do not use `*_with_index`: a staged deletion can be followed by a
+    // restored worktree file, which must be reported as its final worktree
+    // state, not as the stale staged deletion.  libgit2 also retains file-mode
+    // and type deltas (including symlinks) without reading files here.
+    let mut opts = git2::DiffOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_typechange(true);
     let diff = repo
-        .diff_tree_to_workdir_with_index(base_tree, None)
+        .diff_tree_to_workdir(base_tree, Some(&mut opts))
         .map_err(|e| e.to_string())?;
 
     let mut statuses = Vec::new();
@@ -190,12 +204,14 @@ fn tree_vs_workdir_files(
             let path = delta.new_file().path().or_else(|| delta.old_file().path());
             if let Some(p) = path {
                 let status_str = match delta.status() {
-                    git2::Delta::Added => "A",
+                    git2::Delta::Added | git2::Delta::Untracked => "A",
                     git2::Delta::Deleted => "D",
-                    git2::Delta::Modified => "M",
-                    git2::Delta::Renamed => "M",
-                    git2::Delta::Copied => "M",
-                    git2::Delta::Typechange => "M",
+                    git2::Delta::Modified
+                    | git2::Delta::Renamed
+                    | git2::Delta::Copied
+                    | git2::Delta::Typechange
+                    | git2::Delta::Unreadable
+                    | git2::Delta::Conflicted => "M",
                     _ => "M",
                 };
                 let full_path = workdir.join(p).to_string_lossy().into_owned();
@@ -210,34 +226,13 @@ fn tree_vs_workdir_files(
         None,
         None,
     )
-    .ok();
-
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-
-    if let Ok(status_list) = repo.statuses(Some(&mut opts)) {
-        for entry in status_list.iter() {
-            if entry.status().contains(git2::Status::WT_NEW) {
-                if let Ok(p) = entry.path() {
-                    let full_path = workdir.join(p).to_string_lossy().into_owned();
-                    if !statuses.iter().any(|s| s.path == full_path) {
-                        statuses.push(ChangedFile {
-                            path: full_path,
-                            status: "A".to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
+    .map_err(|e| e.to_string())?;
 
     Ok(statuses)
 }
 
-/// Files changed relative to git HEAD (the app-wide diff baseline): staged +
-/// worktree modifications plus untracked files. Absolute paths.
+/// Files changed relative to git HEAD (the app-wide diff baseline): worktree
+/// modifications plus untracked files. Absolute paths.
 #[tauri::command]
 pub fn git_changed_files(root: String) -> Result<Vec<ChangedFile>, String> {
     let repo = match Repository::discover(&root) {
@@ -272,9 +267,9 @@ pub struct BranchDiffFiles {
     pub files: Vec<ChangedFile>,
 }
 
-/// Branch-review file list: everything the branch has done — committed work,
-/// staged, worktree edits, untracked — relative to the merge-base of HEAD and
-/// the first of origin/main / origin/master / main that resolves. Merge-base
+/// Branch-review file list: everything visible in the branch's committed tree
+/// or worktree — committed work, worktree edits, untracked — relative to the
+/// nearest valid merge-base of HEAD and main/master candidates. Merge-base
 /// (not base tip) so commits landing on main after the fork never show up as
 /// branch changes. Errors (no base ref, unborn HEAD, no merge base) surface to
 /// the UI as a status line rather than an empty list.
@@ -290,23 +285,35 @@ pub fn git_branch_diff_files(root: String) -> Result<BranchDiffFiles, String> {
         .ok()
         .and_then(|h| h.target())
         .ok_or("no commits on HEAD yet")?;
-    let (base_name, base_oid) = ["origin/main", "origin/master", "main"]
-        .iter()
-        .find_map(|name| {
-            let reference = repo.resolve_reference_from_short_name(name).ok()?;
-            Some(((*name).to_string(), reference.peel_to_commit().ok()?.id()))
-        })
-        .ok_or("no base ref found (tried origin/main, origin/master, main)")?;
-    let merge_base = repo
-        .merge_base(head_oid, base_oid)
-        .map_err(|e| format!("no merge base with {base_name}: {}", e.message()))?;
+    let mut candidates = Vec::new();
+    for name in ["origin/main", "origin/master", "main", "master"] {
+        let Ok(reference) = repo.resolve_reference_from_short_name(name) else {
+            continue;
+        };
+        let Ok(base_oid) = reference.peel_to_commit().map(|commit| commit.id()) else {
+            continue;
+        };
+        let Ok(merge_base) = repo.merge_base(head_oid, base_oid) else {
+            continue;
+        };
+        let Ok((ahead, _)) = repo.graph_ahead_behind(head_oid, merge_base) else {
+            continue;
+        };
+        candidates.push((ahead, name, merge_base));
+    }
+    let (_, base_name, merge_base) = candidates
+        .into_iter()
+        .min_by_key(|(ahead, _, _)| *ahead)
+        .ok_or(
+            "no base ref with merge base found (tried origin/main, origin/master, main, master)",
+        )?;
     let base_tree = repo
         .find_commit(merge_base)
         .and_then(|c| c.tree())
         .map_err(|e| e.to_string())?;
     let files = tree_vs_workdir_files(&repo, &workdir, Some(&base_tree))?;
     Ok(BranchDiffFiles {
-        base: base_name,
+        base: base_name.to_string(),
         oid: merge_base.to_string(),
         files,
     })
@@ -318,7 +325,11 @@ pub fn git_branch_diff_files(root: String) -> Result<BranchDiffFiles, String> {
 /// hard error: the caller passed a commit id it got from git_branch_diff_files,
 /// so a miss means state drift, not a normal empty baseline.
 #[tauri::command]
-pub fn git_commit_content(root: String, oid: String, path: String) -> Result<Option<String>, String> {
+pub fn git_commit_content(
+    root: String,
+    oid: String,
+    path: String,
+) -> Result<Option<String>, String> {
     let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
     let workdir = repo
         .workdir()
@@ -336,9 +347,17 @@ pub fn git_commit_content(root: String, oid: String, path: String) -> Result<Opt
     match tree.get_path(rel) {
         Ok(entry) => {
             let obj = entry.to_object(&repo).map_err(|e| e.to_string())?;
-            Ok(obj
-                .as_blob()
-                .map(|blob| String::from_utf8_lossy(blob.content()).into_owned()))
+            let Some(blob) = obj.as_blob() else {
+                return Ok(None);
+            };
+            let bytes = blob.content();
+            if bytes.len() > MAX_READ_FILE_BYTES {
+                let mb = (bytes.len() + BYTES_PER_MB - 1) / BYTES_PER_MB;
+                return Err(format!("file too large to open ({mb} MB)"));
+            }
+            String::from_utf8(bytes.to_vec())
+                .map(Some)
+                .map_err(|_| "binary file".to_string())
         }
         Err(_) => Ok(None),
     }
@@ -362,10 +381,14 @@ fn canon(p: &Path) -> PathBuf {
 fn resolved_target_parent(parent: &Path) -> Result<PathBuf, String> {
     let mut existing = parent;
     while !existing.exists() {
-        existing = existing.parent().ok_or("Choose a target directory with a parent folder.")?;
+        existing = existing
+            .parent()
+            .ok_or("Choose a target directory with a parent folder.")?;
     }
     let suffix = parent.strip_prefix(existing).map_err(|e| e.to_string())?;
-    Ok(fs::canonicalize(existing).map_err(|e| e.to_string())?.join(suffix))
+    Ok(fs::canonicalize(existing)
+        .map_err(|e| e.to_string())?
+        .join(suffix))
 }
 
 /// Resolve the main working tree path for the repo behind `root`.
@@ -451,7 +474,10 @@ fn worktree_head_branch(path: &Path) -> Option<String> {
 /// Names of branches checked out in a worktree whose path differs from
 /// `root_canon`. Covers the main working tree (never in `repo.worktrees()`)
 /// plus every linked worktree.
-fn branches_bound_elsewhere(repo: &Repository, root_canon: &Path) -> std::collections::HashSet<String> {
+fn branches_bound_elsewhere(
+    repo: &Repository,
+    root_canon: &Path,
+) -> std::collections::HashSet<String> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Some(mp) = main_workdir(repo) {
         paths.push(mp);
@@ -540,7 +566,9 @@ fn cleanup_created_worktree(repo: &Repository, worktree: &git2::Worktree, branch
     let mut options = WorktreePruneOptions::new();
     options.valid(true).working_tree(true).locked(true);
     let _ = worktree.prune(Some(&mut options));
-    let _ = repo.find_reference(branch_ref).and_then(|mut reference| reference.delete());
+    let _ = repo
+        .find_reference(branch_ref)
+        .and_then(|mut reference| reference.delete());
 }
 
 /// Create a new branch and linked worktree without changing the caller's
@@ -553,17 +581,27 @@ pub fn git_create_worktree(
     target: String,
     base_ref: String,
 ) -> Result<CreatedWorktree, String> {
-    let repo = Repository::discover(&root).map_err(|_| "This folder is not a Git repository.".to_string())?;
-    let workdir = repo.workdir().ok_or("Bare repositories cannot create a worktree.")?;
+    let repo = Repository::discover(&root)
+        .map_err(|_| "This folder is not a Git repository.".to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("Bare repositories cannot create a worktree.")?;
     if canon(Path::new(&root)) != canon(workdir) {
         return Err("Open the repository root before creating a worktree.".to_string());
     }
     if repo.is_worktree() {
-        return Err("Create worktrees from the primary checkout, not a linked worktree.".to_string());
+        return Err(
+            "Create worktrees from the primary checkout, not a linked worktree.".to_string(),
+        );
     }
-    let head = repo.head().map_err(|_| "The repository has an unborn HEAD; create an initial commit first.".to_string())?;
+    let head = repo.head().map_err(|_| {
+        "The repository has an unborn HEAD; create an initial commit first.".to_string()
+    })?;
     if !head.is_branch() {
-        return Err("The repository is detached; check out a branch before creating a worktree.".to_string());
+        return Err(
+            "The repository is detached; check out a branch before creating a worktree."
+                .to_string(),
+        );
     }
 
     let branch = branch.trim();
@@ -572,7 +610,9 @@ pub fn git_create_worktree(
         return Err("Enter a valid local branch name.".to_string());
     }
     if repo.find_reference(&branch_ref).is_ok() {
-        return Err(format!("Branch {branch} already exists or is checked out in a worktree."));
+        return Err(format!(
+            "Branch {branch} already exists or is checked out in a worktree."
+        ));
     }
 
     let target = PathBuf::from(target);
@@ -590,7 +630,9 @@ pub fn git_create_worktree(
     if repo.find_worktree(worktree_name).is_ok() {
         return Err("A worktree already uses that target directory name.".to_string());
     }
-    let target_parent = target.parent().ok_or("Choose a target directory with a parent folder.")?;
+    let target_parent = target
+        .parent()
+        .ok_or("Choose a target directory with a parent folder.")?;
     if resolved_target_parent(target_parent)?.starts_with(canon(workdir)) {
         return Err("Choose a worktree target outside the primary checkout.".to_string());
     }
@@ -609,7 +651,9 @@ pub fn git_create_worktree(
     // Supplying the just-created reference keeps the selected branch and base
     // explicit while leaving the primary HEAD and index untouched.
     fs::create_dir_all(target_parent).map_err(|e| e.to_string())?;
-    let new_branch = repo.branch(branch, &base, false).map_err(|e| e.to_string())?;
+    let new_branch = repo
+        .branch(branch, &base, false)
+        .map_err(|e| e.to_string())?;
     let mut options = WorktreeAddOptions::new();
     options.reference(Some(new_branch.get()));
     let worktree = match repo.worktree(worktree_name, &target, Some(&options)) {
@@ -636,7 +680,9 @@ pub fn git_create_worktree(
             // still finds it stuck there on retry.
             let _ = fs::remove_dir_all(repo.path().join("worktrees").join(worktree_name));
             let _ = fs::remove_dir_all(&target);
-            let _ = repo.find_reference(&branch_ref).and_then(|mut reference| reference.delete());
+            let _ = repo
+                .find_reference(&branch_ref)
+                .and_then(|mut reference| reference.delete());
             return Err(error.to_string());
         }
     };
@@ -676,7 +722,9 @@ pub struct RemovedWorktree {
 fn worktree_has_user_changes(path: &Path) -> Result<bool, String> {
     let entries = git_status(path.to_string_lossy().into_owned())?;
     Ok(entries.iter().any(|entry| {
-        let relative = Path::new(&entry.path).strip_prefix(path).unwrap_or(Path::new(&entry.path));
+        let relative = Path::new(&entry.path)
+            .strip_prefix(path)
+            .unwrap_or(Path::new(&entry.path));
         relative != Path::new(".sutra/task-link.json")
     }))
 }
@@ -685,7 +733,11 @@ fn worktree_has_user_changes(path: &Path) -> Result<bool, String> {
 /// `discard` is the explicit destructive confirmation for dirty or locked
 /// worktrees. Missing paths are reported and never recreated.
 #[tauri::command]
-pub fn git_remove_worktree(root: String, target: String, discard: bool) -> Result<RemovedWorktree, String> {
+pub fn git_remove_worktree(
+    root: String,
+    target: String,
+    discard: bool,
+) -> Result<RemovedWorktree, String> {
     let repo = Repository::discover(&root).map_err(|e| e.to_string())?;
     let main = main_workdir(&repo).ok_or("Repository has no primary working tree.")?;
     let root_canon = canon(Path::new(&root));
@@ -701,7 +753,9 @@ pub fn git_remove_worktree(root: String, target: String, discard: bool) -> Resul
     let mut found: Option<(String, PathBuf)> = None;
     if let Ok(names) = repo.worktrees() {
         for name_result in names.iter() {
-            let Some(name) = name_result.ok().flatten() else { continue };
+            let Some(name) = name_result.ok().flatten() else {
+                continue;
+            };
             let worktree = repo.find_worktree(name).map_err(|e| e.to_string())?;
             if canon(worktree.path()) == target_canon || worktree.path() == target_path {
                 found = Some((name.to_string(), worktree.path().to_path_buf()));
@@ -711,23 +765,41 @@ pub fn git_remove_worktree(root: String, target: String, discard: bool) -> Resul
     }
     let Some((name, worktree_path)) = found else {
         if !target_path.exists() {
-            return Ok(RemovedWorktree { path: target, status: "missing".to_string(), dirty: false });
+            return Ok(RemovedWorktree {
+                path: target,
+                status: "missing".to_string(),
+                dirty: false,
+            });
         }
         return Err("Target is not a linked worktree of the primary checkout.".to_string());
     };
 
     if !worktree_path.exists() {
-        return Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "missing".to_string(), dirty: false });
+        return Ok(RemovedWorktree {
+            path: worktree_path.to_string_lossy().into_owned(),
+            status: "missing".to_string(),
+            dirty: false,
+        });
     }
     let dirty = worktree_has_user_changes(&worktree_path)?;
     if dirty && !discard {
-        return Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "dirty".to_string(), dirty: true });
+        return Ok(RemovedWorktree {
+            path: worktree_path.to_string_lossy().into_owned(),
+            status: "dirty".to_string(),
+            dirty: true,
+        });
     }
     let worktree = repo.find_worktree(&name).map_err(|e| e.to_string())?;
     let mut options = WorktreePruneOptions::new();
     options.valid(true).working_tree(true).locked(discard);
-    worktree.prune(Some(&mut options)).map_err(|e| e.to_string())?;
-    Ok(RemovedWorktree { path: worktree_path.to_string_lossy().into_owned(), status: "removed".to_string(), dirty })
+    worktree
+        .prune(Some(&mut options))
+        .map_err(|e| e.to_string())?;
+    Ok(RemovedWorktree {
+        path: worktree_path.to_string_lossy().into_owned(),
+        status: "removed".to_string(),
+        dirty,
+    })
 }
 
 // --- Explicit stage/unstage/commit (G2) ---
@@ -814,7 +886,11 @@ pub fn git_unstage_files(root: String, paths: Vec<String>) -> Result<(), String>
         .iter()
         .map(|p| relative_to_workdir(&workdir, p))
         .collect::<Result<Vec<_>, _>>()?;
-    match repo.head().ok().and_then(|h| h.peel(git2::ObjectType::Commit).ok()) {
+    match repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel(git2::ObjectType::Commit).ok())
+    {
         Some(head_commit) => {
             let specs = rels.iter().map(|p| p.to_string_lossy().into_owned());
             repo.reset_default(Some(&head_commit), specs)
@@ -894,10 +970,16 @@ pub fn git_index_status(root: String) -> Result<IndexStatus, String> {
         };
         let full = workdir.join(rel).to_string_lossy().into_owned();
         if flags.intersects(index_mask) {
-            staged.push(StatusEntry { path: full.clone(), status: index_status_letter(flags).to_string() });
+            staged.push(StatusEntry {
+                path: full.clone(),
+                status: index_status_letter(flags).to_string(),
+            });
         }
         if flags.intersects(wt_mask) {
-            unstaged.push(StatusEntry { path: full, status: worktree_status_letter(flags).to_string() });
+            unstaged.push(StatusEntry {
+                path: full,
+                status: worktree_status_letter(flags).to_string(),
+            });
         }
     }
     Ok(IndexStatus { staged, unstaged })
@@ -932,7 +1014,9 @@ pub fn git_commit(root: String, message: String) -> Result<String, String> {
 
     let mut index = repo.index().map_err(|e| e.to_string())?;
     if index.has_conflicts() {
-        return Err("Index has unresolved merge conflicts; resolve them before committing.".to_string());
+        return Err(
+            "Index has unresolved merge conflicts; resolve them before committing.".to_string(),
+        );
     }
     if index.len() == 0 {
         return Err("Nothing staged; stage files before committing.".to_string());
@@ -953,7 +1037,14 @@ pub fn git_commit(root: String, message: String) -> Result<String, String> {
 
     let parents: Vec<&git2::Commit> = parent.iter().collect();
     let oid = repo
-        .commit(Some("HEAD"), &signature, &signature, message, &tree, &parents)
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parents,
+        )
         .map_err(|e| e.to_string())?;
     Ok(oid.to_string())
 }
@@ -1029,7 +1120,10 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let wt = dir.path().join("wt-feature");
-        run(dir.path(), &["worktree", "add", wt.to_str().unwrap(), "feature"]);
+        run(
+            dir.path(),
+            &["worktree", "add", wt.to_str().unwrap(), "feature"],
+        );
 
         let branches = git_branches(root).unwrap();
         let feature = branches.iter().find(|b| b.name == "feature").unwrap();
@@ -1038,7 +1132,10 @@ mod tests {
             "feature is HEAD of a linked worktree"
         );
         let main_b = branches.iter().find(|b| b.name == "main").unwrap();
-        assert!(!main_b.in_other_worktree, "main is the current root's branch");
+        assert!(
+            !main_b.in_other_worktree,
+            "main is the current root's branch"
+        );
         assert!(main_b.is_current);
     }
 
@@ -1056,7 +1153,11 @@ mod tests {
         run(p, &["commit", "-qm", "feature work"]);
 
         let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
-        assert_eq!(files.len(), 0, "clean tree vs HEAD → no rows, got {files:?}");
+        assert_eq!(
+            files.len(),
+            0,
+            "clean tree vs HEAD → no rows, got {files:?}"
+        );
     }
 
     #[test]
@@ -1071,9 +1172,109 @@ mod tests {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let rel: Vec<(String, String)> = files
             .iter()
-            .map(|f| (Path::new(&f.path).file_name().unwrap().to_string_lossy().into_owned(), f.status.clone()))
+            .map(|f| {
+                (
+                    Path::new(&f.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    f.status.clone(),
+                )
+            })
             .collect();
-        assert_eq!(rel, vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]);
+        assert_eq!(
+            rel,
+            vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]
+        );
+    }
+
+    #[test]
+    fn changed_files_follow_final_worktree_not_stale_index_entries() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "staged edit\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        fs::write(p.join("a.txt"), "hello\n").unwrap();
+        assert!(git_changed_files(p.to_string_lossy().into_owned())
+            .unwrap()
+            .is_empty());
+
+        run(p, &["rm", "-f", "a.txt"]);
+        fs::write(p.join("a.txt"), "hello\n").unwrap();
+        assert!(git_changed_files(p.to_string_lossy().into_owned())
+            .unwrap()
+            .is_empty());
+
+        fs::write(p.join("a.txt"), "recreated different bytes\n").unwrap();
+        let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, "M");
+    }
+
+    #[test]
+    fn changed_files_reports_oversized_tracked_file_as_modified() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        let file = fs::File::create(p.join("a.txt")).unwrap();
+        file.set_len((MAX_READ_FILE_BYTES + 1) as u64).unwrap();
+
+        let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].path.ends_with("a.txt"));
+        assert_eq!(files[0].status, "M");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_files_preserves_symlink_and_executable_mode_changes() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = repo_with_branch();
+        let p = dir.path();
+        run(p, &["config", "core.filemode", "true"]);
+
+        fs::remove_file(p.join("a.txt")).unwrap();
+        symlink("target", p.join("a.txt")).unwrap();
+        let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(files.len(), 1, "symlink typechange must remain visible");
+        assert_eq!(files[0].status, "M");
+
+        fs::remove_file(p.join("a.txt")).unwrap();
+        fs::write(p.join("a.txt"), "hello\n").unwrap();
+        fs::set_permissions(p.join("a.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+        let files = git_changed_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "executable-bit-only change must remain visible"
+        );
+        assert_eq!(files[0].status, "M");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_files_does_not_fabricate_deletion_for_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = repo_with_branch();
+        let p = dir.path();
+        let path = p.join("a.txt");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Privileged test runners can still open mode-000 files. In that case
+        // this fixture cannot establish an unreadable-content condition.
+        if fs::File::open(&path).is_ok() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+
+        let error = git_changed_files(p.to_string_lossy().into_owned()).unwrap_err();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            error.contains("Permission denied") || error.contains("locked"),
+            "unreadable content must surface an I/O error, never a fabricated D: {error}"
+        );
     }
 
     #[test]
@@ -1097,10 +1298,66 @@ mod tests {
         let mut rel: Vec<(String, String)> = bd
             .files
             .iter()
-            .map(|f| (Path::new(&f.path).file_name().unwrap().to_string_lossy().into_owned(), f.status.clone()))
+            .map(|f| {
+                (
+                    Path::new(&f.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    f.status.clone(),
+                )
+            })
             .collect();
         rel.sort();
-        assert_eq!(rel, vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]);
+        assert_eq!(
+            rel,
+            vec![("a.txt".into(), "M".into()), ("new.txt".into(), "A".into())]
+        );
+    }
+
+    #[test]
+    fn branch_diff_prefers_nearest_merge_base_over_stale_origin_main() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        let initial = Repository::discover(p)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        fs::write(p.join("main-only.txt"), "local main\n").unwrap();
+        run(p, &["add", "main-only.txt"]);
+        run(p, &["commit", "-qm", "local main advances"]);
+        run(p, &["branch", "feature-near"]);
+        run(p, &["checkout", "-q", "feature-near"]);
+        fs::write(p.join("feature-only.txt"), "feature\n").unwrap();
+        run(p, &["add", "feature-only.txt"]);
+        run(p, &["commit", "-qm", "feature work"]);
+        Repository::discover(p)
+            .unwrap()
+            .reference(
+                "refs/remotes/origin/main",
+                initial,
+                true,
+                "test stale remote",
+            )
+            .unwrap();
+
+        let bd = git_branch_diff_files(p.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(bd.base, "main");
+        let names: Vec<_> = bd
+            .files
+            .iter()
+            .map(|file| {
+                Path::new(&file.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["feature-only.txt"]);
     }
 
     #[test]
@@ -1116,14 +1373,80 @@ mod tests {
         let root = p.to_string_lossy().into_owned();
         let bd = git_branch_diff_files(root.clone()).unwrap();
         // Paths straight from the file list — exactly what the frontend passes back.
-        let a_path = bd.files.iter().find(|f| f.path.ends_with("a.txt")).unwrap().path.clone();
-        let new_path = bd.files.iter().find(|f| f.path.ends_with("new.txt")).unwrap().path.clone();
+        let a_path = bd
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("a.txt"))
+            .unwrap()
+            .path
+            .clone();
+        let new_path = bd
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("new.txt"))
+            .unwrap()
+            .path
+            .clone();
 
         let base = git_commit_content(root.clone(), bd.oid.clone(), a_path).unwrap();
-        assert_eq!(base.as_deref(), Some("hello\n"), "blob at fork point, not branch tip");
+        assert_eq!(
+            base.as_deref(),
+            Some("hello\n"),
+            "blob at fork point, not branch tip"
+        );
         let missing = git_commit_content(root.clone(), bd.oid.clone(), new_path).unwrap();
         assert_eq!(missing, None, "file absent at merge-base → no baseline");
         assert!(git_commit_content(root, "not-a-sha".into(), "x".into()).is_err());
+    }
+
+    #[test]
+    fn commit_content_rejects_binary_and_oversized_blobs() {
+        let dir = repo_with_branch();
+        let p = dir.path();
+        let workdir = Repository::discover(p)
+            .unwrap()
+            .workdir()
+            .unwrap()
+            .to_path_buf();
+        let root = workdir.to_string_lossy().into_owned();
+        fs::write(p.join("binary.bin"), [0xff, 0x00, 0xfe]).unwrap();
+        run(p, &["add", "binary.bin"]);
+        run(p, &["commit", "-qm", "binary blob"]);
+        let binary_oid = Repository::discover(p)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(
+            git_commit_content(
+                root.clone(),
+                binary_oid.to_string(),
+                workdir.join("binary.bin").to_string_lossy().into_owned()
+            )
+            .unwrap_err(),
+            "binary file"
+        );
+
+        let huge = fs::File::create(p.join("huge.txt")).unwrap();
+        huge.set_len((MAX_READ_FILE_BYTES + 1) as u64).unwrap();
+        run(p, &["add", "huge.txt"]);
+        run(p, &["commit", "-qm", "huge blob"]);
+        let huge_oid = Repository::discover(p)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(
+            git_commit_content(
+                root,
+                huge_oid.to_string(),
+                workdir.join("huge.txt").to_string_lossy().into_owned()
+            )
+            .unwrap_err(),
+            "file too large to open (11 MB)"
+        );
     }
 
     #[test]
@@ -1147,28 +1470,58 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let before_head = git_branch(root.clone()).unwrap();
         let before_status = git_status(root.clone()).unwrap();
-        let target = dir.path().parent().unwrap().join(format!(".sutra-worktrees/{}-task-one", dir.path().file_name().unwrap().to_string_lossy()));
+        let target = dir.path().parent().unwrap().join(format!(
+            ".sutra-worktrees/{}-task-one",
+            dir.path().file_name().unwrap().to_string_lossy()
+        ));
 
-        let created = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        let created = git_create_worktree(
+            root.clone(),
+            "task/one".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
 
         assert_eq!(created.branch, "task/one");
         assert_eq!(canon(Path::new(&created.path)), canon(&target));
         assert_eq!(git_branch(root.clone()).unwrap(), before_head);
         assert_eq!(git_status(root).unwrap(), before_status);
-        assert_eq!(Repository::discover(&created.path).unwrap().head().unwrap().shorthand().unwrap(), "task/one");
+        assert_eq!(
+            Repository::discover(&created.path)
+                .unwrap()
+                .head()
+                .unwrap()
+                .shorthand()
+                .unwrap(),
+            "task/one"
+        );
     }
 
     #[test]
     fn git_create_worktree_rejects_invalid_input_before_writing() {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
-        let target = dir.path().parent().unwrap().join(".sutra-worktrees/invalid");
+        let target = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join(".sutra-worktrees/invalid");
 
-        let error = git_create_worktree(root.clone(), "bad..branch".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+        let error = git_create_worktree(
+            root.clone(),
+            "bad..branch".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("valid local branch"));
         assert!(!target.exists());
-        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/bad..branch").is_err());
+        assert!(Repository::discover(&root)
+            .unwrap()
+            .find_reference("refs/heads/bad..branch")
+            .is_err());
     }
 
     #[test]
@@ -1177,11 +1530,20 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let target = dir.path().join(".sutra-worktrees/task-one");
 
-        let error = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+        let error = git_create_worktree(
+            root.clone(),
+            "task/one".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("outside the primary checkout"));
         assert!(!target.exists());
-        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/task/one").is_err());
+        assert!(Repository::discover(&root)
+            .unwrap()
+            .find_reference("refs/heads/task/one")
+            .is_err());
     }
 
     #[cfg(unix)]
@@ -1196,11 +1558,20 @@ mod tests {
         symlink(dir.path(), &link).unwrap();
         let target = link.join("new-worktree");
 
-        let error = git_create_worktree(root.clone(), "task/one".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap_err();
+        let error = git_create_worktree(
+            root.clone(),
+            "task/one".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("outside the primary checkout"));
         assert!(!target.exists());
-        assert!(Repository::discover(&root).unwrap().find_reference("refs/heads/task/one").is_err());
+        assert!(Repository::discover(&root)
+            .unwrap()
+            .find_reference("refs/heads/task/one")
+            .is_err());
     }
 
     #[test]
@@ -1208,18 +1579,29 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let target = dir.path().parent().unwrap().join("wt-remove-dirty");
-        git_create_worktree(root.clone(), "task/remove-dirty".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        git_create_worktree(
+            root.clone(),
+            "task/remove-dirty".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
         fs::write(target.join("changed.txt"), "dirty\n").unwrap();
 
-        let probe = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false).unwrap();
+        let probe = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false)
+            .unwrap();
         assert_eq!(probe.status, "dirty");
         assert!(probe.dirty);
         assert!(target.exists());
 
-        let removed = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), true).unwrap();
+        let removed =
+            git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), true).unwrap();
         assert_eq!(removed.status, "removed");
         assert!(!target.exists());
-        assert!(Repository::open(&dir).unwrap().find_branch("task/remove-dirty", BranchType::Local).is_ok());
+        assert!(Repository::open(&dir)
+            .unwrap()
+            .find_branch("task/remove-dirty", BranchType::Local)
+            .is_ok());
     }
 
     #[test]
@@ -1227,11 +1609,18 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let target = dir.path().parent().unwrap().join("wt-remove-link");
-        git_create_worktree(root.clone(), "task/remove-link".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        git_create_worktree(
+            root.clone(),
+            "task/remove-link".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
         fs::create_dir_all(target.join(".sutra")).unwrap();
         fs::write(target.join(".sutra/task-link.json"), "{}\n").unwrap();
 
-        let removed = git_remove_worktree(root, target.to_string_lossy().into_owned(), false).unwrap();
+        let removed =
+            git_remove_worktree(root, target.to_string_lossy().into_owned(), false).unwrap();
         assert_eq!(removed.status, "removed");
         assert!(!target.exists());
     }
@@ -1241,12 +1630,20 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let target = dir.path().parent().unwrap().join("wt-create-cleanup");
-        git_create_worktree(root.clone(), "task/create-cleanup".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        git_create_worktree(
+            root.clone(),
+            "task/create-cleanup".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
         let repo = Repository::open(&dir).unwrap();
         let worktree = repo.find_worktree("wt-create-cleanup").unwrap();
         cleanup_created_worktree(&repo, &worktree, "refs/heads/task/create-cleanup");
         assert!(!target.exists());
-        assert!(repo.find_reference("refs/heads/task/create-cleanup").is_err());
+        assert!(repo
+            .find_reference("refs/heads/task/create-cleanup")
+            .is_err());
     }
 
     #[cfg(unix)]
@@ -1259,8 +1656,16 @@ mod tests {
         // Unique per-test-run name (like the sibling tests above): `dir`'s
         // parent is the shared OS temp root, so a fixed leaf name would
         // collide with other tests running concurrently in this process.
-        let worktree_name = format!("leak-target-{}", dir.path().file_name().unwrap().to_string_lossy());
-        let target = dir.path().parent().unwrap().join(".sutra-worktrees").join(&worktree_name);
+        let worktree_name = format!(
+            "leak-target-{}",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        let target = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join(".sutra-worktrees")
+            .join(&worktree_name);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         // A dangling symlink at the leaf passes `target.exists()` (which
         // follows symlinks and reports false when the destination is
@@ -1270,10 +1675,21 @@ mod tests {
         // entry -- reproducing the disk-full / checkout-conflict failure
         // mode from W1 without needing to fake a real disk-full condition.
         symlink(dir.path().join("does-not-exist"), &target).unwrap();
-        assert!(!target.exists(), "dangling symlink must not trip the early exists() preflight");
+        assert!(
+            !target.exists(),
+            "dangling symlink must not trip the early exists() preflight"
+        );
 
-        let error = git_create_worktree(root.clone(), "task/leak".into(), target.to_string_lossy().into_owned(), "HEAD".into());
-        assert!(error.is_err(), "checkout onto the occupied leaf name still fails");
+        let error = git_create_worktree(
+            root.clone(),
+            "task/leak".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        );
+        assert!(
+            error.is_err(),
+            "checkout onto the occupied leaf name still fails"
+        );
 
         let repo = Repository::open(&dir).unwrap();
         // `find_worktree(...).is_err()` alone would pass even for a leaked
@@ -1283,13 +1699,22 @@ mod tests {
             !repo.path().join("worktrees").join(&worktree_name).exists(),
             "the admin dir must not be leaked"
         );
-        assert!(repo.find_reference("refs/heads/task/leak").is_err(), "the branch must not be leaked");
+        assert!(
+            repo.find_reference("refs/heads/task/leak").is_err(),
+            "the branch must not be leaked"
+        );
 
         // The fix's own best-effort cleanup already clears the blocking leaf
         // (`fs::remove_dir_all` on the dangling symlink); a leftover from an
         // unpatched build would still need this before retrying.
         let _ = fs::remove_file(&target);
-        let retried = git_create_worktree(root, "task/leak".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        let retried = git_create_worktree(
+            root,
+            "task/leak".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
         assert_eq!(retried.branch, "task/leak");
     }
 
@@ -1298,14 +1723,25 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         let target = dir.path().parent().unwrap().join("wt-remove-missing");
-        git_create_worktree(root.clone(), "task/remove-missing".into(), target.to_string_lossy().into_owned(), "HEAD".into()).unwrap();
+        git_create_worktree(
+            root.clone(),
+            "task/remove-missing".into(),
+            target.to_string_lossy().into_owned(),
+            "HEAD".into(),
+        )
+        .unwrap();
         fs::remove_dir_all(&target).unwrap();
 
-        let result = git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false).unwrap();
+        let result =
+            git_remove_worktree(root.clone(), target.to_string_lossy().into_owned(), false)
+                .unwrap();
         assert_eq!(result.status, "missing");
         assert!(!target.exists());
         assert_eq!(git_branch(root.clone()).unwrap().as_deref(), Some("main"));
-        assert!(Repository::open(&dir).unwrap().find_branch("task/remove-missing", BranchType::Local).is_ok());
+        assert!(Repository::open(&dir)
+            .unwrap()
+            .find_branch("task/remove-missing", BranchType::Local)
+            .is_ok());
     }
 
     // --- G2: stage/unstage/commit ---
@@ -1328,7 +1764,11 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
-        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        git_stage_files(
+            root.clone(),
+            vec![dir.path().join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
         let before = fs::read(dir.path().join(".git/index")).unwrap();
 
         git_unstage_files(root, vec![]).unwrap();
@@ -1346,13 +1786,28 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
         fs::write(dir.path().join("b.txt"), "new\n").unwrap();
 
-        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        git_stage_files(
+            root.clone(),
+            vec![dir.path().join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
 
         let status = git_index_status(root).unwrap();
-        assert_eq!(status.staged.len(), 1, "only the named path is staged: {:?}", status.staged);
+        assert_eq!(
+            status.staged.len(),
+            1,
+            "only the named path is staged: {:?}",
+            status.staged
+        );
         assert!(status.staged[0].path.ends_with("a.txt"));
-        assert!(status.unstaged.iter().any(|s| s.path.ends_with("b.txt")), "b.txt stays untracked");
-        assert!(!status.unstaged.iter().any(|s| s.path.ends_with("a.txt")), "a.txt is fully staged, not also unstaged");
+        assert!(
+            status.unstaged.iter().any(|s| s.path.ends_with("b.txt")),
+            "b.txt stays untracked"
+        );
+        assert!(
+            !status.unstaged.iter().any(|s| s.path.ends_with("a.txt")),
+            "a.txt is fully staged, not also unstaged"
+        );
     }
 
     #[test]
@@ -1368,8 +1823,14 @@ mod tests {
         git_unstage_files(root.clone(), vec![a]).unwrap();
 
         let status = git_index_status(root).unwrap();
-        assert!(!status.staged.iter().any(|s| s.path.ends_with("a.txt")), "a.txt was unstaged");
-        assert!(status.staged.iter().any(|s| s.path.ends_with("b.txt")), "b.txt stays staged");
+        assert!(
+            !status.staged.iter().any(|s| s.path.ends_with("a.txt")),
+            "a.txt was unstaged"
+        );
+        assert!(
+            status.staged.iter().any(|s| s.path.ends_with("b.txt")),
+            "b.txt stays staged"
+        );
     }
 
     #[test]
@@ -1378,10 +1839,18 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         fs::remove_file(dir.path().join("a.txt")).unwrap();
 
-        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        git_stage_files(
+            root.clone(),
+            vec![dir.path().join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
 
         let status = git_index_status(root).unwrap();
-        let a = status.staged.iter().find(|s| s.path.ends_with("a.txt")).unwrap();
+        let a = status
+            .staged
+            .iter()
+            .find(|s| s.path.ends_with("a.txt"))
+            .unwrap();
         assert_eq!(a.status, "D");
     }
 
@@ -1390,8 +1859,17 @@ mod tests {
         let dir = repo_with_branch();
         let root = dir.path().to_string_lossy().into_owned();
         fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
-        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
-        let before = Repository::open(dir.path()).unwrap().head().unwrap().target().unwrap();
+        git_stage_files(
+            root.clone(),
+            vec![dir.path().join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        let before = Repository::open(dir.path())
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
 
         let oid = git_commit(root.clone(), "update a".into()).unwrap();
 
@@ -1399,8 +1877,14 @@ mod tests {
         let head_oid = repo.head().unwrap().target().unwrap();
         assert_eq!(head_oid.to_string(), oid);
         assert_ne!(head_oid, before, "HEAD advanced");
-        assert_eq!(repo.find_commit(head_oid).unwrap().message().unwrap(), "update a");
-        assert!(git_index_status(root).unwrap().staged.is_empty(), "index now matches HEAD");
+        assert_eq!(
+            repo.find_commit(head_oid).unwrap().message().unwrap(),
+            "update a"
+        );
+        assert!(
+            git_index_status(root).unwrap().staged.is_empty(),
+            "index now matches HEAD"
+        );
     }
 
     #[test]
@@ -1416,8 +1900,14 @@ mod tests {
 
         let err = git_commit(root, "empty".into()).unwrap_err();
 
-        assert!(err.to_lowercase().contains("staged") || err.to_lowercase().contains("empty"), "got: {err}");
-        assert!(Repository::open(p).unwrap().head().is_err(), "HEAD must stay unborn");
+        assert!(
+            err.to_lowercase().contains("staged") || err.to_lowercase().contains("empty"),
+            "got: {err}"
+        );
+        assert!(
+            Repository::open(p).unwrap().head().is_err(),
+            "HEAD must stay unborn"
+        );
     }
 
     #[test]
@@ -1439,12 +1929,24 @@ mod tests {
             .success();
         assert!(!merge_ok, "merge of diverging changes must conflict");
         let root = dir.path().to_string_lossy().into_owned();
-        let before = Repository::open(dir.path()).unwrap().head().unwrap().target();
+        let before = Repository::open(dir.path())
+            .unwrap()
+            .head()
+            .unwrap()
+            .target();
 
         let err = git_commit(root.clone(), "should not happen".into()).unwrap_err();
 
         assert!(err.to_lowercase().contains("conflict"), "got: {err}");
-        assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap().target(), before, "HEAD must not move");
+        assert_eq!(
+            Repository::open(dir.path())
+                .unwrap()
+                .head()
+                .unwrap()
+                .target(),
+            before,
+            "HEAD must not move"
+        );
     }
 
     #[test]
@@ -1465,7 +1967,11 @@ mod tests {
         }
         fs::write(p.join("a.txt"), "hello\n").unwrap();
         let root = p.to_string_lossy().into_owned();
-        git_stage_files(root.clone(), vec![p.join("a.txt").to_string_lossy().into_owned()]).unwrap();
+        git_stage_files(
+            root.clone(),
+            vec![p.join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
 
         let result = git_commit(root, "test commit".into());
 
@@ -1484,12 +1990,28 @@ mod tests {
         run(dir.path(), &["config", "commit.gpgsign", "true"]);
         let root = dir.path().to_string_lossy().into_owned();
         fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
-        git_stage_files(root.clone(), vec![dir.path().join("a.txt").to_string_lossy().into_owned()]).unwrap();
-        let before = Repository::open(dir.path()).unwrap().head().unwrap().target();
+        git_stage_files(
+            root.clone(),
+            vec![dir.path().join("a.txt").to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        let before = Repository::open(dir.path())
+            .unwrap()
+            .head()
+            .unwrap()
+            .target();
 
         let err = git_commit(root, "signed?".into()).unwrap_err();
 
         assert!(err.to_lowercase().contains("sign"), "got: {err}");
-        assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap().target(), before, "no commit created");
+        assert_eq!(
+            Repository::open(dir.path())
+                .unwrap()
+                .head()
+                .unwrap()
+                .target(),
+            before,
+            "no commit created"
+        );
     }
 }

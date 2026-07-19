@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
+  BLOCKING_OVERLAY_SELECTOR,
   createSidebarDrawer,
   hasActiveBlockingOverlay,
   handleSidebarDrawerShortcut,
@@ -192,4 +193,22 @@ test("blocking overlay presence ignores disconnected, hidden, and inert retained
     overlay({ getAttribute: (name: string) => name === "aria-hidden" ? "true" : null }),
   ]), false);
   assert.equal(hasActiveBlockingOverlay([overlay()]), true);
+});
+
+test("native open dialogs are blocking overlays only while interactive", () => {
+  const dialog = (overrides: Record<string, unknown> = {}) => ({
+    isConnected: true,
+    hidden: false,
+    inert: false,
+    classList: { contains: () => false },
+    getAttribute: () => null,
+    ...overrides,
+  });
+
+  assert.match(BLOCKING_OVERLAY_SELECTOR, /dialog\[open\]/);
+  assert.equal(hasActiveBlockingOverlay([dialog()]), true);
+  assert.equal(hasActiveBlockingOverlay([
+    dialog({ isConnected: false }),
+    dialog({ hidden: true }),
+  ]), false);
 });

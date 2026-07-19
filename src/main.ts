@@ -72,6 +72,7 @@ import {
   onUiRequest,
   onPromptRequest,
   mcpUiReply,
+  workspaceGenerationNext,
   mcpSetRoot,
   mcpWriteAgentConfig,
   onFsChanged,
@@ -178,6 +179,7 @@ import {
   seedRecentsFromLocalStorage,
   sessionFromTabs,
   trustWorkspace,
+  workspaceEffectCurrent,
   type RecentWorkspace,
 } from "./workspace";
 import {
@@ -657,6 +659,7 @@ async function resolveAutomationUi(
 void onFsChanged((payload) => {
   if (!currentRoot) return;
   const root = currentRoot;
+  if (!isWorkspaceOpenCurrent(payload.generation, workspaceOpenGeneration, payload.root, root)) return;
   if (payload.paths.length > 0 && !payload.paths.some((path) => pathBelongsToRoot(path, root))) {
     return;
   }
@@ -688,6 +691,12 @@ let automationBar: AutomationBarHandle; // assigned at boot
 let outlineView: OutlineView; // Files/Outline toggle in the sidebar
 let automations: Automation[] = []; // per-project automations for the current root
 let currentRoot: string | null = null; // track opened workspace
+// `workspaceOpenRequestGeneration` is synchronously incremented before any
+// await, preserving in-renderer stale-request ownership. The backend-issued
+// generation survives HMR/full renderer reload and gates MCP/watcher claims.
+let workspaceOpenGeneration = 0;
+let workspaceOpenRequestGeneration = 0;
+let workspaceSessionSuppressionOwner = 0;
 let latestTasks: readonly Task[] = [];
 let currentWorkspaceTrusted = false;
 let fsRefreshRunning = false;
@@ -893,21 +902,32 @@ async function pathExists(path: string): Promise<boolean> {
   );
 }
 
-async function restoreWorkspaceTabs(root: string): Promise<void> {
+async function restoreWorkspaceTabs(root: string, isCurrent = () => currentRoot === root): Promise<void> {
   const session = loadWorkspaceSession(root);
   if (!session) return;
   const existing = new Set<string>();
   for (const path of session.tabs) {
     if (await pathExists(path)) existing.add(path);
+    if (!isCurrent()) return;
   }
   const pruned = pruneWorkspaceSession(session, (path) => existing.has(path));
   for (const path of pruned.tabs) {
+    const existingTab = editor.tabByPath(path);
     try {
       await editor.openFile(path);
+      if (!isCurrent()) {
+        // openFile itself awaits disk I/O. If a newer workspace won while it
+        // was pending, remove only the clean tab this restore introduced; a
+        // dirty tab may be a concurrent user edit and must remain untouched.
+        const openedTab = editor.tabByPath(path);
+        if (!existingTab && openedTab && !openedTab.dirty) editor.closeTab(openedTab);
+        return;
+      }
     } catch {
       // Missing/unreadable files are skipped; restore is best-effort.
     }
   }
+  if (!isCurrent()) return;
   if (pruned.activePath) {
     const active = editor.tabByPath(pruned.activePath);
     if (active) editor.activate(active);
@@ -1035,9 +1055,27 @@ editor.saveHandler = saveTab;
 // forward, session restore, and switcher/worktree re-selects of a recents row —
 // passes explicit=false and relies on persisted trust, so re-opening an
 // OS-delivered folder never silently elevates it.
+function isWorkspaceOpenCurrent(
+  generation: number,
+  activeGeneration: number,
+  root: string,
+  activeRoot: string | null,
+): boolean {
+  return workspaceEffectCurrent(generation, activeGeneration, root, activeRoot);
+}
+
 async function openWorkspace(dir: string, explicit = false): Promise<void> {
+  const requestGeneration = ++workspaceOpenRequestGeneration;
+  const requestCurrent = () => requestGeneration === workspaceOpenRequestGeneration;
   if (!(await confirmWorkspaceClose(dir))) return;
+  if (!requestCurrent()) return;
   if (explicit) await trustWorkspace(dir);
+  if (!requestCurrent()) return;
+  const generation = await workspaceGenerationNext();
+  if (!requestCurrent()) return;
+  workspaceOpenGeneration = generation;
+  const isCurrent = () => requestCurrent()
+    && isWorkspaceOpenCurrent(generation, workspaceOpenGeneration, dir, currentRoot);
   hideTrustToast(); // drop any leftover toast from the previous root
   // Turn ids are per-root; a scope pointed at the old root's turn would
   // render the wrong (or nonexistent) snapshot against the new one. Shares
@@ -1061,6 +1099,7 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
   lastTurnStripKey = null; // drop any stale key so the new root's first render isn't skipped
   persistWorkspaceSession();
   suppressSessionSave = true;
+  workspaceSessionSuppressionOwner = generation;
   currentWorkspaceTrusted = false;
   annotations.setMcpShared(false);
   try {
@@ -1074,8 +1113,9 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     // backend builds off-thread and generation-gates late completions.
     void langIndexBuild(dir).catch(() => {});
     loadBreakpointStore(dir); // per-root persisted breakpoints; gutter repaints via onActiveTabChanged
-    const turnsHydrated = hydrateTurnsForWorkspace(dir);
-    void watchStop().catch(() => {});
+    const turnsHydrated = hydrateTurnsForWorkspace(dir, isCurrent);
+    await watchStop(generation).catch(() => {});
+    if (!isCurrent()) return;
     void mcpWriteAgentConfig(dir).then((warnings) => {
       for (const w of warnings) console.warn("MCP config:", w);
     });
@@ -1084,42 +1124,67 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     renderWhisperBar();
     tree.setActive(editor.active?.path ?? null);
     await tree.setRoot(dir);
-    if (settings.restoreSession) await restoreWorkspaceTabs(dir);
+    if (!isCurrent()) return;
+    if (settings.restoreSession) await restoreWorkspaceTabs(dir, isCurrent);
+    if (!isCurrent()) return;
     // Persisted task links need the complete turn manifest (not only the
     // consume-once turn_poll delta) before the panel renders files/test state.
     await turnsHydrated;
-    if (currentRoot !== dir) return;
+    if (!isCurrent()) return;
     await annotations.setRoot(dir);
-    currentWorkspaceTrusted = await isWorkspaceTrusted(dir).catch(() => false);
+    if (!isCurrent()) return;
+    const trusted = await isWorkspaceTrusted(dir).catch(() => false);
+    if (!isCurrent()) return;
+    currentWorkspaceTrusted = trusted;
     annotations.setMcpShared(currentWorkspaceTrusted);
     // Publish the MCP root only after annotation state is hydrated; queries
     // cannot observe the previous project's annotations during a switch.
-    void mcpSetRoot(dir);
+    // The backend rejects an out-of-order claim, so A cannot replace B when
+    // IPC delivery completes after the newer workspace has won.
+    await mcpSetRoot(dir, generation).catch((e) => console.warn("MCP root unavailable", e));
+    if (!isCurrent()) return;
     const annotationTasks = (await loadTasks(dir)).tasks.filter((task) => task.root === dir);
+    if (!isCurrent()) return;
     annotations.setTaskContext(annotationTasks, annotationsAttach, annotationsDeliver, annotationsDetach);
     await tasksPanel.reload();
+    if (!isCurrent()) return;
   } finally {
-    suppressSessionSave = false;
+    if (workspaceSessionSuppressionOwner === generation) {
+      suppressSessionSave = false;
+      workspaceSessionSuppressionOwner = 0;
+    }
   }
+  if (!isCurrent()) return;
   persistWorkspaceSession();
   search.setRoot(dir);
   workspaceBar.setCurrentWorkspace(dir);
   await terminals.reset(dir, drawerState.open);
+  if (!isCurrent()) return;
   // A trusted primary dispatch writes this link before launching the worktree
   // process. Give the new root an integrated terminal immediately; it is ready
   // for the user to launch their selected terminal-native agent there.
-  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) setTerminal(true);
+  if (await readFile(`${dir}/${WORKTREE_TASK_LINK_FILE}`).then(() => true, () => false)) {
+    if (!isCurrent()) return;
+    setTerminal(true);
+  }
+  if (!isCurrent()) return;
   syncSurfacesFromUi();
   await recentsPush(dir, basename(dir));
-  void loadRecents().then((r) => { recentsCache = r; });
-  void refreshGitState(dir);
-  automations = await loadAutomations(dir);
+  if (!isCurrent()) return;
+  void loadRecents().then((r) => { if (isCurrent()) recentsCache = r; });
+  void refreshGitState(dir, isCurrent);
+  const loadedAutomations = await loadAutomations(dir);
+  if (!isCurrent()) return;
+  automations = loadedAutomations;
   automationBar.setAutomations(automations);
   stopGitPoll();
   const resolvedGitIndexPath = await resolveGitIndexPath(dir);
-  if (currentRoot !== dir) return;
+  if (!isCurrent()) return;
   gitIndexPath = resolvedGitIndexPath;
-  void watchStart(dir).catch((e) => console.warn("watcher unavailable", e));
+  // Await the generation-aware native claim: a delayed A start must not leave
+  // A's watcher active after B owns the UI.
+  await watchStart(dir, generation).catch((e) => console.warn("watcher unavailable", e));
+  if (!isCurrent()) return;
   if (settings.agentTracking) startAgentTrackingPoll();
   void pollAgentChanges();
   startGitPoll();
@@ -1128,11 +1193,12 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
 /** Hydrate closed historical turns for task links after a restart. turn_poll
  * only delivers each close once, whereas turn_list is the durable manifest.
  * The root guard prevents an old IPC result populating a newly selected root. */
-async function hydrateTurnsForWorkspace(root: string): Promise<void> {
+async function hydrateTurnsForWorkspace(root: string, isCurrent: () => boolean): Promise<void> {
   try {
     const turns = await turnList(root);
-    if (currentRoot !== root) return;
+    if (!isCurrent()) return;
     replaceTurns(root, turns);
+    if (!isCurrent()) return;
     refreshTurnActionConsumers();
   } catch {
     // A non-Git root or unavailable backend still opens normally; saved task
@@ -1412,6 +1478,10 @@ let scopedDiffCache: { root: string; turnId: number; contents: Map<string, TurnF
 // every poll tick.
 let branchScopeBase: { label: string; oid: string } | null = null;
 let branchBaseBlobCache: { root: string; oid: string; contents: Map<string, string | null> } | null = null;
+// Every branch refresh owns a generation. A newer poll/entry/exit invalidates
+// older async work before it can replace the breadcrumb, baselines, or row
+// handlers captured against a previous merge-base.
+let branchRefreshGeneration = 0;
 
 /** Drop scoped diff mode's (turn or branch) cached state — scope, blob
  * caches, diffViewer's scoped onExpand/onAccept closures — with no DOM work.
@@ -1421,10 +1491,12 @@ let branchBaseBlobCache: { root: string; oid: string; contents: Map<string, stri
  * check `diffScope.kind !== "workspace"` first, matching exitScopedDiff's
  * existing no-op-when-not-scoped behavior. */
 function resetTurnScope(): void {
+  branchRefreshGeneration++;
   diffScope = exitTurnScope();
   scopedDiffCache = null;
   branchScopeBase = null;
   branchBaseBlobCache = null;
+  editor.setBranchScopeReadOnly(false);
   editor.setScopedBaselines(null); // gutter back to HEAD baseline + revert re-enabled
   diffViewer.invalidate();
   syncDiffScopeToggle();
@@ -1582,21 +1654,61 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
   });
   diffViewer.renderFileList(files, activePath, {
     onFilePick: (path: string) => {
+      const entry = turn.files.find((f) => f.path === path);
+      if (entry && turnFileStatus(entry) === "D") {
+        const content = contents.get(path);
+        if (content?.snapshotted && content.before != null) {
+          editor.openReadOnlySnapshot(path, content.before);
+          return;
+        }
+        void gitHeadContent(path).then((base) => {
+          if (base == null) {
+            diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+            return;
+          }
+          editor.openReadOnlySnapshot(path, base);
+        }).catch(() => diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks."));
+        return;
+      }
       void editor.openFile(path).then(() => tree.setActive(path)).catch((e) => console.warn(`cannot open ${path}`, e));
     },
     onExpand: async (path: string) => {
       const content = contents.get(path);
       if (content?.snapshotted) return turnFileHunkRows(content.before, content.after);
       try {
-        const base = (await gitHeadContent(path).catch(() => "")) ?? "";
-        const current = await readFile(path).catch(() => "");
-        return hunkSummaries(computeLineDiff(base, current).hunks);
+        const entry = turn.files.find((f) => f.path === path);
+        const base = await gitHeadContent(path).catch(() => null);
+        if (entry && turnFileStatus(entry) === "D") {
+          if (base == null) diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+          return base == null ? [] : turnFileHunkRows(base, null);
+        }
+        const current = await readFile(path).catch(() => null);
+        if (current == null) {
+          diffViewer.renderStatus(basename(path), "Current file content is unavailable; no text hunks.");
+          return [];
+        }
+        return hunkSummaries(computeLineDiff(base ?? "", current).hunks);
       } catch {
         return [];
       }
     },
     onHunkPick: (path: string, startLine: number) => {
       const entry = turn.files.find((f) => f.path === path);
+      const content = contents.get(path);
+      if (entry && turnFileStatus(entry) === "D") {
+        if (content?.snapshotted && content.before != null) {
+          editor.openReadOnlySnapshot(path, content.before, startLine + 1);
+          return;
+        }
+        void gitHeadContent(path).then((base) => {
+          if (base == null) {
+            diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks.");
+            return;
+          }
+          editor.openReadOnlySnapshot(path, base, startLine + 1);
+        }).catch(() => diffViewer.renderStatus(basename(path), "Deleted file content is unavailable; no text hunks."));
+        return;
+      }
       void editor.revealHunkPeek(path, startLine, entry ? turnFileStatus(entry) : "M");
     },
     // Scoped review is read-only against a fixed snapshot baseline — no
@@ -1611,13 +1723,19 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
 // HEAD-based hunks. Read-only: committed work can't be hunk-reverted, so no
 // accept/reject affordances (same rule as turn scope).
 async function refreshBranchDiffFileList(root: string): Promise<void> {
+  const generation = ++branchRefreshGeneration;
+  const isCurrent = () =>
+    generation === branchRefreshGeneration && currentRoot === root && diffScope.kind === "branch";
   let bd;
   try {
     bd = await gitBranchDiffFiles(root);
   } catch (e) {
-    if (currentRoot !== root || diffScope.kind !== "branch") return;
+    if (!isCurrent()) return;
     branchScopeBase = null;
-    editor.setScopedBaselines(null); // unusable scope → gutter falls back to HEAD
+    renderTurnStrip(root); // replace any resolved breadcrumb with the pending label
+    // Keep the independent branch read-only latch set. Clearing baselines only
+    // makes their availability unknown; it must not re-enable hunk revert.
+    editor.setScopedBaselines(new Map());
     diffViewer.renderFileList([], null, {
       onFilePick: () => {},
       onExpand: async () => [],
@@ -1627,7 +1745,7 @@ async function refreshBranchDiffFileList(root: string): Promise<void> {
     return;
   }
   // The scope changed (or the root switched) while the fetch was in flight.
-  if (currentRoot !== root || diffScope.kind !== "branch") return;
+  if (!isCurrent()) return;
 
   if (branchScopeBase?.oid !== bd.oid || branchScopeBase?.label !== bd.base) {
     branchScopeBase = { label: bd.base, oid: bd.oid };
@@ -1643,6 +1761,14 @@ async function refreshBranchDiffFileList(root: string): Promise<void> {
   }
   const blobCache = branchBaseBlobCache.contents;
   const baseOid = bd.oid;
+  // Row handlers may outlive a later poll with the same merge-base (the
+  // viewer preserves its DOM in that case). They remain valid for that base,
+  // but must stop as soon as another base/scope replaces their cache.
+  const isBaseCurrent = () =>
+    currentRoot === root &&
+    diffScope.kind === "branch" &&
+    branchScopeBase?.oid === baseOid &&
+    branchBaseBlobCache?.contents === blobCache;
   const files = bd.files;
   const activePath = editor.active?.path ?? null;
 
@@ -1658,14 +1784,27 @@ async function refreshBranchDiffFileList(root: string): Promise<void> {
     [...scopedPaths]
       .filter((path) => !blobCache.has(path))
       .map(async (path) => {
-        blobCache.set(path, await gitCommitContent(root, baseOid, path).catch(() => null));
+        try {
+          // Only a successful null means "absent at merge-base". A rejected
+          // IPC call is deliberately left uncached so the next refresh retries.
+          const content = await gitCommitContent(root, baseOid, path);
+          if (isCurrent()) blobCache.set(path, content);
+        } catch (e) {
+          if (isCurrent()) console.warn(`git_commit_content failed for ${path}`, e);
+        }
       }),
   );
-  // Scope/root may have changed during the blob fetches.
-  if (currentRoot !== root || diffScope.kind !== "branch") return;
+  // Scope/root/newer refresh may have changed during the blob fetches.
+  if (!isCurrent()) return;
   const scopedBaselines = new Map<string, string | null>();
-  for (const path of scopedPaths) scopedBaselines.set(path, blobCache.get(path) ?? null);
+  // Missing is intentionally distinct from a successfully fetched null:
+  // the former is unavailable and must not become a synthetic empty baseline.
+  for (const path of scopedPaths) {
+    if (blobCache.has(path)) scopedBaselines.set(path, blobCache.get(path) ?? null);
+  }
   editor.setScopedBaselines(scopedBaselines);
+
+  const unavailableCount = [...scopedPaths].filter((path) => !blobCache.has(path)).length;
 
   if (files.length === 0) {
     diffViewer.renderFileList([], null, {
@@ -1676,26 +1815,73 @@ async function refreshBranchDiffFileList(root: string): Promise<void> {
     diffViewer.renderStatus("Diff", `No changes vs ${bd.base} @ ${bd.oid.slice(0, 7)}`);
     return;
   }
+  // A successful null is meaningful: this file was added after the merge-base
+  // and must diff against an empty baseline. Lookup failure is deliberately a
+  // separate result so it cannot fabricate a whole-file added hunk.
+  const branchBaseForPath = async (
+    path: string,
+  ): Promise<{ available: true; content: string | null } | { available: false }> => {
+    let base = blobCache.get(path);
+    if (base === undefined) {
+      try {
+        base = await gitCommitContent(root, baseOid, path);
+        if (!isBaseCurrent()) return { available: false };
+        blobCache.set(path, base);
+      } catch (e) {
+        if (isBaseCurrent()) {
+          diffViewer.renderStatus("Diff", `Branch baseline unavailable for ${path.split("/").pop()}; retrying.`);
+          console.warn(`git_commit_content failed for ${path}`, e);
+        }
+        return { available: false };
+      }
+    }
+    return isBaseCurrent() ? { available: true, content: base ?? null } : { available: false };
+  };
+  const openDeletedBranchSnapshot = async (path: string, startLine?: number): Promise<void> => {
+    const baseline = await branchBaseForPath(path);
+    if (!baseline.available || baseline.content == null) {
+      if (isBaseCurrent()) diffViewer.renderStatus(basename(path), "Deleted merge-base content is unavailable; no text hunks.");
+      return;
+    }
+    editor.openReadOnlySnapshot(path, baseline.content, startLine === undefined ? undefined : startLine + 1);
+  };
+
+  // Branch current bytes can change without the status/path list changing.
+  // Rebuild so retained expanded paths reload their hunk rows against disk.
+  diffViewer.invalidate();
   diffViewer.renderFileList(files, activePath, {
-    onFilePick: (path: string) => void viewChangedPath(path),
+    onFilePick: (path: string) => {
+      const file = files.find((candidate) => candidate.path === path);
+      if (file?.status === "D") void openDeletedBranchSnapshot(path);
+      else void viewChangedPath(path);
+    },
     onExpand: async (path: string) => {
       try {
-        let base = blobCache.get(path);
-        if (base === undefined) {
-          base = await gitCommitContent(root, baseOid, path).catch(() => null);
-          blobCache.set(path, base);
+        const file = files.find((candidate) => candidate.path === path);
+        const baseline = await branchBaseForPath(path);
+        if (!baseline.available) return [];
+        const base = baseline.content ?? "";
+        if (file?.status === "D") return hunkSummaries(computeLineDiff(base, "").hunks);
+        const current = await readFile(path).catch(() => null);
+        if (current == null) {
+          if (isBaseCurrent()) diffViewer.renderStatus(basename(path), "Current file content is unavailable; no text hunks.");
+          return [];
         }
-        const current = await readFile(path).catch(() => "");
-        return hunkSummaries(computeLineDiff(base ?? "", current).hunks);
+        if (!isBaseCurrent()) return [];
+        return hunkSummaries(computeLineDiff(base, current).hunks);
       } catch {
         return [];
       }
     },
     onHunkPick: (path: string, startLine: number) => {
       const file = files.find((candidate) => candidate.path === path);
-      void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
+      if (file?.status === "D") void openDeletedBranchSnapshot(path, startLine);
+      else void editor.revealHunkPeek(path, startLine, file?.status ?? "M");
     },
   });
+  if (unavailableCount > 0 && isCurrent()) {
+    diffViewer.renderStatus("Diff", `Branch baseline unavailable for ${unavailableCount} file${unavailableCount === 1 ? "" : "s"}; retrying.`);
+  }
 }
 
 // ---- diff file list ----
@@ -2147,6 +2333,7 @@ function setBranchScope(on: boolean): void {
     // first (resetTurnScope), then re-enters as branch.
     if (diffScope.kind === "turn") resetTurnScope();
     diffScope = enterBranchScope();
+    editor.setBranchScopeReadOnly(true); // immediate: do not await merge-base I/O to lock revert
     closeTurnDropdown();
     diffViewer.invalidate();
     syncDiffScopeToggle();
@@ -3541,9 +3728,11 @@ gitBar = createGitBar($("branch-whisper"));
 gitBar.onWorktreeSelect = (path: string) => void openWorkspace(path); // worktree is its own root; re-open only, trust not auto-granted
 gitBar.onBranchSelect = (branch: string) => void switchBranch(branch);
 
-async function refreshGitState(root: string): Promise<void> {
+async function refreshGitState(root: string, isCurrent = () => currentRoot === root): Promise<void> {
+  if (!isCurrent()) return;
   await editor.refreshCleanGitBaselines();
-  await gitBar.refresh(root);
+  if (!isCurrent()) return;
+  await gitBar.refresh(root, isCurrent);
 }
 
 // ---- automations ----

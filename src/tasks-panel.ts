@@ -232,6 +232,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
   let submit = false;
   let targetId: string | null = null;
   const reconciledSetupRoots = new Set<string>();
+  let reloadRequest = 0;
 
   function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string): HTMLElementTagNameMap[K] {
     const node = document.createElement(tag);
@@ -246,9 +247,12 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
 
   async function reload(skipReconcile = false): Promise<void> {
     const root = getRoot();
+    const request = ++reloadRequest;
+    const ownsReload = (): boolean => request === reloadRequest && getRoot() === root;
     loading = true;
     render();
     if (!root) {
+      if (!ownsReload()) return;
       tasks = [];
       agents = [];
       trusted = false;
@@ -262,7 +266,7 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
       ptyListAgents().catch(() => []),
       gitBranch(root).catch(() => null),
     ]);
-    if (getRoot() !== root) return;
+    if (!ownsReload()) return;
     let loadedTasks = loaded.tasks.filter((task) => task.root === root);
     // skipReconcile guards re-entrancy: the queue-completion reload (main.ts)
     // runs from INSIDE the metadata queue, so it must never enqueue the
@@ -276,8 +280,13 @@ export function mountTasksPanel(opts: TasksPanelOptions): TasksPanelHandle {
         const next = entries.map((task) => isWorktreeSetupActive(task) ? task : reconcileInterruptedWorktreeSetup(task));
         return next.some((task, index) => task !== entries[index]) ? next : entries;
       }).catch(() => false);
-      if (wrote && getRoot() === root) loadedTasks = (await loadTasks(root)).tasks.filter((task) => task.root === root);
+      if (!ownsReload()) return;
+      if (wrote) {
+        loadedTasks = (await loadTasks(root)).tasks.filter((task) => task.root === root);
+        if (!ownsReload()) return;
+      }
     }
+    if (!ownsReload()) return;
     tasks = loadedTasks;
     trusted = nextTrusted;
     isGitRoot = branch !== null;

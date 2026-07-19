@@ -75,6 +75,11 @@ class FakeEl extends FakeNode {
   }
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+}
+
 /** Fake MutationObserver: onThemeChange() constructs one per PreviewController instance
  *  (mirrors the real editor.ts pattern); fireAll() simulates a class-attribute toggle firing
  *  every still-connected observer, and disconnect() (driven by dispose()) removes it. */
@@ -248,6 +253,58 @@ test("html/srcdoc preview keeps sandbox=\"\" and its own DOMPurify call untouche
     assert.equal(iframe.srcdocValue, "<script>alert(1)</script><p>hi</p>");
   } finally {
     (DOMPurify as unknown as { sanitize: typeof originalSanitize }).sanitize = originalSanitize;
+    dom.restore();
+  }
+});
+
+test("diagram renders are last-request-wins, uniquely identified, and cannot outlive disposal", async () => {
+  const el = new FakeEl();
+  const pending: Array<{ id: string; source: string; result: ReturnType<typeof deferred<string>> }> = [];
+  const ctl = new PreviewController(el as unknown as HTMLElement, "diagram", {
+    renderDiagram: (source, id) => {
+      const result = deferred<string>();
+      pending.push({ id, source, result });
+      return result.promise;
+    },
+  });
+
+  const first = ctl.render("first");
+  const second = ctl.render("second");
+  assert.equal(pending.length, 2);
+  assert.notEqual(pending[0].id, pending[1].id);
+  assert.doesNotMatch(pending[0].id, /^sutra-diagram$/);
+
+  pending[1].result.resolve("<svg>second</svg>");
+  await second;
+  assert.match(el.html, /second/);
+  pending[0].result.resolve("<svg>first</svg>");
+  await first;
+  assert.doesNotMatch(el.html, /first/);
+
+  const third = ctl.render("third");
+  ctl.dispose();
+  pending[2].result.resolve("<svg>third</svg>");
+  await third;
+  assert.doesNotMatch(el.html, /third/);
+});
+
+test("a stale diagram controller cannot overwrite a newer controller sharing its element", async () => {
+  const dom = stubDom(INK_TOKENS);
+  const el = new FakeEl();
+  const pending = deferred<string>();
+  try {
+    const oldCtl = new PreviewController(el as unknown as HTMLElement, "diagram", {
+      renderDiagram: () => pending.promise,
+    });
+    const oldRender = oldCtl.render("old");
+    const newCtl = new PreviewController(el as unknown as HTMLElement, "html");
+    await newCtl.render("https://example.test/new");
+
+    pending.resolve("<svg>old</svg>");
+    await oldRender;
+    assert.equal(el.children[0].src, "https://example.test/new");
+    assert.doesNotMatch(el.html, /old/);
+  } finally {
     dom.restore();
   }
 });

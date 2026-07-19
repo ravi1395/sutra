@@ -92,6 +92,12 @@ export function firstHunkLineFromTabs(
   return first ? first.newFrom + 1 : null;
 }
 
+/** Branch-review baseline for one tab: null means unavailable; a present null
+ * commit lookup means the path was added after merge-base and uses "". */
+export function scopedBaselineForPath(baselines: ReadonlyMap<string, string | null>, path: string): string | null {
+  return baselines.has(path) ? (baselines.get(path) ?? "") : null;
+}
+
 const setDiffMarks = StateEffect.define<readonly LineMark[]>();
 const setLens = StateEffect.define<LensSpec | null>();
 
@@ -1413,10 +1419,12 @@ export class EditorManager {
   }
 
   // Branch-review scoped baselines: while non-null, tabs whose path has an
-  // entry diff against these merge-base blobs instead of git HEAD, and hunk
-  // revert is disabled everywhere (display-only review). A null entry = file
-  // absent at the scope base (added on branch) → "" baseline, whole-file adds.
+  // entry diff against these merge-base blobs instead of git HEAD. A null
+  // entry = file absent at the scope base (added on branch) → "" baseline,
+  // whole-file adds. The read-only latch is deliberately separate: branch
+  // entry must disable hunk revert before these async blobs arrive.
   private scopedBaselines: Map<string, string | null> | null = null;
+  private branchScopeReadOnly = false;
 
   /** Install (or clear, with null) the branch-review baseline map; repaints
    * every visible pane's gutter immediately (split view included), hidden
@@ -1426,15 +1434,26 @@ export class EditorManager {
     for (const pane of this.panes) this.recomputeDiffFor(pane);
   }
 
+  /** Lock or unlock branch-review hunk revert independently of baseline I/O. */
+  setBranchScopeReadOnly(readOnly: boolean): void {
+    this.branchScopeReadOnly = readOnly;
+    for (const pane of this.panes) pane.closeLens();
+  }
+
   /** True while a scoped (branch-review) baseline is active — gutter lens
    * drops its Revert affordance and revertHunk refuses. */
   get scopedReadOnly(): boolean {
-    return this.scopedBaselines != null;
+    return this.branchScopeReadOnly;
   }
 
   private baselineOf(tab: Tab): string | null {
-    if (this.scopedBaselines && tab.path && this.scopedBaselines.has(tab.path)) {
-      return this.scopedBaselines.get(tab.path) ?? "";
+    if (this.scopedBaselines && tab.path) {
+      // A missing entry means the baseline fetch failed or has not completed.
+      // Do not silently fall back to HEAD: that would misrepresent a branch
+      // review as an ordinary working-tree diff.
+      // A present null, however, is a successful lookup of a file absent at
+      // merge-base and deliberately means the empty-string baseline.
+      return scopedBaselineForPath(this.scopedBaselines, tab.path);
     }
     return tab.override ?? tab.gitHead;
   }
@@ -1474,6 +1493,29 @@ export class EditorManager {
     if (line !== undefined) this.revealLine(line);
     // Notify the language engine that this document is now open (version 0 = initial load).
     langDidOpen(path, content, 0).catch(() => {});
+  }
+
+  /** Show immutable scoped content (for example, a deleted branch file) without
+   * reading the current worktree path or exposing save/edit controls. */
+  openReadOnlySnapshot(path: string, content: string, line?: number): void {
+    const pane = this.focused;
+    const name = `${path.split("/").pop() ?? path} (snapshot)`;
+    const tab: Tab = {
+      id: `t${++idSeq}`,
+      path: null,
+      name,
+      state: pane.makeState(content, name),
+      dirty: false,
+      gitHead: null,
+      override: null,
+      savedContent: content,
+      lastMtime: null,
+      hunks: [],
+      readOnly: true,
+    };
+    pane.addTab(tab);
+    this.activateInPane(pane, tab);
+    if (line !== undefined) this.revealLine(line);
   }
 
   /** Open latest disk content for review without overwriting a dirty human buffer. */

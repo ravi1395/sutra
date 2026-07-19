@@ -193,13 +193,16 @@ export const proxyUrl = (target: string) =>
   invoke<string>("proxy_url", { target });
 
 export const mcpServerUrl = () => invoke<string>("mcp_server_url");
-export const mcpSetRoot = (root: string) => invoke<void>("mcp_set_root", { root });
+export const workspaceGenerationNext = () => invoke<number>("workspace_generation_next");
+export const mcpSetRoot = (root: string, generation: number) => invoke<void>("mcp_set_root", { root, generation });
 export const mcpWriteAgentConfig = (root: string) =>
   invoke<string[]>("mcp_write_agent_config", { root });
 
-export const watchStart = (root: string) => invoke<void>("watch_start", { root });
-export const watchStop = () => invoke<void>("watch_stop");
+export const watchStart = (root: string, generation: number) => invoke<void>("watch_start", { root, generation });
+export const watchStop = (generation: number) => invoke<void>("watch_stop", { generation });
 export interface FsChangedPayload {
+  root: string;
+  generation: number;
   paths: string[];
 }
 export const onFsChanged = (cb: (payload: FsChangedPayload) => void): Promise<UnlistenFn> =>

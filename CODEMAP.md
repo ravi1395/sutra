@@ -8,6 +8,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 
 - `src/main.ts`
   - App composition root. Boots settings, opens/switches roots, wires tree/editor/terminal/browser/diff/debugger/composer/tasks, and owns polling/event subscriptions.
+  - Workspace opens are generation-owned: a native process-lifetime counter survives renderer reloads, while a renderer request counter rejects stale local completions. Superseded opens cannot repopulate turns, tabs, terminals, automations, recents, watchers, or Git polling.
   - Mounts the North ledger as an `#body` sibling of `#main`; `refreshTurnActionConsumers` is the single strip/ledger refresh seam.
   - Re-resolves current root + turn before review/rollback actions. Rolled-back, open, synthetic, missing, and cross-root turns are ineligible.
 - `src/ledger.ts`
@@ -32,6 +33,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
   - Write-room shelf: `main.ts`'s `syncShelfMode` (driven by `roomRouter.onRoomChange` and view changes) toggles `OutlineView.setMode("stacked")` in `src/tree.ts`, co-displaying the same file tree/outline/search DOM nodes instead of the exclusive Files↔Outline toggle. `tree.ts`'s `sidebarSections(mode)` is the pure render-model seam (`tests/shelf.test.ts`).
 - `src/editor.ts`, `src/terminal.ts`, `src/browser.ts`, `src/diff.ts`, `src/composer.ts`, `src/annotations.ts`
   - Existing primary content surfaces. View changes restyle or relocate hosts without changing their content ownership.
+  - Branch review latches gutter read-only before async baselines arrive; deleted files open immutable snapshot tabs, while unavailable/binary/oversized content produces no fabricated text hunks.
 - `src/ipc.ts`
   - Typed frontend bridge for Tauri commands/events, including turn poll/list/rollback/test records and runner completion.
 
@@ -45,8 +47,12 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
   - Headless automation/test execution and correlated completion events.
 - `src-tauri/src/app_state.rs`, `src-tauri/src/window_registry.rs`, `src-tauri/src/launcher.rs`, `src-tauri/src/focus.rs`
   - Shared settings/recents/UI state plus one-owner-per-root multi-process routing.
-- `src-tauri/src/git.rs`, `src-tauri/src/fs_cmds.rs`, `src-tauri/src/mcp.rs`
-  - Git/worktree operations, filesystem mutations, and trusted local MCP routing.
+- `src-tauri/src/git.rs`, `src-tauri/src/fs_cmds.rs`, `src-tauri/src/mcp.rs`, `src-tauri/src/preview_server.rs`
+  - Git/worktree operations, filesystem mutations, trusted local MCP routing, and per-server capability-path workspace preview serving; document- and root-relative HTML/CSS assets are rewritten to inherit the capability without cross-port cookies.
+  - Worktree status comes from the final tree-to-workdir diff, preserving type/mode changes and treating only Git deletions as deleted content.
+- `src/gitbar.ts`, `src/workspace.ts`, `src/ipc.ts`, `src-tauri/src/watcher.rs`
+  - Workspace generation ownership crosses async Git-bar rendering, watcher start/stop claims, and watcher events so a superseded root cannot repaint or reclaim backend state.
+  - Branch diff status describes final worktree bytes against the nearest valid main/master merge-base; merge-base blob reads share the editor's UTF-8 and 10 MiB limits.
 
 ## Important Call Paths
 
@@ -62,7 +68,9 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - North keyboard routing
   - Global keydown -> sidebar drawer shortcut first -> guarded North `⌘L` -> session-local ledger visibility toggle. Other views keep the dynamic host inert.
 - Workspace switch
-  - `openWorkspace` clears old task/ledger data immediately -> hydrates durable turns/tasks for the new root -> shared refresh; stale async results are root-gated.
+  - `openWorkspace` claims a generation -> clears old task/ledger data immediately -> hydrates durable turns/tasks for the new root -> shared refresh; stale async results are generation- and root-gated at every ownership boundary.
+- Branch review
+  - Enter scope -> synchronously latch read-only -> resolve nearest mainline merge-base -> fetch successful base blobs into an OID-keyed cache -> render/reload rows and gutters only if request generation + root + OID still own the scope.
 
 ## Verification Commands
 
@@ -83,11 +91,13 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - `tests/rooms.test.ts` pins the room-router seam: full-preset application order, same-room re-entry, run-preset shape, write default, and per-setter throw isolation.
 - `tests/shelf.test.ts` pins the Write-room shelf's pure render model: `sidebarSections("stacked")` returns files/outline/search in display order.
 - `tests/drawer.test.ts`, `tests/north-seam.test.ts`, and settings/style source checks protect North-only placement and Classic/other-view isolation.
+- `tests/diff.test.ts` pins immediate branch read-only, added-vs-unavailable baselines, deleted snapshots, and expanded-row invalidation; `tests/workspace.test.ts` pins workspace-open ownership.
 - Unit/static proof does not clear native layout/action behavior. `VERIFY-LEDGER.md` MV-6 remains BLOCKED until the manual `npm run tauri dev` script is observed.
 
 ## Risks
 
 - Turn ids are root-local. Every deferred DOM/action callback must retain root + numeric turn id and re-resolve both before mutation.
+- Workspace and branch refreshes can overlap. Every post-await mutation must validate its request generation as well as root/OID; root equality alone does not establish ownership.
 - Duplicate task links can exist in hand-edited metadata. Display and mutation must both use `taskOwnerForTurn`; array-order selection causes inconsistent review badges.
 - Rolled-back turns are audit rows only: they remain expandable/struck but cannot enter review scope or roll back again.
 - Dynamic North hosts must remain inert outside `view-north`; unscoped selectors can change Classic, Graphite, or Stanza layout.
