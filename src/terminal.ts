@@ -657,13 +657,28 @@ export class TerminalManager {
     // no-op and the terminal stays deaf (e.g. vim ignoring i/:). blur()+focus()
     // forces a real refocus that breaks the stale state. stopPropagation avoids
     // a redundant focusGroup() render pass from the group-body mousedown above.
+    // preventDefault mirrors xterm's own in-element mousedown handling: without
+    // it WebKit's default post-mousedown focus resolution runs after our
+    // textarea.focus() and, the wrapper padding being non-focusable, moves
+    // focus to body — undoing the recovery (padding contains nothing selectable).
     el.addEventListener("mousedown", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       if (this.active !== t) {
         this.activate(t);
       } else {
         this.recoverFocus(t);
       }
+    });
+
+    // WKWebView resolves focus once more after mouseup even with mousedown's
+    // default suppressed, leaving a hollow cursor — observed live 2026-07-21.
+    // Re-assert in the click phase, the timing tab activation's onclick recovery
+    // uses, which observably sticks. Clicks landing inside .xterm are xterm's
+    // own focus path (and end drag-selections) — only wrapper padding re-asserts.
+    el.addEventListener("click", (e) => {
+      if (t.term.element?.contains(e.target as Node)) return;
+      if (this.active === t) this.recoverFocus(t);
     });
 
     // Right-click context menu.

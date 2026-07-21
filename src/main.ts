@@ -685,6 +685,17 @@ northSurfacePills.className = "north-surface-pills";
 northSeam.append(northWhisper, northSurfacePills);
 whisperBar.before(northSeam);
 const whisperHostCache = new ChipHostCache(whisperBar, northWhisper);
+
+// Dead-chrome guard: North's terminal card sits on a 10px #main margin, and the
+// seam/whisper bars have bare background between chips. A mousedown landing on
+// those containers themselves (never their children) has no focus target of its
+// own — without preventDefault WebKit resolves focus to body and the terminal
+// (or editor) goes deaf until re-clicked.
+for (const zone of [$("main"), whisperBar, northSeam]) {
+  zone.addEventListener("mousedown", (e) => {
+    if (e.target === zone) e.preventDefault();
+  });
+}
 let workspaceBar: WorkspaceBarHandle; // assigned at boot once toggle handlers exist
 let palette: PaletteHandle; // assigned at boot once all actions are defined
 let gitBar: GitBarHandle; // assigned at boot
@@ -3987,6 +3998,13 @@ palette = mountPalette({
   symbols: (query, limit) => langWorkspaceSymbols(query, limit),
   onOpenFile: (path, line) => void editor.openFile(path, line),
   resolveFile: (rel) => `${currentRoot}/${rel}`,
+  // Same surface-owner recovery as the North sidebar drawer: a stale xterm helper
+  // textarea needs terminals.focusActive()'s blur()+focus(), not a bare focus().
+  recoverFocus: (target) => {
+    if (!isTerminalOwnedKeyboardTarget(target)) return false;
+    terminals.focusActive();
+    return true;
+  },
 });
 
 // Shortcuts shown in the settings reference: palette entries + hardcoded extras.

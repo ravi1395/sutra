@@ -2,6 +2,7 @@
 // @workspaces), bound to Cmd+P / Cmd+Shift+P / Cmd+T. Also exports mountLocationPicker
 // (goto-definition multi-candidate chooser).
 import { type Symbol as WorkspaceSymbol, type Location, type FileListing } from "./ipc";
+import { type FocusHandle } from "./drawer";
 export interface Command {
   id: string;
   title: string;
@@ -36,6 +37,19 @@ export interface PaletteOpts {
   symbols: (query: string, limit: number) => Promise<WorkspaceSymbol[]>; // '#' mode
   onOpenFile: (path: string, line?: number) => void;
   resolveFile: (rel: string) => string; // relative file-mode path -> absolute path for onOpenFile
+  /** Returns true when focus restoration was handled by a surface owner (same contract as SidebarDrawerOptions.recoverFocus). */
+  recoverFocus?(target: FocusHandle): boolean;
+}
+
+/** Snapshot the element holding focus at palette open; non-focusable actives capture as null. */
+export function capturePaletteFocus(active: unknown): FocusHandle | null {
+  return active && typeof active === "object" && "focus" in active ? (active as FocusHandle) : null;
+}
+
+/** Restore focus captured at open: surface owners (terminal) take precedence over raw focus(). */
+export function restorePaletteFocus(target: FocusHandle | null, recoverFocus?: (t: FocusHandle) => boolean): void {
+  if (!target || target.isConnected === false) return;
+  if (!recoverFocus?.(target)) target.focus();
 }
 
 /** Group filtered commands into ordered sections, dropping empty ones. */
@@ -89,12 +103,20 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
   let lastSymbolQuery = "";
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Element holding focus when the palette opened; every dismissal path funnels
+  // through close(), which hands it back (click-away otherwise strands focus on
+  // body and keys route to the global shortcut handler instead of the terminal).
+  let priorFocus: FocusHandle | null = null;
+
   function close(): void {
     if (overlay) {
       overlay.remove();
       overlay = null;
     }
     isOpen = false;
+    const target = priorFocus;
+    priorFocus = null;
+    restorePaletteFocus(target, opts.recoverFocus);
     selectedIdx = 0;
     activeRows = [];
     fileListing = null;
@@ -242,6 +264,8 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
     }
 
     isOpen = true;
+    // Capture before the palette input below steals activeElement into the overlay.
+    priorFocus = capturePaletteFocus(document.activeElement);
     overlay = document.createElement("div");
     overlay.className = "palette-overlay";
 
@@ -318,9 +342,15 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
       }
     });
 
-    // Click outside to close
+    // Click outside to close. preventDefault only on backdrop hits (input caret /
+    // selection mousedowns bubble here too): close() restores focus inside this
+    // handler, and the non-focusable, now-detached backdrop would otherwise let
+    // WebKit's default post-mousedown focus resolution strand focus on body.
     overlay.addEventListener("mousedown", (e) => {
-      if (e.target === overlay) close();
+      if (e.target === overlay) {
+        e.preventDefault();
+        close();
+      }
     });
   }
 
