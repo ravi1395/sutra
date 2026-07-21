@@ -25,10 +25,11 @@ test("RELEASES is non-empty and every entry is well-formed", () => {
   }
 });
 
-test("RELEASES ships a 2.1.0 entry (this version)", () => {
-  const cur: Release | undefined = RELEASES.find((r) => r.version === "2.1.0");
-  assert.ok(cur, "expected a 2.1.0 changelog entry");
-  assert.ok(cur!.notes.length > 0);
+test("RELEASES ships 2.3.4 first with terminal recovery notes", () => {
+  const cur: Release | undefined = RELEASES[0];
+  assert.equal(cur?.version, "2.3.4");
+  assert.match(cur!.notes.join(" "), /terminal/i);
+  assert.match(cur!.notes.join(" "), /Vim/i);
 });
 
 test("TUTORIAL content is present and well-formed", () => {

@@ -41,6 +41,14 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.4",
+    date: "2026-07-21",
+    notes: [
+      "The terminal now keeps raw Vim input — including Esc, Tab, and F1–F12 — instead of routing it through app shortcuts.",
+      "Terminal focus recovery is centralized across hide/show, terminal tab activation, and app focus return.",
+    ],
+  },
+  {
     version: "2.3.3",
     date: "2026-07-19",
     notes: [
