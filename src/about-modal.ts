@@ -46,6 +46,7 @@ export const RELEASES: Release[] = [
     notes: [
       "The terminal now keeps raw Vim input — including Esc, Tab, and F1–F12 — instead of routing it through app shortcuts.",
       "Terminal focus recovery is centralized across hide/show, terminal tab activation, and app focus return.",
+      "Clicks on terminal card padding, surrounding chrome, or dismissing the command palette no longer steal keyboard focus from the terminal.",
     ],
   },
   {
