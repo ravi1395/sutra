@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { isControlSequence } from "../src/terminal-input";
 
@@ -15,4 +16,25 @@ test("isControlSequence flags ANSI reports and control bytes, not literal typed 
   assert.equal(isControlSequence("a"), false);
   assert.equal(isControlSequence("ls -la"), false);
   assert.equal(isControlSequence(""), false);
+});
+
+test("global shortcuts yield every xterm-targeted key to the terminal", () => {
+  const source = readFileSync("src/main.ts", "utf8");
+  const listener = source.slice(source.indexOf('window.addEventListener("keydown", (e) => {'));
+  const ownershipGuard = listener.indexOf("if (isTerminalOwnedKeyboardTarget(e.target)) return;");
+
+  assert.ok(ownershipGuard >= 0, "global routing must classify the focused xterm target");
+  assert.ok(ownershipGuard < listener.indexOf("handleSidebarDrawerShortcut"), "Escape must reach xterm before drawer arbitration");
+  assert.ok(ownershipGuard < listener.indexOf('e.key === "F5"'), "function keys must reach xterm before debugger arbitration");
+});
+
+test("xterm custom key handling reserves only copy and find", () => {
+  const source = readFileSync("src/terminal.ts", "utf8");
+  const start = source.indexOf("term.attachCustomKeyEventHandler");
+  const handler = source.slice(start, source.indexOf('el.addEventListener("mousedown"', start));
+
+  assert.match(handler, /mod && event\.key === "c"/);
+  assert.match(handler, /mod && event\.key === "f"/);
+  assert.doesNotMatch(handler, /event\.key === "Tab"/, "Tab must always reach xterm and the PTY");
+  assert.doesNotMatch(handler, /showHistorySuggestion/, "shell history must not gate terminal input");
 });

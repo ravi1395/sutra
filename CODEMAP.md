@@ -28,12 +28,14 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
   - Surface producer state and North seam pills/whisper host migration. Existing terminal/composer/browser/diff hosts retain ownership.
 - `src/drawer.ts`
   - North sidebar drawer controller, DOM host placement, focus/Escape behavior, and guarded shortcut handling. The ledger shortcut is ignored while this drawer or a blocking overlay is open.
+  - Xterm input targets own keyboard events before drawer/global arbitration, so modal Escape, Tab, and function keys reach the PTY.
 - `src/rooms.ts`
   - Pure stanza room router: fixed surface presets per room applied through injected setters (throw-isolated per call, primary focus last), current-room memory, and change subscription. No app-module imports; `main.ts` owns the tablist DOM, ⌘1–4 routing, and badge refresh.
   - Write-room shelf: `main.ts`'s `syncShelfMode` (driven by `roomRouter.onRoomChange` and view changes) toggles `OutlineView.setMode("stacked")` in `src/tree.ts`, co-displaying the same file tree/outline/search DOM nodes instead of the exclusive Files↔Outline toggle. `tree.ts`'s `sidebarSections(mode)` is the pure render-model seam (`tests/shelf.test.ts`).
 - `src/editor.ts`, `src/terminal.ts`, `src/browser.ts`, `src/diff.ts`, `src/composer.ts`, `src/annotations.ts`
   - Existing primary content surfaces. View changes restyle or relocate hosts without changing their content ownership.
   - Branch review latches gutter read-only before async baselines arrive; deleted files open immutable snapshot tabs, while unavailable/binary/oversized content produces no fabricated text hunks.
+  - Terminal focus restoration is centralized as visible-only `blur()` + `focus()` recovery for WKWebView; xterm custom key handling reserves only selection-copy and terminal-find.
 - `src/ipc.ts`
   - Typed frontend bridge for Tauri commands/events, including turn poll/list/rollback/test records and runner completion.
 
@@ -66,7 +68,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - Guarded rollback
   - Captured `{root, turnId}` -> live eligibility + `isRollbackable` -> `TurnActions.rollback` -> `openRollbackDialog` -> action-time recheck -> cancel affected tests -> `turnRollback` -> task review mutation -> turn-list refresh -> shared consumer refresh.
 - North keyboard routing
-  - Global keydown -> sidebar drawer shortcut first -> guarded North `⌘L` -> session-local ledger visibility toggle. Other views keep the dynamic host inert.
+  - Global keydown yields xterm-owned events first -> sidebar drawer shortcut -> guarded North `⌘L` -> session-local ledger visibility toggle. Other views keep the dynamic host inert.
 - Workspace switch
   - `openWorkspace` claims a generation -> clears old task/ledger data immediately -> hydrates durable turns/tasks for the new root -> shared refresh; stale async results are generation- and root-gated at every ownership boundary.
 - Branch review
@@ -91,6 +93,7 @@ Sutra is a Tauri desktop editor: TypeScript UI modules live in `src/`; Rust comm
 - `tests/rooms.test.ts` pins the room-router seam: full-preset application order, same-room re-entry, run-preset shape, write default, and per-setter throw isolation.
 - `tests/shelf.test.ts` pins the Write-room shelf's pure render model: `sidebarSections("stacked")` returns files/outline/search in display order.
 - `tests/drawer.test.ts`, `tests/north-seam.test.ts`, and settings/style source checks protect North-only placement and Classic/other-view isolation.
+- `tests/terminal-input.test.ts` pins raw xterm ownership before global routing and the copy/find-only custom key contract; `tests/terminal-live.test.ts` pins centralized visible-only WKWebView focus recovery.
 - `tests/diff.test.ts` pins immediate branch read-only, added-vs-unavailable baselines, deleted snapshots, and expanded-row invalidation; `tests/workspace.test.ts` pins workspace-open ownership.
 - Unit/static proof does not clear native layout/action behavior. `VERIFY-LEDGER.md` MV-6 remains BLOCKED until the manual `npm run tauri dev` script is observed.
 
