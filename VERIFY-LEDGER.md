@@ -223,3 +223,9 @@ Branch-review diff scope (uncommitted, session 2026-07-19). Baseline bugfix (git
 | 2026-07-19 | 2.3.3 | BD-3: scope exits stay consistent — Esc, breadcrumb ✕, and ledger Review-diff-while-branch-scoped all unlight the toggle | UI | User-confirmed live 2026-07-19 (not independently re-run this session) | PASS |
 | 2026-07-19 | 2.3.3 | BD-4: branch identical to merge-base → explicit "No changes vs main @ <oid>" status, not a blank pane | UI | User-confirmed live 2026-07-19 (not independently re-run this session) | PASS |
 | 2026-07-19 | 2.3.3 | BD-5: branch scope re-baselines editor gutter (display-only) — marks vs merge-base, no Revert in lens, HEAD gutter restored on exit, both split panes repaint | UI | User-confirmed live 2026-07-19 (not independently re-run this session) | PASS |
+
+## v2.3.4 terminal raw-input recovery
+
+| Date | Version | Criterion | Surface | Evidence | Status |
+|---|---|---|---|---|---|
+| 2026-07-21 | 2.3.4 | TERM-1: in a native Sutra terminal, Vim receives `i`, `Esc`, `:q!`, `Tab`, and F1–F12 before and after terminal hide/show, North drawer open/close, tab activation, and app focus loss/return; Prompt Builder, task Start, and Automations still deliver once through their existing terminal seams | UI+PTY | Partial native PASS against isolated `Sutra Verify Terminal.app` built from `d279f03`: Vim `i` + text + `Tab` + `Esc` + `:q!` produced `/tmp/sutra-vim-d279`; the same sequence after terminal hide/show produced `/tmp/sutra-vim-d279-restore`; app focus loss/return produced `/tmp/sutra-vim-d279-appfocus`; `cat` captured all F1–F12 xterm sequences. Prompt Builder, Tasks, and Automations surfaces opened normally; focused compatibility tests passed 119/119 and full suite 765/765. Still unobserved: North drawer open/close, tab activation, and actual Prompt Builder/task/Automation delivery attempts. | BLOCKED |

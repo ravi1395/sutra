@@ -246,6 +246,8 @@ available; see [View switching](#view-switching) below.
   running and the session **resumes** on reopen (it is never killed by toggling).
 - Terminal paste follows the native xterm/Edit-menu path so one `⌘V` inserts
   once, not multiple times.
+- Focused terminals own keyboard input: `Esc`, `Tab`, and function keys pass
+  through to the PTY. Sutra reserves only selection copy and terminal find.
 - Terminal columns refit while resizing the folder tree or terminal height, and
   the app layout is hard-clipped to the current window bounds.
 - Opening a folder resets terminal sessions so the active shell starts in that

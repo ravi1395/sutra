@@ -5,9 +5,20 @@ import {
   createSidebarDrawer,
   hasActiveBlockingOverlay,
   handleSidebarDrawerShortcut,
+  isTerminalOwnedKeyboardTarget,
   type FocusHandle,
   type SidebarDrawerHost,
 } from "../src/drawer";
+
+test("xterm helper textarea owns keyboard input", () => {
+  const target = {
+    closest: (selector: string) => selector === ".xterm-helper-textarea" ? target : null,
+  };
+
+  assert.equal(isTerminalOwnedKeyboardTarget(target), true);
+  assert.equal(isTerminalOwnedKeyboardTarget({ closest: () => null }), false);
+  assert.equal(isTerminalOwnedKeyboardTarget(null), false);
+});
 
 function fixture(active: () => FocusHandle | null) {
   const events: string[] = [];
@@ -41,6 +52,32 @@ test("open/close round-trip returns host to original parent handle", () => {
   connected = false;
   drawer.close();
   assert.deepEqual(events, ["move", "tree", "restore"], "disconnected prior focus is not restored");
+});
+
+test("close delegates terminal focus restoration to the injected recovery path", () => {
+  const events: string[] = [];
+  const terminal: FocusHandle & { closest(selector: string): unknown } = {
+    isConnected: true,
+    closest: (selector) => selector === ".xterm-helper-textarea" ? terminal : null,
+    focus: () => events.push("raw-focus"),
+  };
+  const host: SidebarDrawerHost = {
+    activeElement: () => terminal,
+    moveToOverlay: () => events.push("move"),
+    restoreToOriginal: () => events.push("restore"),
+    focusTree: () => events.push("tree"),
+  };
+  const drawer = createSidebarDrawer(host, {
+    recoverFocus: (target) => {
+      assert.equal(target, terminal);
+      events.push("recover");
+      return true;
+    },
+  });
+
+  drawer.open();
+  drawer.close();
+  assert.deepEqual(events, ["move", "tree", "restore", "recover"]);
 });
 
 test("escape closes only when open", () => {
@@ -111,6 +148,32 @@ test("open drawer leaves Escape to an active overlay over an editor target", () 
   assert.equal(drawer.isOpen(), true);
   assert.equal(prevented, 0);
   assert.equal(stopped, 0);
+  assert.deepEqual(events, ["move", "tree"]);
+});
+
+test("open drawer leaves Escape to an xterm helper textarea", () => {
+  const { drawer, events } = fixture(() => null);
+  drawer.open();
+  let prevented = 0;
+  const target = {
+    closest: (selector: string) => selector === ".xterm-helper-textarea" ? target : null,
+  };
+  const handled = handleSidebarDrawerShortcut(drawer, {
+    key: "Escape",
+    code: "Escape",
+    mod: false,
+    shiftKey: false,
+    altKey: false,
+    repeat: false,
+    defaultPrevented: false,
+    target,
+    preventDefault: () => { prevented += 1; },
+    stopPropagation: () => {},
+  }, { north: true, blockingOverlayActive: false });
+
+  assert.equal(handled, false);
+  assert.equal(drawer.isOpen(), true);
+  assert.equal(prevented, 0);
   assert.deepEqual(events, ["move", "tree"]);
 });
 

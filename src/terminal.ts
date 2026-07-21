@@ -35,7 +35,6 @@ interface Term {
   alive: boolean;
   spawnPending: boolean;
   agentAttached: boolean;
-  cmdHistory: string[]; // Recent commands for autocomplete
   currentInput: string; // Current line being typed
   cwd: string | null; // Spawn-time cwd (session.cwd) — used to resolve relative file links
 }
@@ -570,7 +569,7 @@ export class TerminalManager {
     term.open(el);
     fit.fit();
 
-    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: false, spawnPending: true, agentAttached: false, cmdHistory: [], currentInput: "", cwd: sessionCwd };
+    const t: Term = { id, term, fit, el, title: `zsh ${num}`, alive: false, spawnPending: true, agentAttached: false, currentInput: "", cwd: sessionCwd };
     this.terms.push(t);
     this.groups[side].push(t);
     this.activeByGroup[side] = t;
@@ -590,17 +589,13 @@ export class TerminalManager {
     term.onData((d) => {
       // Only track a shell command line while the normal buffer is active.
       // Full-screen programs (vim/less/fzf/htop) switch to the alternate
-      // buffer; their keystrokes are not a shell prompt and must not feed
-      // history tracking or Tab interception.
+      // buffer; their keystrokes are not a shell prompt.
       const atPrompt = term.buffer.active.type === "normal";
       const submittedCommand = atPrompt && (d === "\r" || d === "\n") ? t.currentInput : null;
-      // Track raw input; newlines push to history.
+      // Track raw input solely to detect integrated-agent commands at submit.
       if (!atPrompt) {
         // Alt-screen program owns input; leave currentInput untouched.
       } else if (d === "\r" || d === "\n") {
-        if (t.currentInput.trim()) {
-          t.cmdHistory.push(t.currentInput);
-        }
         t.currentInput = "";
       } else if (d === "" || d === "") {
         // Ctrl+C / Ctrl+D: clear input.
@@ -611,9 +606,7 @@ export class TerminalManager {
       } else if (isControlSequence(d)) {
         // Control byte: readline shortcuts (Ctrl+A/U/K/W) or an ANSI report/function-key
         // sequence (arrows, focus in/out CSI I/O, shift-tab, etc.) — xterm delivers these
-        // through the same onData channel as typed text, but they are never literal input;
-        // tracking them here corrupted cmdHistory with unprintable bytes that later rendered
-        // as garbage in the Tab history-suggestion dropdown.
+        // through the same onData channel as typed text, but they are never literal input.
       } else {
         // Regular char: add to input (simple; doesn't handle cursor movement).
         t.currentInput += d;
@@ -634,7 +627,7 @@ export class TerminalManager {
       }
     });
 
-    // Keyboard handlers for copy/paste/find/history.
+    // Preserve only conventional terminal copy and find overrides.
     term.attachCustomKeyEventHandler((event: KeyboardEvent): boolean => {
       const mod = isMod(event);
 
@@ -654,30 +647,6 @@ export class TerminalManager {
         return false;
       }
 
-      // Tab: show history suggestion if there's a match; else pass through for shell completion.
-      // Never intercept while a full-screen program owns the alternate buffer
-      // (vim/less/fzf must receive Tab).
-      if (event.key === "Tab" && term.buffer.active.type === "normal") {
-        const prefix = t.currentInput;
-        if (prefix.trim() && !prefix.includes(" ")) {
-          // Single-word prefix; try app-level history autocomplete.
-          const match = t.cmdHistory.find((cmd) => cmd.startsWith(prefix) && cmd !== prefix);
-          if (match) {
-            // Show suggestion dropdown; user can click or just type more.
-            this.showHistorySuggestion(t, prefix);
-            return false; // Swallow Tab so shell doesn't see it yet.
-          }
-        }
-        // No match; let shell handle Tab for normal completion.
-        this.closeHistorySuggestion();
-        return true;
-      }
-
-      // Close history dropdown on any other key.
-      if (event.key !== "Tab") {
-        this.closeHistorySuggestion();
-      }
-
       return true;
     });
 
@@ -693,8 +662,7 @@ export class TerminalManager {
       if (this.active !== t) {
         this.activate(t);
       } else {
-        t.term.blur();
-        t.term.focus();
+        this.recoverFocus(t);
       }
     });
 
@@ -819,44 +787,6 @@ export class TerminalManager {
     input.focus();
   }
 
-  /** Show command history suggestion dropdown near terminal input (app-level autocomplete). */
-  private showHistorySuggestion(t: Term, prefix: string): void {
-    // Find commands in history that start with prefix; show top 3.
-    const suggestions = t.cmdHistory
-      .slice()
-      .reverse()
-      .filter((cmd) => cmd.startsWith(prefix) && cmd !== prefix)
-      .slice(0, 3);
-    if (!suggestions.length) {
-      this.closeHistorySuggestion();
-      return;
-    }
-
-    // Remove old suggestion list.
-    this.closeHistorySuggestion();
-
-    const dropdown = document.createElement("div");
-    dropdown.className = "term-history-dropdown";
-    for (const cmd of suggestions) {
-      const row = document.createElement("div");
-      row.className = "term-history-item";
-      row.textContent = cmd;
-      row.addEventListener("click", () => {
-        // Type the rest of the command (user pressed Tab/Enter to accept).
-        const rest = cmd.slice(prefix.length);
-        void ptyWrite(t.id, rest).catch(() => {});
-        this.closeHistorySuggestion();
-      });
-      dropdown.appendChild(row);
-    }
-    this.host.appendChild(dropdown);
-  }
-
-  private closeHistorySuggestion(): void {
-    const dropdown = document.querySelector(".term-history-dropdown") as HTMLElement | null;
-    dropdown?.remove();
-  }
-
   activate(t: Term): void {
     const side = groupSideForItem(this.groups, t) ?? this.focusedGroup;
     this.focusedGroup = side;
@@ -868,7 +798,7 @@ export class TerminalManager {
     }
     this.renderGroups();
     this.refit();
-    t.term.focus();
+    this.recoverFocus(t);
     this.renderTabs();
   }
 
@@ -982,11 +912,16 @@ export class TerminalManager {
   focusActive(): void {
     const t = this.active;
     if (!t) return;
-    // Don't steal focus into a terminal whose group (or item) is display:none —
-    // e.g. this.active still points at a pane in a group hidden by maximize/collapse.
+    this.recoverFocus(t);
+  }
+
+  /** Force WKWebView to re-route keys, but never steal focus into display:none. */
+  private recoverFocus(t: Term): boolean {
     // offsetParent is null under any display:none ancestor.
-    if (t.term.element?.offsetParent === null) return;
+    if (!t.term.element || t.term.element.offsetParent === null) return false;
+    t.term.blur();
     t.term.focus();
+    return true;
   }
 
   /** Apply terminal font size to current and future terminal sessions. */

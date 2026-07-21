@@ -112,3 +112,29 @@ test("late spawn success after close or reset is ignored", () => {
   manager.finishSpawn(reset, true);
   assert.deepEqual(state(manager), [0, 0]);
 });
+
+test("focusActive forces a visible xterm through stale WebView focus", () => {
+  const events: string[] = [];
+  const visible = {
+    term: {
+      element: { offsetParent: {} },
+      blur: () => events.push("blur"),
+      focus: () => events.push("focus"),
+    },
+  };
+  const manager = Object.assign(Object.create(TerminalManager.prototype), { active: visible }) as TerminalManager;
+
+  manager.focusActive();
+  assert.deepEqual(events, ["blur", "focus"]);
+
+  visible.term.element.offsetParent = null;
+  manager.focusActive();
+  assert.deepEqual(events, ["blur", "focus"], "hidden terminals must not steal focus");
+});
+
+test("all active-terminal paths share one focus recovery implementation", () => {
+  const source = readFileSync("src/terminal.ts", "utf8");
+  assert.equal(source.match(/\.term\.blur\(\)/g)?.length, 1);
+  assert.equal(source.match(/\.term\.focus\(\)/g)?.length, 1);
+  assert.ok((source.match(/this\.recoverFocus\(t\)/g)?.length ?? 0) >= 3, "click, activate, and focusActive must share recovery");
+});

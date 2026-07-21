@@ -240,6 +240,7 @@ import {
   createSidebarDrawer,
   handleSidebarDrawerShortcut,
   hasActiveBlockingOverlay,
+  isTerminalOwnedKeyboardTarget,
 } from "./drawer";
 import { createTurnActions, waitForRollbackAction } from "./turn-actions";
 import { mountLedger } from "./ledger";
@@ -2519,7 +2520,13 @@ const sidebarDrawer = createSidebarDrawer(createDomSidebarDrawerHost({
     if (searchViewOpen) closeSearchView();
     outlineView?.setMode("files");
   },
-}));
+}), {
+  recoverFocus: (target) => {
+    if (!isTerminalOwnedKeyboardTarget(target)) return false;
+    terminals.focusActive();
+    return true;
+  },
+});
 let preNorthSidebarVisible = !sidebar.classList.contains("hidden");
 
 function setDockedSidebar(on: boolean): void {
@@ -3481,6 +3488,7 @@ window.addEventListener("dragend", clearPaneDropHint);
 
 // ---- global shortcuts ----
 window.addEventListener("keydown", (e) => {
+  if (isTerminalOwnedKeyboardTarget(e.target)) return;
   const mod = isMod(e);
   // e.code (physical key) not e.key — ⌥ remaps e.key on macOS, breaking ⌥⌘S.
   const blockingOverlayActive = hasActiveBlockingOverlay(

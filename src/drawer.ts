@@ -34,6 +34,11 @@ export interface SidebarDrawer {
   handleEscape(event: SidebarDrawerEscapeEvent, blockedByOverlay?: boolean): boolean;
 }
 
+export interface SidebarDrawerOptions {
+  /** Returns true when focus restoration was handled by a surface owner. */
+  recoverFocus?(target: FocusHandle): boolean;
+}
+
 export interface SidebarDrawerShortcutState {
   north: boolean;
   blockingOverlayActive: boolean;
@@ -47,6 +52,14 @@ export interface BlockingOverlayHandle {
   readonly inert: boolean;
   readonly classList: Pick<DOMTokenList, "contains">;
   getAttribute(name: string): string | null;
+}
+
+/** True when xterm's input surface owns the keyboard event. */
+export function isTerminalOwnedKeyboardTarget(target: unknown): boolean {
+  if (!target || typeof target !== "object" || !("closest" in target)) return false;
+  const closest = (target as { closest?: unknown }).closest;
+  if (typeof closest !== "function") return false;
+  return Boolean(closest.call(target, ".xterm-helper-textarea") || closest.call(target, ".xterm"));
 }
 
 /** True only for a mounted, interactive blocking overlay. */
@@ -65,6 +78,7 @@ export function handleSidebarDrawerShortcut(
   event: SidebarDrawerShortcutEvent,
   state: SidebarDrawerShortcutState,
 ): boolean {
+  if (isTerminalOwnedKeyboardTarget(event.target)) return false;
   if (event.key === "Escape") {
     return drawer.handleEscape(event, state.blockingOverlayActive);
   }
@@ -130,7 +144,7 @@ export function createDomSidebarDrawerHost(options: DomSidebarDrawerHostOptions)
 }
 
 /** Owns the drawer lifecycle while the injected host owns DOM placement. */
-export function createSidebarDrawer(host: SidebarDrawerHost): SidebarDrawer {
+export function createSidebarDrawer(host: SidebarDrawerHost, options: SidebarDrawerOptions = {}): SidebarDrawer {
   let open = false;
   let priorFocus: FocusHandle | null = null;
 
@@ -144,14 +158,16 @@ export function createSidebarDrawer(host: SidebarDrawerHost): SidebarDrawer {
       host.focusTree();
       return true;
     },
-    close(options = {}): boolean {
+    close(closeOptions = {}): boolean {
       if (!open) return false;
-      const restoreFocus = options.restoreFocus !== false;
+      const restoreFocus = closeOptions.restoreFocus !== false;
       open = false;
       host.restoreToOriginal();
       const target = priorFocus;
       priorFocus = null;
-      if (restoreFocus && target?.isConnected !== false) target?.focus();
+      if (restoreFocus && target?.isConnected !== false && target) {
+        if (!options.recoverFocus?.(target)) target.focus();
+      }
       return true;
     },
     toggle(): void {
