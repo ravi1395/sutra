@@ -1,5 +1,5 @@
 import { isRollbackable } from "./agent-tracking";
-import type { Turn } from "./ipc";
+import type { Turn, TurnFileEntry } from "./ipc";
 import { taskOwnerForTurn, turnReviewState, type Task, type TurnReviewState } from "./tasks";
 import type { TurnActions } from "./turn-actions";
 
@@ -41,6 +41,15 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+/** True when a turn file has a real net change (add / delete / modify). A file
+ *  edited then reverted to its original content within the turn closes with
+ *  beforeHash === afterHash — it has no hunks, so it must not appear in the
+ *  turn diff list. Missing hashes are treated as "changed" (fail open: show
+ *  rather than silently hide a possibly-real change). */
+export function turnFileChanged(file: TurnFileEntry): boolean {
+  return !(file.beforeHash != null && file.afterHash != null && file.beforeHash === file.afterHash);
+}
+
 /** Pure North-ledger projection. Synthetic rollback boundaries are transport
  * records, not user work, and never appear as ledger rows. */
 export function ledgerRenderModel(
@@ -64,7 +73,9 @@ export function ledgerRenderModel(
         phase,
         expanded: phase === "running" || (expanded?.root === turn.root && expanded.turnId === turn.id),
         struck: turn.rolledBack,
-        fileNames: turn.files.map((file) => fileName(file.path)),
+        // Only net-changed files (drop touched-then-reverted) so the row summary
+        // matches the turn's Review diff, which filters the same way.
+        fileNames: turn.files.filter(turnFileChanged).map((file) => fileName(file.path)),
         testState: turn.testStatus?.state ?? "not_run",
         reviewState: owner ? turnReviewState(owner, turn.id) : null,
         canReviewDiff: phase === "closed",
@@ -104,32 +115,56 @@ function currentRealTurn(guards: LedgerGuards, root: string, turnId: number): { 
 export function mountLedger(host: HTMLElement, actions: TurnActions, guards: LedgerGuards): LedgerHandle {
   let snapshot: LedgerSnapshot = { root: null, turns: [], tasks: [] };
   const expanded = new Map<string, number>();
+  // Last rendered signature + live scroll container, so the poll-driven render
+  // can skip an identical rebuild (and restore scroll when it can't).
+  let lastSignature: string | null = null;
+  let listEl: HTMLElement | null = null;
 
   function render(): void {
+    const root = snapshot.root;
+    let rows: LedgerTurnModel[] = [];
+    let empty: "root" | "turns" | null = null;
+    if (!root) {
+      empty = "root";
+    } else {
+      const expandedTurnId = expanded.get(root);
+      if (expandedTurnId != null && !snapshot.turns.some((turn) => turn.id === expandedTurnId && turn.boundarySource !== "rollback")) {
+        expanded.delete(root);
+      }
+      rows = ledgerRenderModel(
+        snapshot.turns,
+        snapshot.tasks,
+        expanded.has(root) ? { root, turnId: expanded.get(root)! } : null,
+      );
+      if (rows.length === 0) empty = "turns";
+    }
+
+    // render() output is a pure function of (root, empty, rows). The 1.5s agent
+    // poll re-renders on every tick with usually-identical data; rebuilding the
+    // DOM each time reset .ledger-turns scrollTop to 0 (and dropped focus). Skip
+    // the teardown when nothing that affects the DOM changed, and preserve the
+    // scroll position across the rebuilds that do land.
+    const signature = JSON.stringify({ root, empty, rows });
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    const prevScroll = listEl?.scrollTop ?? 0;
+    listEl = null;
+
     host.replaceChildren();
     const heading = element("header", "ledger-header");
     heading.append(element("div", "ledger-title", "Ledger"), element("kbd", "ledger-shortcut", "⌘L"));
     host.append(heading);
 
-    if (!snapshot.root) {
+    if (empty === "root") {
       host.append(element("div", "ledger-empty", "Open a workspace to see turns."));
       return;
     }
 
-    const root = snapshot.root;
-    const expandedTurnId = expanded.get(root);
-    if (expandedTurnId != null && !snapshot.turns.some((turn) => turn.id === expandedTurnId && turn.boundarySource !== "rollback")) {
-      expanded.delete(root);
-    }
-    const rows = ledgerRenderModel(
-      snapshot.turns,
-      snapshot.tasks,
-      expanded.has(root) ? { root, turnId: expanded.get(root)! } : null,
-    );
     const list = element("div", "ledger-turns");
     list.setAttribute("role", "list");
     host.append(list);
-    if (rows.length === 0) {
+    listEl = list;
+    if (empty === "turns") {
       list.append(element("div", "ledger-empty", "No turns yet."));
       return;
     }
@@ -206,6 +241,7 @@ export function mountLedger(host: HTMLElement, actions: TurnActions, guards: Led
       }
       list.append(article);
     }
+    list.scrollTop = prevScroll;
   }
 
   return {

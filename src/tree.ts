@@ -793,11 +793,12 @@ export type SidebarMode = "files" | "outline" | "stacked";
 
 /** Pure render model for OutlineView.setMode: which labeled sections a sidebar
  *  mode shows, in display order. "stacked" is the stanza Write-room shelf
- *  (T8b) — Files, Outline and Search co-displayed; "files"/"outline" are the
- *  existing single-section exclusive modes. No DOM here — main.ts drives the
+ *  (T8b) — Files and Outline co-displayed; "files"/"outline" are the existing
+ *  single-section exclusive modes. Project search is reached via ⇧⌘F / ⌘P (as
+ *  in classic), not a permanent shelf section. No DOM here — main.ts drives the
  *  actual shelf DOM from this order so the two never drift apart. */
 export function sidebarSections(mode: SidebarMode): readonly string[] {
-  if (mode === "stacked") return ["files", "outline", "search"];
+  if (mode === "stacked") return ["files", "outline"];
   return [mode];
 }
 

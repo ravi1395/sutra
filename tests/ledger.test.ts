@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import type { Turn } from "../src/ipc";
-import { ledgerRenderModel, mountLedger } from "../src/ledger";
+import { ledgerRenderModel, mountLedger, turnFileChanged } from "../src/ledger";
 import type { Task } from "../src/tasks";
 
 function turn(overrides: Partial<Turn> = {}): Turn {
@@ -121,6 +121,7 @@ class FakeElement {
   textContent = "";
   type = "";
   disabled = false;
+  scrollTop = 0;
   readonly children: FakeElement[] = [];
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, (() => void)[]>();
@@ -143,6 +144,86 @@ function findByClass(root: FakeElement, name: string): FakeElement | undefined {
   }
   return undefined;
 }
+
+test("ledger row lists only net-changed files", () => {
+  const rows = ledgerRenderModel(
+    [turn({
+      id: 9, boundarySource: "open", closedAt: null, files: [
+        { path: "changed.ts", snapshotted: true, beforeHash: "a", afterHash: "b" },
+        { path: "reverted.ts", snapshotted: true, beforeHash: "x", afterHash: "x" },
+        { path: "added.ts", snapshotted: true, beforeHash: null, afterHash: "y" },
+      ],
+    })],
+    [],
+  );
+  assert.deepEqual(rows[0].fileNames, ["changed.ts", "added.ts"]);
+});
+
+test("turnFileChanged drops reverted files, keeps real changes", () => {
+  assert.equal(turnFileChanged({ path: "a", snapshotted: true, beforeHash: "x", afterHash: "x" }), false);
+  assert.equal(turnFileChanged({ path: "a", snapshotted: true, beforeHash: "x", afterHash: "y" }), true);
+  assert.equal(turnFileChanged({ path: "a", snapshotted: true, beforeHash: null, afterHash: "y" }), true); // added
+  assert.equal(turnFileChanged({ path: "a", snapshotted: true, beforeHash: "x", afterHash: null }), true); // deleted
+  assert.equal(turnFileChanged({ path: "a", snapshotted: false }), true); // hashes absent → fail open
+});
+
+function withFakeDocument(body: () => void): void {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+  } as unknown as Document;
+  try {
+    body();
+  } finally {
+    globalThis.document = originalDocument;
+  }
+}
+
+test("ledger skips rebuild on unchanged snapshot, preserving scroll", () => {
+  withFakeDocument(() => {
+    const host = new FakeElement("ASIDE");
+    const closed = turn({ id: 5, files: [{ path: "a.ts", snapshotted: true }] });
+    const ledger = mountLedger(
+      host as unknown as HTMLElement,
+      { reviewDiff: () => {}, rollback: async () => {} },
+      { currentRoot: () => "/root", turnsForRoot: () => [closed] },
+    );
+    ledger.render({ root: "/root", turns: [closed], tasks: [] });
+    const firstList = findByClass(host, "ledger-turns");
+    assert.ok(firstList);
+    firstList!.scrollTop = 42;
+
+    // A fresh snapshot object carrying identical data (the 1.5s poll) must not
+    // tear down the list — same element instance, scroll intact.
+    ledger.render({ root: "/root", turns: [turn({ id: 5, files: [{ path: "a.ts", snapshotted: true }] })], tasks: [] });
+    const secondList = findByClass(host, "ledger-turns");
+    assert.equal(secondList, firstList);
+    assert.equal(secondList!.scrollTop, 42);
+  });
+});
+
+test("ledger restores scroll across a real rebuild", () => {
+  withFakeDocument(() => {
+    const host = new FakeElement("ASIDE");
+    const closed = turn({ id: 5, files: [{ path: "a.ts", snapshotted: true }] });
+    const ledger = mountLedger(
+      host as unknown as HTMLElement,
+      { reviewDiff: () => {}, rollback: async () => {} },
+      { currentRoot: () => "/root", turnsForRoot: () => [closed] },
+    );
+    ledger.render({ root: "/root", turns: [closed], tasks: [] });
+    const firstList = findByClass(host, "ledger-turns");
+    assert.ok(firstList);
+    firstList!.scrollTop = 30;
+
+    // A new turn arrives → the list is genuinely rebuilt, but scroll is carried.
+    const closed2 = turn({ id: 6, files: [{ path: "b.ts", snapshotted: true }] });
+    ledger.render({ root: "/root", turns: [closed, closed2], tasks: [] });
+    const secondList = findByClass(host, "ledger-turns");
+    assert.notEqual(secondList, firstList);
+    assert.equal(secondList!.scrollTop, 30);
+  });
+});
 
 test("running ledger summary is not a dead control", () => {
   const originalDocument = globalThis.document;

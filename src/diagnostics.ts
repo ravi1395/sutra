@@ -332,19 +332,27 @@ function renderProblemsPanel(): void {
     panel.appendChild(row);
   }
   const bySource = state.byRoot.get(root);
-  if (!bySource) return;
-  for (const [source, diags] of bySource) {
-    if (source.includes(TOOLFAIL_MARK)) continue;
-    for (const diag of diags) {
-      const row = document.createElement("div");
-      row.className = "problem-row";
-      row.textContent = `${diag.severity} ${diag.path}:${diag.line}:${diag.col} ${diag.message}`;
-      row.onclick = () => {
-        const path = resolveGotoPath(diag.path, root);
-        window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path, line: diag.line, col: diag.col } }));
-      };
-      panel.appendChild(row);
+  if (bySource) {
+    for (const [source, diags] of bySource) {
+      if (source.includes(TOOLFAIL_MARK)) continue;
+      for (const diag of diags) {
+        const row = document.createElement("div");
+        row.className = "problem-row";
+        row.textContent = `${diag.severity} ${diag.path}:${diag.line}:${diag.col} ${diag.message}`;
+        row.onclick = () => {
+          const path = resolveGotoPath(diag.path, root);
+          window.dispatchEvent(new CustomEvent("sutra:goto", { detail: { path, line: diag.line, col: diag.col } }));
+        };
+        panel.appendChild(row);
+      }
     }
+  }
+  // Never leave the panel blank — an empty pane reads as "broken/minimized".
+  if (panel.childElementCount === 0) {
+    const empty = document.createElement("div");
+    empty.className = "problem-row problem-row--empty";
+    empty.textContent = "No problems found.";
+    panel.appendChild(empty);
   }
 }
 

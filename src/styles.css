@@ -1319,6 +1319,21 @@ button:hover {
   gap: 4px;
   margin-left: 8px;
 }
+/* File-tree toggle button is North-only: North hides the docked sidebar (tree
+   lives in a drawer overlay), so it needs an on-screen control; other views
+   keep the docked sidebar + ⌘B, matching classic (no titlebar button). */
+#btn-sidebar { display: none; }
+:root.view-north #btn-sidebar { display: inline-flex; }
+/* Stanza: the room switcher already drives terminal (Run), diff (Review) and
+   browser (Web), so those titlebar toggles are redundant — hide them. The
+   composer is NOT in any room preset, so its button is kept (only way to open
+   it in stanza). */
+:root.view-stanza #btn-term,
+:root.view-stanza #btn-diff,
+:root.view-stanza #btn-browser { display: none; }
+/* Graphite: the band tabs (Terminal/Problems) own the terminal toggle — drop
+   the duplicate titlebar terminal button. */
+:root.view-graphite #btn-term { display: none; }
 .tbtn {
   width: 30px;
   height: 30px;
@@ -2319,6 +2334,12 @@ button:hover {
 
 /* ── W1/T2 Graphite structure: dynamic Terminal/Problems band. ── */
 :root.view-graphite #terminal-area.terminal-collapsed #terminal-seam {
+  display: none;
+}
+/* Stanza: rooms own the terminal (only the Run room shows it). A non-Run room
+   collapses it to the 30px seam strip, which reads as "terminal still here" —
+   hide the collapsed terminal entirely so Write/Review/Web have no terminal. */
+:root.view-stanza #terminal-area.terminal-collapsed {
   display: none;
 }
 :root.view-graphite .graphite-band {
@@ -4218,6 +4239,15 @@ button:hover {
   background: var(--bg-2);
   border-top: 1px solid var(--line);
 }
+/* Graphite: Problems is a band-tab panel, not a compact strip. When it's the
+   active tab, give it the drawer's footprint (like the terminal) instead of the
+   200px cap, so switching Terminal→Problems reads as a panel swap, not a shrink
+   of the whole bottom pane. */
+:root.view-graphite #problems-panel-host:not(.hidden) {
+  flex: 0 1 40%;
+  max-height: none;
+  min-height: 0;
+}
 #problems-panel { padding: 4px 0; font-size: 12px; }
 .problem-row {
   display: flex;
@@ -4683,10 +4713,6 @@ body.app-hidden *::after {
   flex: 1 1 0;
   min-height: 64px;
   overflow: auto;
-}
-:root.view-stanza #sidebar.shelf-active #search-view {
-  flex: 1 1 0;
-  min-height: 64px;
 }
 :root.view-stanza .shelf-label {
   flex: 0 0 auto;

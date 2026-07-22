@@ -1176,6 +1176,10 @@ export class EditorManager {
   onActiveTabChanged?: (tab: Tab | null) => void;
   /** Fires when the focused pane's document content changes; main.ts wires the outline refresh. */
   onDocChanged?: () => void;
+  /** Fires after a freshly-opened document is registered with the language engine
+   *  (langDidOpen resolved); main.ts re-refreshes the outline, which otherwise
+   *  raced the register on the pre-did_open onActiveTabChanged. */
+  onDocumentParsed?: (path: string) => void;
   /** Fires when goto-definition returns multiple candidates; main.ts/tree.ts wire a picker. */
   onGotoDefinitionMulti?: (locs: import("./ipc").Location[]) => void;
 
@@ -1491,8 +1495,14 @@ export class EditorManager {
     pane.addTab(tab);
     this.activateInPane(pane, tab);
     if (line !== undefined) this.revealLine(line);
-    // Notify the language engine that this document is now open (version 0 = initial load).
-    langDidOpen(path, content, 0).catch(() => {});
+    // Notify the language engine that this document is now open (version 0 =
+    // initial load). onActiveTabChanged already fired above (activateInPane) —
+    // before this — so any symbol-consuming UI (the outline) that refreshed on
+    // it saw no registered doc yet. Signal parse-readiness once did_open resolves
+    // so those consumers can re-fetch against the now-registered document.
+    langDidOpen(path, content, 0)
+      .then(() => this.onDocumentParsed?.(path))
+      .catch(() => {});
   }
 
   /** Show immutable scoped content (for example, a deleted branch file) without

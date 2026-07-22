@@ -243,7 +243,7 @@ import {
   isTerminalOwnedKeyboardTarget,
 } from "./drawer";
 import { createTurnActions, waitForRollbackAction } from "./turn-actions";
-import { mountLedger } from "./ledger";
+import { mountLedger, turnFileChanged } from "./ledger";
 import { createRoomRouter, type RoomId } from "./rooms";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -1139,6 +1139,11 @@ async function openWorkspace(dir: string, explicit = false): Promise<void> {
     if (!isCurrent()) return;
     if (settings.restoreSession) await restoreWorkspaceTabs(dir, isCurrent);
     if (!isCurrent()) return;
+    // The stanza Write-room shelf shows the outline in stacked mode; its boot
+    // refresh fired before any file was open (empty "No symbols"), and the
+    // restore-time activation can race symbol readiness. Re-refresh now that the
+    // active file is settled so the outline is populated without a room switch.
+    outlineView.onActiveFileChanged();
     // Persisted task links need the complete turn manifest (not only the
     // consume-once turn_poll delta) before the panel renders files/test state.
     await turnsHydrated;
@@ -1644,7 +1649,11 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
     scopedDiffCache = { root, turnId, contents: new Map() };
   }
   const contents = scopedDiffCache.contents;
-  const uncached = turn.files.filter((f) => !contents.has(f.path));
+  // Files touched then reverted within the turn (beforeHash === afterHash) have
+  // no hunks; drop them so the turn diff list never shows unchanged files, and
+  // skip fetching their (identical) snapshot blobs.
+  const changed = turn.files.filter(turnFileChanged);
+  const uncached = changed.filter((f) => !contents.has(f.path));
   await Promise.all(
     uncached.map(async (f) => {
       try {
@@ -1659,7 +1668,7 @@ async function refreshScopedDiffFileList(root: string, turnId: number): Promise<
   if (currentRoot !== root || diffScope.kind !== "turn" || diffScope.turnId !== turnId) return;
 
   const activePath = editor.active?.path ?? null;
-  const files = turn.files.map((f) => {
+  const files = changed.map((f) => {
     const content = contents.get(f.path) ?? null;
     const headFallback = !content || !content.snapshotted;
     return { path: f.path, status: turnFileStatus(f), badge: headFallback ? "~HEAD" : undefined };
@@ -2565,6 +2574,16 @@ function setSidebar(on: boolean): void {
   setDockedSidebar(on);
 }
 
+// Visible file-tree toggle. North hides the docked sidebar (tree lives in a
+// drawer overlay), leaving no on-screen control — this button (CSS-shown only
+// in North) mirrors ⌘B so the file system is reachable without the shortcut.
+const btnSidebar = $("btn-sidebar");
+btnSidebar.innerHTML = icon("folder", 17);
+btnSidebar.onclick = () => {
+  if (settings.view === "north") setSidebar(!sidebarDrawer.isOpen());
+  else setSidebar(sidebar.classList.contains("hidden"));
+};
+
 // Best-effort primary-surface focus for a room preset; each target degrades to a no-op
 // if that surface has nothing focusable yet (e.g. terminal still spinning up a session).
 function focusRoomSurface(target: "editor" | "terminal" | "diff" | "browser"): void {
@@ -2694,13 +2713,10 @@ let searchIconHtml = "";
 let shelfActive = false;
 
 function openSearchView(): void {
-  // Shelf mode already co-displays Files/Outline/Search — opening search here
-  // must not collapse it back to the exclusive Files<->Outline toggle (D-item
-  // 3 of T8b); just focus the always-visible search section instead.
-  if (shelfActive) {
-    search.focus();
-    return;
-  }
+  // Search is an exclusive Files<->Search swap (as in classic). Inside the
+  // stanza Write-room shelf, suspend the stacked Files+Outline co-display so the
+  // search pane owns the sidebar; closeSearchView resumes the shelf.
+  if (shelfActive) outlineView.setMode("files");
   searchViewOpen = true;
   treeEl.classList.add("hidden");
   searchView.classList.remove("hidden");
@@ -2711,22 +2727,20 @@ function openSearchView(): void {
 }
 
 function closeSearchView(): void {
-  if (shelfActive) return; // nothing to collapse — search stays co-displayed
   searchViewOpen = false;
   searchView.classList.add("hidden");
   treeEl.classList.remove("hidden");
   if (searchIconHtml) btnSearchToggle.innerHTML = searchIconHtml;
   btnSearchToggle.title = "Search folder (⇧⌘F)";
+  if (shelfActive) outlineView.setMode("stacked"); // resume the stacked shelf
 }
 
 function toggleSearchView(): void {
-  if (shelfActive) return; // toggle button is hidden in shelf mode; defensive no-op
   if (searchViewOpen) closeSearchView(); else openSearchView();
 }
 
 function openSidebarSearch(): void {
   if (settings.view === "north") setSidebar(true);
-  if (!shelfActive) outlineView?.setMode("files");
   if (!searchViewOpen) openSearchView();
   search.focus();
 }
@@ -3570,9 +3584,12 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && e.code === "KeyJ") {
     e.preventDefault();
     setTerminal(!drawerState.open);
-  } else if (mod && e.code === "KeyB" && settings.view !== "north") {
+  } else if (mod && e.code === "KeyB") {
     e.preventDefault();
-    setSidebar(sidebar.classList.contains("hidden"));
+    // North docks the tree in a drawer overlay; elsewhere it's the docked
+    // sidebar. setSidebar routes to the right one. (⌘E also toggles in North.)
+    if (settings.view === "north") setSidebar(!sidebarDrawer.isOpen());
+    else setSidebar(sidebar.classList.contains("hidden"));
   } else if (mod && e.shiftKey && e.code === "KeyP") {
     e.preventDefault();
     palette.open(">"); // ⌘⇧P command mode
@@ -4069,6 +4086,12 @@ editor.onActiveTabChanged = (tab) => {
   _origOnActiveTabChanged?.(tab);
   outlineView.onActiveFileChanged();
 };
+// A fresh open fires onActiveTabChanged before langDidOpen registers the doc, so
+// the refresh above sees no symbols. Re-refresh once the engine confirms the
+// open, but only if that file is still the active one.
+editor.onDocumentParsed = (path) => {
+  if (editor.active?.path === path) outlineView.onActiveFileChanged();
+};
 // Debounced outline refresh while editing the active file.
 editor.onDocChanged = () => {
   outlineView.scheduleRefresh();
@@ -4083,8 +4106,8 @@ editor.onDocChanged = () => {
 // treeEl, outlineView.panelEl and searchView — never clones or rebuilds them;
 // the only new DOM is one small label header per section, reparented beside
 // each node in the order sidebarSections("stacked") defines.
-const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline", search: "Search" };
-const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl, search: searchView };
+const SHELF_SECTION_LABEL: Record<string, string> = { files: "Files", outline: "Outline" };
+const SHELF_SECTION_EL: Record<string, HTMLElement> = { files: treeEl, outline: outlineView.panelEl };
 const shelfLabels: HTMLElement[] = sidebarSections("stacked").map((section, index) => {
   const label = document.createElement("div");
   label.className = index === 0 ? "shelf-label shelf-label-first hidden" : "shelf-label hidden";
@@ -4104,15 +4127,14 @@ function syncShelfMode(): void {
   shelfActive = active;
   sidebar.classList.toggle("shelf-active", active);
   for (const label of shelfLabels) label.classList.toggle("hidden", !active);
-  btnSearchToggle.classList.toggle("hidden", active);
-  if (active) {
-    outlineView.setMode("stacked");
-    searchView.classList.remove("hidden");
-  } else {
-    if (searchViewOpen) closeSearchView();
-    else searchView.classList.add("hidden");
-    outlineView.setMode("files");
-  }
+  // The shelf is Files+Outline only; project search stays on ⇧⌘F / ⌘P (as in
+  // classic). Collapse any open exclusive search across every shelf transition
+  // so neither the incoming stacked layout nor the outgoing view paints the
+  // search pane on top of the un-hidden file tree. (closeSearchView won't resume
+  // the shelf here: on entry the setMode("stacked") below is authoritative; on
+  // exit shelfActive is already false.)
+  if (searchViewOpen) closeSearchView();
+  outlineView.setMode(active ? "stacked" : "files");
 }
 
 // Statusbar debug chip (mockup variant D): renderWhisperBar's append/absence is driven
