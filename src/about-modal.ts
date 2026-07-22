@@ -41,6 +41,19 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.41",
+    date: "2026-07-22",
+    notes: [
+      "Stanza: the code outline now appears as soon as you open or switch files.",
+      "Stanza: room tabs are the only surface control — the redundant terminal/diff/browser toggles are gone, and non-Run rooms no longer leave a terminal strip behind.",
+      "Stanza: the Write sidebar is Files + Outline; project search stays on ⇧⌘F and ⌘P.",
+      "North Light: the change ledger holds its scroll position and no longer lists files that ended up unchanged in a turn's diff.",
+      "North Light: a file-tree button (and ⌘B) toggles the sidebar.",
+      "Graphite: removed the duplicate terminal button; the Problems tab now fills the panel.",
+      "The Problems panel shows \"No problems found.\" instead of a blank pane.",
+    ],
+  },
+  {
     version: "2.3.4",
     date: "2026-07-21",
     notes: [
