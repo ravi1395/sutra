@@ -41,6 +41,13 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.42",
+    date: "2026-07-22",
+    notes: [
+      "Fixed the terminal freezing in vim and other full-screen programs (less, htop): a production-build minifier bug silently broke xterm's screen updates the moment vim started.",
+    ],
+  },
+  {
     version: "2.3.41",
     date: "2026-07-22",
     notes: [

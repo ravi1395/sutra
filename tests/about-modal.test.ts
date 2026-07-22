@@ -25,11 +25,11 @@ test("RELEASES is non-empty and every entry is well-formed", () => {
   }
 });
 
-test("RELEASES ships 2.3.41 first with multiview cleanup notes", () => {
+test("RELEASES ships 2.3.42 first with the terminal freeze fix note", () => {
   const cur: Release | undefined = RELEASES[0];
-  assert.equal(cur?.version, "2.3.41");
-  assert.match(cur!.notes.join(" "), /Stanza/i);
-  assert.match(cur!.notes.join(" "), /Outline|Ledger|Graphite/i);
+  assert.equal(cur?.version, "2.3.42");
+  assert.match(cur!.notes.join(" "), /terminal/i);
+  assert.match(cur!.notes.join(" "), /vim/i);
 });
 
 test("TUTORIAL content is present and well-formed", () => {
