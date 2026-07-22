@@ -150,6 +150,10 @@ export const TUTORIAL_SECTIONS: TutorialSection[] = [
     title: "Track AI edits",
     body: "Turn on Track AI to see which lines an agent changed, review them per hunk, and roll a whole turn back if you need to.",
   },
+  {
+    title: "Switch views",
+    body: "Open the palette (⌘P → >) and pick a view — Classic, North Light, Graphite, or Stanza — each with a day/night variant. North Light adds a Ledger rail (⌘L) for agent turns; Stanza splits the window into Write/Run/Review/Web rooms (⌘1–⌘4).",
+  },
 ];
 
 // Keyboard reference shown on the Tutorial tab.

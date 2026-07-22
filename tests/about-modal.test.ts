@@ -25,11 +25,11 @@ test("RELEASES is non-empty and every entry is well-formed", () => {
   }
 });
 
-test("RELEASES ships 2.3.4 first with terminal recovery notes", () => {
+test("RELEASES ships 2.3.41 first with multiview cleanup notes", () => {
   const cur: Release | undefined = RELEASES[0];
-  assert.equal(cur?.version, "2.3.4");
-  assert.match(cur!.notes.join(" "), /terminal/i);
-  assert.match(cur!.notes.join(" "), /Vim/i);
+  assert.equal(cur?.version, "2.3.41");
+  assert.match(cur!.notes.join(" "), /Stanza/i);
+  assert.match(cur!.notes.join(" "), /Outline|Ledger|Graphite/i);
 });
 
 test("TUTORIAL content is present and well-formed", () => {

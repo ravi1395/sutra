@@ -411,7 +411,7 @@ The command palette switches between the coupled **Classic**, **North Light**, *
 
 ### North Light
 
-North Light is a porcelain/slate (day/night) view built from floating in-flow sheets rather than flat panels. Open files trail across the tab bar as **trail tabs**; hiding a surface (Terminal, Browser, Diff, Composer) collapses it into a restorable **surface pill** in the whisper strip instead of just disappearing. The sidebar can pop out into an overlay **drawer** — **⌘E** opens/closes it (Esc, an outside click, or opening a file also closes it); the docked Classic/Graphite/Stanza sidebar is unaffected.
+North Light is a porcelain/slate (day/night) view built from floating in-flow sheets rather than flat panels. Open files trail across the tab bar as **trail tabs**; hiding a surface (Terminal, Browser, Diff, Composer) collapses it into a restorable **surface pill** in the whisper strip instead of just disappearing. The sidebar pops out into an overlay **drawer** — the titlebar **file-tree button**, **⌘B**, or **⌘E** opens/closes it (Esc, an outside click, or opening a file also closes it); the docked Classic/Graphite/Stanza sidebar is unaffected.
 
 North Light also adds a right-side **Ledger** rail for agent turns. It opens by default for the session and toggles with **⌘L** while the North sidebar drawer and blocking overlays are closed. Running turns stay expanded; closed turns can be expanded to inspect file names, test state, and linked-task review disposition. Closed real turns reuse the existing exact-turn **Review diff** and guarded **Rollback** actions. The rail deliberately shows no line-count deltas and does not appear in Classic, Graphite, or Stanza.
 
@@ -431,7 +431,7 @@ Graphite is a Primer-dark flat-plane view: a single Primer blue accent (`#58a6ff
 
 Stanza organizes the window into four **rooms** — Write, Run, Review, Web — switched via the **hearth strip** room tablist or **⌘1**–**⌘4**; entering a room applies its fixed surface preset (sidebar, terminal, diff, browser). The hearth strip pulses a live dot on Run while a terminal session is active and shows a dot on Review while a linked turn awaits review. Stanza ships **dusk** (dark, petrol/verdigris) and **dawn** (light, sea-glass) variants and uses the bundled **Hanken Grotesk** for chrome; editor and terminal content keep their configured monospace face.
 
-The Write room's sidebar shows a **shelf**: Files, Outline, and Search stacked as three labeled sections instead of the usual exclusive Files↔Outline toggle. All three reuse the same file tree, outline panel, and search view Sutra always had — nothing is duplicated — so navigating the outline or running a search never hides the file tree. **⇧⌘F** in the Write room just focuses the always-visible Search section; outside the Write room (including other Stanza rooms) it keeps the normal behavior of opening the exclusive search view, without switching rooms. Leaving the Write room, or leaving Stanza entirely, restores the ordinary exclusive Files↔Outline sidebar.
+The Write room's sidebar shows a **shelf**: Files and Outline stacked as two labeled sections instead of the usual exclusive Files↔Outline toggle. Both reuse the same file tree and outline panel Sutra always had — nothing is duplicated — so navigating the outline never hides the file tree. Project search stays on **⇧⌘F** and **⌘P**, as in Classic: opening the exclusive search view suspends the stacked shelf, and closing it restores the shelf. Leaving the Write room, or leaving Stanza entirely, restores the ordinary exclusive Files↔Outline sidebar.
 
 ## Keyboard shortcuts
 
@@ -457,7 +457,10 @@ The Write room's sidebar shows a **shelf**: Files, Outline, and Search stacked a
 | `⇧⌘K` | Delete line |
 | `Tab` | Indent selection |
 | `⌘J` / `^\`` | Toggle terminal |
-| `⌘B` | Toggle sidebar |
+| `⌘B` | Toggle sidebar (North: sidebar drawer) |
+| `⌘E` | Toggle sidebar drawer (North Light) |
+| `⌘L` | Toggle Ledger rail (North Light) |
+| `⌘1`–`⌘4` | Switch room: Write / Run / Review / Web (Stanza) |
 | `⌘\` | Toggle split pane |
 | `⇧⌘V` | Toggle Markdown / HTML preview |
 | `⌘,` | Open Settings |
