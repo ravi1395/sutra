@@ -10,6 +10,12 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+  // esnext keeps xterm's `r ||= {}` enum-init intact: vite's default-target minify
+  // pass drops the `let` declaration, leaving a strict-mode ReferenceError that
+  // wedges xterm's write queue on the first DECRQM query (vim → frozen screen).
+  build: {
+    target: "esnext",
+  },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
