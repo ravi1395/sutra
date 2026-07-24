@@ -56,3 +56,4 @@ HANDOFF.md
 src-tauri/HANDOFF.md
 src-tauri/gen/
 src-tauri/target/
+.claims/
