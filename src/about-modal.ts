@@ -41,6 +41,14 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.43",
+    date: "2026-07-24",
+    notes: [
+      "Fixed: turning on preview for a Markdown/Mermaid file no longer hides your other open tabs — each tab now remembers its own preview state independently.",
+      "Moved: \"Install CLI command\" is now in Settings → About instead of the workspace menu.",
+    ],
+  },
+  {
     version: "2.3.42",
     date: "2026-07-22",
     notes: [
