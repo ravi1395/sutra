@@ -42,6 +42,14 @@ export type AboutTab = (typeof ABOUT_TABS)[number];
 // per release. Kept terse — one line per user-visible change.
 export const RELEASES: Release[] = [
   {
+    version: "2.3.44",
+    date: "2026-07-24",
+    notes: [
+      "Fixed: dropdowns and popovers (branch/worktree menu, command palette, context menus, settings/about, workspace menu) now close when you click elsewhere in the terminal panel.",
+      "Fixed: dropdowns and popovers now also close when the app loses focus, e.g. switching to another app.",
+    ],
+  },
+  {
     version: "2.3.43",
     date: "2026-07-24",
     notes: [
