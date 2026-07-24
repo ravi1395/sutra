@@ -3,6 +3,7 @@
 // showContextMenu dismiss idiom (Escape / outside-click closes) and reuses
 // its `.context-menu` box styling so it matches every other popover in the
 // app (src/contextmenu.ts:17-66).
+import { registerOpenPopover } from "./popovers";
 
 export interface BreakpointFields {
   condition?: string;
@@ -42,10 +43,13 @@ export interface BreakpointPopoverOptions {
 }
 
 let current: HTMLElement | null = null;
+let unregisterPopover: (() => void) | null = null;
 
 function closePopover(): void {
   current?.remove();
   current = null;
+  unregisterPopover?.();
+  unregisterPopover = null;
 }
 
 function fieldRow(label: string, value: string, enabled: boolean, onInput: (v: string) => void): HTMLElement {
@@ -100,6 +104,7 @@ export function showBreakpointPopover(opts: BreakpointPopoverOptions): void {
 
   opts.containerEl.appendChild(el);
   current = el;
+  unregisterPopover = registerOpenPopover(closePopover);
 
   const dismissOnEscape = (ev: KeyboardEvent) => {
     if (ev.key === "Escape") {

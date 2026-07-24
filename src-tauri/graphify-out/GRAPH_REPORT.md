@@ -1,16 +1,16 @@
-# Graph Report - src-tauri  (2026-07-19)
+# Graph Report - src-tauri  (2026-07-24)
 
 ## Corpus Check
-- 37 files · ~71,091 words
+- 38 files · ~74,424 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1306 nodes · 3625 edges · 33 communities
-- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 29 edges (avg confidence: 0.8)
+- 1364 nodes · 3780 edges · 37 communities
+- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 30 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b90c41ee`
+- Built from commit: `948c65d1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -45,18 +45,22 @@
 - [[_COMMUNITY_Community 30|Community 30]]
 - [[_COMMUNITY_Community 31|Community 31]]
 - [[_COMMUNITY_Community 32|Community 32]]
+- [[_COMMUNITY_Community 33|Community 33]]
+- [[_COMMUNITY_Community 34|Community 34]]
+- [[_COMMUNITY_Community 35|Community 35]]
+- [[_COMMUNITY_Community 36|Community 36]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `SutraMcp` - 50 edges
-2. `Result` - 44 edges
-3. `Tracker` - 40 edges
-4. `String` - 40 edges
+2. `Result` - 47 edges
+3. `String` - 42 edges
+4. `Tracker` - 40 edges
 5. `Path` - 38 edges
-6. `Option` - 32 edges
-7. `String` - 32 edges
-8. `McpError` - 31 edges
-9. `String` - 30 edges
-10. `CallToolResult` - 30 edges
+6. `repo_with_branch()` - 34 edges
+7. `Option` - 32 edges
+8. `String` - 32 edges
+9. `McpError` - 31 edges
+10. `String` - 30 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `with_root_guard()` --calls--> `F`  [INFERRED]
@@ -92,11 +96,11 @@
 - 1-file cycle: `src/preview_server.rs -> src/preview_server.rs`
 - 1-file cycle: `src/pty.rs -> src/pty.rs`
 
-## Communities (33 total, 0 thin omitted)
+## Communities (37 total, 0 thin omitted)
 
 ### Community 0 - "Community 0"
-Cohesion: 0.05
-Nodes (97): AtomicU64, AxumState, CallToolResult, Json, McpError, Next, Parameters, Request (+89 more)
+Cohesion: 0.06
+Nodes (57): AxumState, Json, Next, Request, Response, classify_nav_target(), CreateAutomationArgs, debug_continue_ui_payload() (+49 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
@@ -104,7 +108,7 @@ Nodes (109): AgentKind, Metadata, ProcessInfo, Snapshot, accept_path_drops_pendi
 
 ### Community 2 - "Community 2"
 Cohesion: 0.07
-Nodes (49): agent_parent_origin_matches_dev_webview_origin(), agent_script(), auth_set_cookie_header(), copy_until_eof(), handle_conn(), Head, head_insert_index(), host_is_loopback() (+41 more)
+Nodes (48): agent_parent_origin_matches_dev_webview_origin(), agent_script(), auth_set_cookie_header(), copy_until_eof(), handle_conn(), Head, head_insert_index(), host_is_loopback() (+40 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.10
@@ -123,16 +127,16 @@ Cohesion: 0.09
 Nodes (43): connect_with_retry(), DapEvent, debug_send(), debug_start(), debug_stop(), DebugSession, DebugState, drain_frames() (+35 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.13
-Nodes (28): canonicalize_in_root(), ErrorBody, file_url_path(), handle_client(), hex_val(), mime_for(), percent_decode(), percent_encode() (+20 more)
+Cohesion: 0.08
+Nodes (58): PreviewServer, canonicalize_in_root(), capability_from_another_preview_server_is_rejected(), capability_path(), capability_path_propagates_to_relative_html_assets_without_cookies(), error_response(), ErrorBody, file_url_path() (+50 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.12
 Nodes (24): completion(), insert_best(), matches_prefix(), score(), IndexStats, build(), fuzzy_score(), index_file() (+16 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.09
-Nodes (79): AheadBehindResult, branch_diff_errs_without_base_ref(), branch_diff_lists_branch_work_vs_merge_base_not_main_tip(), BranchDiffFiles, branches_bound_elsewhere(), branches_flag_head(), branches_flag_worktree_bound(), BranchInfo (+71 more)
+Cohesion: 0.08
+Nodes (85): AheadBehindResult, branch_diff_errs_without_base_ref(), branch_diff_lists_branch_work_vs_merge_base_not_main_tip(), branch_diff_prefers_nearest_merge_base_over_stale_origin_main(), BranchDiffFiles, branches_bound_elsewhere(), branches_flag_head(), branches_flag_worktree_bound() (+77 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.18
@@ -152,7 +156,7 @@ Nodes (23): app, security, withGlobalTauri, build, beforeBuildCommand, beforeDev
 
 ### Community 14 - "Community 14"
 Cohesion: 0.10
-Nodes (23): BTreeSet, Event, RecommendedWatcher, debounce_events(), emit_pending(), FsChangedPayload, is_noise_path(), noise() (+15 more)
+Nodes (26): BTreeSet, Event, RecommendedWatcher, claim_workspace_generation(), debounce_events(), emit_pending(), FsChangedPayload, is_noise_path() (+18 more)
 
 ### Community 15 - "Community 15"
 Cohesion: 0.15
@@ -214,24 +218,40 @@ Nodes (16): child_args(), file_resolves_to_root_plus_file(), file_root(), first_
 Cohesion: 0.23
 Nodes (11): bind(), Frame, handle(), AppHandle, Option, Result, String, TcpListener (+3 more)
 
+### Community 33 - "Community 33"
+Cohesion: 0.26
+Nodes (6): CallToolResult, McpError, Parameters, ServerHandler, Result, SutraMcp
+
+### Community 34 - "Community 34"
+Cohesion: 0.10
+Nodes (26): claim_workspace_generation(), endpoint_file_written_with_url(), hex_encode(), hook_command_path_is_shell_quoted(), hook_script_path(), hook_script_written_executable_and_nonempty(), LocalAuthToken, mcp_server_url() (+18 more)
+
+### Community 35 - "Community 35"
+Cohesion: 0.29
+Nodes (14): AtomicU64, ServerInfo, deliver_ui_reply(), IngestCtx, mcp_ui_reply(), McpState, AppHandle, Arc (+6 more)
+
+### Community 36 - "Community 36"
+Cohesion: 0.57
+Nodes (6): Result, String, window_close(), window_minimize(), window_toggle_maximize(), Window
+
 ## Knowledge Gaps
-- **119 isolated node(s):** `$schema`, `identifier`, `description`, `windows`, `permissions` (+114 more)
+- **118 isolated node(s):** `$schema`, `identifier`, `description`, `windows`, `permissions` (+113 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `mcp_write_agent_config()` connect `Community 0` to `Community 10`, `Community 15`?**
-  _High betweenness centrality (0.064) - this node is a cross-community bridge._
-- **Why does `capture_paths()` connect `Community 10` to `Community 0`, `Community 1`?**
-  _High betweenness centrality (0.060) - this node is a cross-community bridge._
-- **Why does `with_auth_token()` connect `Community 0` to `Community 2`, `Community 7`?**
-  _High betweenness centrality (0.039) - this node is a cross-community bridge._
+- **Why does `mcp_write_agent_config()` connect `Community 34` to `Community 0`, `Community 33`, `Community 35`, `Community 10`, `Community 15`?**
+  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+- **Why does `capture_paths()` connect `Community 10` to `Community 1`, `Community 34`?**
+  _High betweenness centrality (0.058) - this node is a cross-community bridge._
+- **Why does `with_auth_token()` connect `Community 34` to `Community 0`, `Community 2`, `Community 7`?**
+  _High betweenness centrality (0.034) - this node is a cross-community bridge._
 - **What connects `$schema`, `identifier`, `description` to the rest of the system?**
-  _119 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _118 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.05125337806355419 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.055900621118012424 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
   _Cohesion score 0.05281058101086443 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
-  _Cohesion score 0.07327001356852103 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07459207459207459 - nodes in this community are weakly interconnected._

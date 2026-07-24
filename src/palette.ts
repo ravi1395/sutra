@@ -3,6 +3,7 @@
 // (goto-definition multi-candidate chooser).
 import { type Symbol as WorkspaceSymbol, type Location, type FileListing } from "./ipc";
 import { type FocusHandle } from "./drawer";
+import { registerOpenPopover } from "./popovers";
 export interface Command {
   id: string;
   title: string;
@@ -107,6 +108,7 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
   // through close(), which hands it back (click-away otherwise strands focus on
   // body and keys route to the global shortcut handler instead of the terminal).
   let priorFocus: FocusHandle | null = null;
+  let unregisterPopover: (() => void) | null = null;
 
   function close(): void {
     if (overlay) {
@@ -114,6 +116,8 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
       overlay = null;
     }
     isOpen = false;
+    unregisterPopover?.();
+    unregisterPopover = null;
     const target = priorFocus;
     priorFocus = null;
     restorePaletteFocus(target, opts.recoverFocus);
@@ -264,6 +268,7 @@ export function mountPalette(opts: PaletteOpts): PaletteHandle {
     }
 
     isOpen = true;
+    unregisterPopover = registerOpenPopover(close);
     // Capture before the palette input below steals activeElement into the overlay.
     priorFocus = capturePaletteFocus(document.activeElement);
     overlay = document.createElement("div");
@@ -387,8 +392,12 @@ export function mountLocationPicker(
   const list = document.createElement("div");
   list.className = "palette-list";
 
+  let unregisterPopover: (() => void) | null = null;
+
   function close(): void {
     overlay.remove();
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
 
   function render(): void {
@@ -418,6 +427,7 @@ export function mountLocationPicker(
   container.append(label, list, footer);
   overlay.appendChild(container);
   document.body.appendChild(overlay);
+  unregisterPopover = registerOpenPopover(close);
 
   render();
   overlay.focus();

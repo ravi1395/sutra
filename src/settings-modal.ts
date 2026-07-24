@@ -17,6 +17,7 @@ import {
 import { hookInstall, hookStatus, cliInstallState } from "./ipc";
 import { runCliInstall } from "./menubar";
 import { icon } from "./icons";
+import { registerOpenPopover } from "./popovers";
 
 export interface ShortcutEntry {
   title: string;
@@ -36,6 +37,7 @@ const SECTIONS = ["Editor", "Terminal", "Behavior", "Harness", "Shortcuts", "Abo
 type Section = (typeof SECTIONS)[number];
 
 let openOverlay: HTMLElement | null = null;
+let unregisterPopover: (() => void) | null = null;
 
 // Quiet-window choices shown in the Harness section (clamp in settings.ts still applies).
 const QUIET_WINDOW_OPTIONS: readonly number[] = [5000, 10000, 20000, 30000];
@@ -388,6 +390,8 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
     overlay.remove();
     openOverlay = null;
     document.removeEventListener("keydown", onKey, true);
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Escape") {
@@ -405,4 +409,5 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
   renderSection("Editor");
   document.body.append(overlay);
   openOverlay = overlay;
+  unregisterPopover = registerOpenPopover(close);
 }

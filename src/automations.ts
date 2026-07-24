@@ -4,6 +4,7 @@
 // bottom wraps the existing fs IPC. UI mounting lives in Phase 3/4 additions here.
 import { readFile, writeFile, createDir } from "./ipc";
 import { icon } from "./icons";
+import { registerOpenPopover } from "./popovers";
 
 export interface Automation {
   id: string;
@@ -218,6 +219,7 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
   let runningId: string | null = null;
   let lastRunId: string | null = null; // tracks the last automation passed to run()
   let dropdown: HTMLElement | null = null;
+  let unregisterPopover: (() => void) | null = null;
 
   container.innerHTML = "";
 
@@ -238,6 +240,8 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
     anchor.classList.remove("open");
     document.removeEventListener("mousedown", onOutside);
     document.removeEventListener("keydown", onKey);
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
 
   function onOutside(e: MouseEvent): void {
@@ -357,6 +361,7 @@ export function mountAutomationBar(container: HTMLElement, actions: AutomationBa
     dd.style.minWidth = `${ddWidth}px`;
     dropdown = dd;
     anchor.classList.add("open");
+    unregisterPopover = registerOpenPopover(closeDropdown);
     setTimeout(() => {
       document.addEventListener("mousedown", onOutside);
       document.addEventListener("keydown", onKey);

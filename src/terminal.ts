@@ -26,6 +26,11 @@ import { cssVar, DEFAULT_TERM_COLORS as D } from "./theme-tokens";
 
 export type TerminalMaximizeState = TerminalGroupSide | null;
 
+// Marks a mousedown already handled by an instance's own focus-recovery
+// listener, so the ancestor group-body listener skips its redundant
+// focusGroup() render without stopping the event's bubble to document.
+type TermMouseEvent = MouseEvent & { __termInstanceHandled?: boolean };
+
 interface Term {
   id: string;
   term: Terminal;
@@ -362,6 +367,7 @@ export class TerminalManager {
       // before its click fires (killing tab activation). Tab clicks set focus via activate().
       col.addEventListener("mousedown", (e) => {
         if ((e.target as Element).closest(".term-group-tabs")) return;
+        if ((e as TermMouseEvent).__termInstanceHandled) return;
         this.focusGroup(side);
       });
 
@@ -655,15 +661,18 @@ export class TerminalManager {
     // helper textarea as document.activeElement while no longer routing keys to
     // it — so a bare focus() (xterm's built-in click handler, or ours) is a
     // no-op and the terminal stays deaf (e.g. vim ignoring i/:). blur()+focus()
-    // forces a real refocus that breaks the stale state. stopPropagation avoids
-    // a redundant focusGroup() render pass from the group-body mousedown above.
+    // forces a real refocus that breaks the stale state. __termInstanceHandled
+    // (checked by the group-body mousedown above) skips its redundant
+    // focusGroup() render pass without blocking the event's bubble to
+    // document — outside-click-to-close listeners on open dropdowns elsewhere
+    // in the app need to see mousedowns that land in the terminal too.
     // preventDefault mirrors xterm's own in-element mousedown handling: without
     // it WebKit's default post-mousedown focus resolution runs after our
     // textarea.focus() and, the wrapper padding being non-focusable, moves
     // focus to body — undoing the recovery (padding contains nothing selectable).
     el.addEventListener("mousedown", (e) => {
       e.preventDefault();
-      e.stopPropagation();
+      (e as TermMouseEvent).__termInstanceHandled = true;
       if (this.active !== t) {
         this.activate(t);
       } else {

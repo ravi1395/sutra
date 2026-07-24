@@ -5,6 +5,7 @@
 // Content is static + bundled so the panel works offline.
 import { icon } from "./icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { registerOpenPopover } from "./popovers";
 
 export interface Release {
   version: string;
@@ -187,6 +188,7 @@ export const TUTORIAL_SHORTCUTS: TutorialShortcut[] = [
 ];
 
 let openOverlay: HTMLElement | null = null;
+let unregisterPopover: (() => void) | null = null;
 
 function sectionHead(label: string): HTMLElement {
   const h = document.createElement("div");
@@ -341,6 +343,8 @@ export function openAboutModal(version: string, initialTab: AboutTab = "What's N
     overlay.remove();
     openOverlay = null;
     document.removeEventListener("keydown", onKey, true);
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Escape") {
@@ -358,4 +362,5 @@ export function openAboutModal(version: string, initialTab: AboutTab = "What's N
   renderTab(ABOUT_TABS.includes(initialTab) ? initialTab : "What's New");
   document.body.append(overlay);
   openOverlay = overlay;
+  unregisterPopover = registerOpenPopover(close);
 }

@@ -41,7 +41,26 @@ test("terminal wrapper mousedown suppresses WebKit's default focus steal", () =>
       "the browser's default mousedown action blurs it again (focus resolves to body), " +
       "so the terminal stays deaf despite the click",
   );
-  assert.match(handler, /e\.stopPropagation\(\)/, "group-body mousedown must not re-render on top of recovery");
+  assert.match(
+    handler,
+    /__termInstanceHandled\s*=\s*true/,
+    "group-body mousedown must not re-render on top of recovery — but must still bubble to " +
+      "document so outside-click-to-close listeners on open dropdowns elsewhere in the app see it",
+  );
+});
+
+test("group-body mousedown skips its redundant re-render without stopping propagation", () => {
+  const source = readFileSync("src/terminal.ts", "utf8");
+  const start = source.indexOf('col.addEventListener("mousedown"');
+  assert.ok(start >= 0, "group-body mousedown handler must exist");
+  const handler = source.slice(start, source.indexOf("});", start));
+
+  assert.match(handler, /__termInstanceHandled/, "must skip focusGroup() when the instance already handled the click");
+  assert.doesNotMatch(
+    handler,
+    /stopPropagation/,
+    "must not stop propagation — document-level outside-click listeners (dropdowns, popovers) need to see terminal clicks",
+  );
 });
 
 test("wrapper padding clicks re-assert focus in the click phase", () => {

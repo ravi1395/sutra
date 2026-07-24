@@ -148,6 +148,7 @@ import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPol
 import { mountWorkspaceBar, MENU_LABELS, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
+import { closeAllPopovers } from "./popovers";
 import {
   mountAutomationBar,
   loadAutomations,
@@ -3637,6 +3638,14 @@ window.addEventListener("keydown", (e) => {
 // Autosave: flush dirty tabs when the window loses focus (opt-in via settings).
 window.addEventListener("blur", () => {
   if (settings.autosaveOnBlur) actions.saveAllDirty();
+});
+
+// Dismiss every open dropdown/popover/modal when the app loses OS focus —
+// their document-mousedown outside-click listeners never fire for a click
+// (or app switch) that lands outside the WKWebView entirely.
+window.addEventListener("blur", () => {
+  closeAllPopovers();
+  closeOpenEditorsMenu();
 });
 
 // ---- chrome: icon buttons + menu bar ----

@@ -5,6 +5,7 @@ import { ask, message } from "@tauri-apps/plugin-dialog";
 import { clipboardWrite, cliInstall, type CliInstallOutcome } from "./ipc";
 import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
+import { registerOpenPopover } from "./popovers";
 
 export interface WorkspaceActions {
   recents(): Promise<RecentWorkspace[]>;
@@ -138,12 +139,15 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
   // ---- popover lifecycle ----
   let pop: HTMLElement | null = null;
   let openBtn: HTMLElement | null = null;
+  let unregisterPopover: (() => void) | null = null;
 
   function closeAll(): void {
     pop?.remove();
     pop = null;
     openBtn?.classList.remove("open");
     openBtn = null;
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
 
   function positionUnder(el: HTMLElement, anchor: HTMLElement): void {
@@ -172,6 +176,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
     pop = el;
     openBtn = anchor;
     anchor.classList.add("open");
+    unregisterPopover = registerOpenPopover(closeAll);
   }
 
   async function openWorkspaceMenu(): Promise<void> {

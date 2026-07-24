@@ -1,5 +1,6 @@
 // Reusable context menu popover for tree items and other UI components.
 // Model after menubar.ts openPopover() — positioned div, closes on Escape/outside-click.
+import { registerOpenPopover } from "./popovers";
 
 export interface ContextMenuItem {
   label: string;
@@ -8,10 +9,13 @@ export interface ContextMenuItem {
 }
 
 let currentPopover: HTMLElement | null = null;
+let unregisterPopover: (() => void) | null = null;
 
 function closeContextMenu(): void {
   currentPopover?.remove();
   currentPopover = null;
+  unregisterPopover?.();
+  unregisterPopover = null;
 }
 
 export function showContextMenu(
@@ -41,6 +45,7 @@ export function showContextMenu(
 
   containerEl.appendChild(el);
   currentPopover = el;
+  unregisterPopover = registerOpenPopover(closeContextMenu);
 
   // Global dismissers
   const dismissOnEscape = (ev: KeyboardEvent) => {

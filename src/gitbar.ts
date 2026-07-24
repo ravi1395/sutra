@@ -9,6 +9,7 @@ import {
   type BranchInfo,
 } from "./ipc";
 import { icon } from "./icons";
+import { registerOpenPopover } from "./popovers";
 
 export interface GitBarHandle {
   refresh(root: string, isCurrent?: () => boolean): Promise<void>;
@@ -25,6 +26,7 @@ function homeCollapse(path: string): string {
 export function createGitBar(container: HTMLElement): GitBarHandle {
   let dropdown: HTMLElement | null = null;
   let dropdownOpen = false;
+  let unregisterPopover: (() => void) | null = null;
 
   function closeDropdown(): void {
     if (dropdown) {
@@ -35,6 +37,8 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
     container.classList.remove("open");
     document.removeEventListener("mousedown", onOutside);
     document.removeEventListener("keydown", onKey);
+    unregisterPopover?.();
+    unregisterPopover = null;
   }
 
   function onOutside(e: MouseEvent): void {
@@ -177,6 +181,7 @@ export function createGitBar(container: HTMLElement): GitBarHandle {
     dd.style.left = `${rect.left}px`;
 
     dropdown = dd;
+    unregisterPopover = registerOpenPopover(closeDropdown);
     setTimeout(() => {
       document.addEventListener("mousedown", onOutside);
       document.addEventListener("keydown", onKey);
