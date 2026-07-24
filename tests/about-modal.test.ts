@@ -25,10 +25,10 @@ test("RELEASES is non-empty and every entry is well-formed", () => {
   }
 });
 
-test("RELEASES ships 2.3.43 first with the preview-tab fix note", () => {
+test("RELEASES ships 2.3.44 first with the dropdown close-on-blur/click-away note", () => {
   const cur: Release | undefined = RELEASES[0];
-  assert.equal(cur?.version, "2.3.43");
-  assert.match(cur!.notes.join(" "), /preview/i);
+  assert.equal(cur?.version, "2.3.44");
+  assert.match(cur!.notes.join(" "), /close/i);
 });
 
 test("TUTORIAL content is present and well-formed", () => {

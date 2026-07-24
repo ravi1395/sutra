@@ -55,6 +55,7 @@ import { marginEntries, type AiRange } from "./marginalia";
 import type { AgentChange } from "./ipc";
 import type { InlineHint } from "./debug-hints";
 import { previewKind } from "./preview";
+import { registerOpenPopover } from "./popovers";
 
 export interface Tab {
   id: string;
@@ -576,6 +577,7 @@ export class Pane {
   private marginaliaEl: HTMLElement;
   private marginaliaInnerEl: HTMLElement;
   private activeLensIndex: number | null = null;
+  private unregisterLensPopover: (() => void) | null = null;
   readonly previewEl: HTMLElement; // .preview-host (used in Phase 5)
   private welcomeEl: HTMLElement;
   private languageCompartment = new Compartment();
@@ -639,6 +641,8 @@ export class Pane {
   /** Release document-level listeners, the pending lang debounce, the CM view, and any open preview. */
   destroy(): void {
     document.removeEventListener("mousedown", this.onOutsideLensMouseDown, true);
+    this.unregisterLensPopover?.();
+    this.unregisterLensPopover = null;
     if (this.langTimer !== null) clearTimeout(this.langTimer);
     this.view.destroy();
     this.previewCtl?.dispose();
@@ -819,6 +823,7 @@ export class Pane {
     if (!hunk) return;
     const model = lensModel(this.active.hunks, hunkIndex, this.mgr.attributionForTab(this.active));
     this.activeLensIndex = hunkIndex;
+    this.unregisterLensPopover = registerOpenPopover(() => this.closeLens());
     this.view.dispatch({
       effects: setLens.of({
         ...model,
@@ -840,6 +845,8 @@ export class Pane {
   closeLens(): boolean {
     if (this.activeLensIndex == null) return false;
     this.activeLensIndex = null;
+    this.unregisterLensPopover?.();
+    this.unregisterLensPopover = null;
     this.view.dispatch({ effects: setLens.of(null) });
     return true;
   }

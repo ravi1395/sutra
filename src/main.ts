@@ -148,7 +148,7 @@ import { aggregateStripEl, initSessions, pauseSessionsPolling, resumeSessionsPol
 import { mountWorkspaceBar, MENU_LABELS, type WorkspaceBarHandle } from "./menubar";
 import { mountPalette, mountLocationPicker, type Command, type PaletteHandle } from "./palette";
 import { createGitBar, type GitBarHandle } from "./gitbar";
-import { closeAllPopovers } from "./popovers";
+import { closeAllPopovers, registerOpenPopover } from "./popovers";
 import {
   mountAutomationBar,
   loadAutomations,
@@ -1318,6 +1318,7 @@ let turnDropdownOpen = false;
 // close always starts collapsed rather than resuming wherever it was left.
 let turnDropdownVisibleCount = 6;
 let turnDropdownDismissers: { onKey: (ev: KeyboardEvent) => void; onMouse: (ev: MouseEvent) => void } | null = null;
+let unregisterTurnPopover: (() => void) | null = null;
 
 function closeTurnDropdown(): void {
   turnDropdownOpen = false;
@@ -1327,6 +1328,8 @@ function closeTurnDropdown(): void {
     document.removeEventListener("mousedown", turnDropdownDismissers.onMouse);
     turnDropdownDismissers = null;
   }
+  unregisterTurnPopover?.();
+  unregisterTurnPopover = null;
 }
 
 // Looks up summary/dropdown by id at event-time (not a captured element
@@ -1352,6 +1355,10 @@ function openTurnDropdown(root: string): void {
   turnDropdownDismissers = { onKey, onMouse };
   document.addEventListener("keydown", onKey);
   document.addEventListener("mousedown", onMouse);
+  unregisterTurnPopover = registerOpenPopover(() => {
+    closeTurnDropdown();
+    renderTurnStrip(root);
+  });
 }
 
 // ---- turn-scoped diff mode (turn-UX rehaul P2) ----
