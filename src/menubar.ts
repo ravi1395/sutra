@@ -2,7 +2,7 @@
 // primitive used by the app menu. The wordmark label shows the current folder name.
 import { icon } from "./icons";
 import { ask, message } from "@tauri-apps/plugin-dialog";
-import { clipboardWrite, cliInstall, cliInstallState, type CliInstallOutcome } from "./ipc";
+import { clipboardWrite, cliInstall, type CliInstallOutcome } from "./ipc";
 import type { RecentWorkspace } from "./workspace";
 import { workspaceMenuModel } from "./workspace";
 
@@ -24,8 +24,6 @@ export interface WorkspaceActions {
 export const MENU_LABELS = {
   openFolder: "open folder…",
   newWindow: "new window",
-  installCli: "install cli command",
-  updateCli: "update cli command",
   commandPalette: "command palette",
   problems: "problems",
   sessions: "sessions",
@@ -38,8 +36,6 @@ export const MENU_LABELS = {
 export const WORKSPACE_MENU_VERBS = [
   MENU_LABELS.openFolder,
   MENU_LABELS.newWindow,
-  MENU_LABELS.installCli,
-  MENU_LABELS.updateCli,
 ] as const;
 
 export const APP_MENU_VERBS = [
@@ -181,12 +177,7 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
   async function openWorkspaceMenu(): Promise<void> {
     // Recents are backend-async (shared across windows) — await before
     // building the popover so the row list reflects the live shared state.
-    // cliState degrades to "current" (no row) on any failure (non-macOS, IPC
-    // error) so a slow/missing backend never blocks or breaks the menu.
-    const [recents, cliState] = await Promise.all([
-      current ? actions.recents() : Promise.resolve([]),
-      cliInstallState().catch((): "absent" | "current" | "stale" => "current"),
-    ]);
+    const recents = current ? await actions.recents() : [];
     // Build the workspace selector menu using the shared .menu-card grammar.
     openPopover(wordmark, (el, close) => {
       const items = current ? workspaceMenuModel(current, recents, Date.now()) : [];
@@ -257,11 +248,6 @@ export function mountWorkspaceBar(root: HTMLElement, actions: WorkspaceActions):
 
       mkRow(MENU_LABELS.openFolder, "⌘O", () => actions.openFolder());
       mkRow(MENU_LABELS.newWindow, "⇧⌘N", () => actions.newWindow());
-      if (cliState !== "current") {
-        mkRow(cliState === "stale" ? MENU_LABELS.updateCli : MENU_LABELS.installCli, "", () => {
-          void runCliInstall();
-        });
-      }
     }, "menu-card");
   }
 

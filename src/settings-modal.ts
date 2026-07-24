@@ -14,7 +14,8 @@ import {
   type ViewVariant,
   type UserSettings,
 } from "./settings";
-import { hookInstall, hookStatus } from "./ipc";
+import { hookInstall, hookStatus, cliInstallState } from "./ipc";
+import { runCliInstall } from "./menubar";
 import { icon } from "./icons";
 
 export interface ShortcutEntry {
@@ -327,6 +328,25 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       close();
       deps.openAbout();
     };
+
+    // CLI install button: label reflects live install state (absent/stale/current),
+    // same async-refresh idiom as the Harness section's turn-hook install button.
+    const cliBtn = document.createElement("button");
+    cliBtn.className = "settings-reset";
+    cliBtn.textContent = "Install Sutra CLI";
+    const setCliButtonState = (state: "absent" | "current" | "stale"): void => {
+      cliBtn.disabled = state === "current";
+      cliBtn.textContent =
+        state === "current" ? "Installed ✓" : state === "stale" ? "Update Sutra CLI" : "Install Sutra CLI";
+    };
+    void cliInstallState().then(setCliButtonState, () => undefined);
+    cliBtn.onclick = () => {
+      void runCliInstall().then(() => cliInstallState().then(setCliButtonState, () => undefined));
+    };
+    const cliNote = document.createElement("p");
+    cliNote.className = "settings-note";
+    cliNote.textContent = "Run `sutra [path]` from a new terminal.";
+
     const reset = document.createElement("button");
     reset.className = "settings-reset";
     reset.textContent = "Reset all settings";
@@ -334,7 +354,7 @@ export function openSettingsModal(deps: SettingsModalDeps): void {
       deps.apply({ ...DEFAULT_SETTINGS });
       renderSection(activeSection);
     };
-    content.replaceChildren(head("About"), wordmark, tagline, desc, aboutLink, reset);
+    content.replaceChildren(head("About"), wordmark, tagline, desc, aboutLink, cliBtn, cliNote, reset);
   }
 
   const renderers: Record<Section, () => void> = {

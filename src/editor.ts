@@ -1097,7 +1097,48 @@ export class Pane {
     this.tabsEl.innerHTML = "";
     const graphite = document.documentElement.classList.contains("view-graphite");
     const north = document.documentElement.classList.contains("view-north");
-    if (this.previewSource) {
+    for (const tab of this.tabs) {
+      const isPreviewing = tab === this.previewSource;
+      const el = document.createElement("div");
+      el.className = graphite
+        ? "tab graphite-tab" + (tab === this.active ? " active" : "") + (isPreviewing ? " preview-tab" : "")
+        : north
+          ? "tab north-trail-tab" + (tab === this.active ? " active" : "") + (isPreviewing ? " preview-tab" : "")
+          : "tab" + (tab === this.active ? " active" : "") + (isPreviewing ? " preview-tab" : "");
+      if (!isPreviewing) {
+        el.addEventListener("pointerdown", (e) => {
+          if ((e.target as Element).closest(".tab-close")) return;
+          beginSplitPointerDrag({
+            event: e,
+            source: el,
+            target: this.mgr.splitTarget,
+            onStart: () => this.checkpoint(),
+            onDrop: (side) => this.mgr.moveTabToSide(tab.id, side),
+          });
+        });
+      }
+
+      const name = document.createElement("span");
+      name.textContent = isPreviewing ? previewTabName(tab.name) : tab.name + (tab.path ? "" : " *");
+      const dot = document.createElement("span");
+      dot.className = "tab-dirty";
+      dot.textContent = !isPreviewing && tab.dirty ? "●" : "";
+      const close = document.createElement("button");
+      close.className = "tab-close";
+      close.textContent = "×";
+
+      el.onclick = () => this.mgr.activateInPane(this, tab);
+      close.onclick = (e) => {
+        e.stopPropagation();
+        if (isPreviewing) this.mgr.closePreview(this);
+        else void this.mgr.requestClose(this, tab);
+      };
+      el.append(name, dot, close);
+      this.tabsEl.append(el);
+    }
+    // Agent-supplied preview (showAgentPreview) has no backing Tab in this.tabs —
+    // give it its own strip entry so the prompt stays visible/closable.
+    if (this.previewSource && !this.tabs.includes(this.previewSource)) {
       const el = document.createElement("div");
       el.className = graphite
         ? "tab active preview-tab graphite-tab"
@@ -1112,42 +1153,6 @@ export class Pane {
         this.mgr.closePreview(this);
       };
       el.append(name, close);
-      this.tabsEl.append(el);
-      return;
-    }
-    for (const tab of this.tabs) {
-      const el = document.createElement("div");
-      el.className = graphite
-        ? "tab graphite-tab" + (tab === this.active ? " active" : "")
-        : north
-          ? "tab north-trail-tab" + (tab === this.active ? " active" : "")
-          : "tab" + (tab === this.active ? " active" : "");
-      el.addEventListener("pointerdown", (e) => {
-        if ((e.target as Element).closest(".tab-close")) return;
-        beginSplitPointerDrag({
-          event: e,
-          source: el,
-          target: this.mgr.splitTarget,
-          onStart: () => this.checkpoint(),
-          onDrop: (side) => this.mgr.moveTabToSide(tab.id, side),
-        });
-      });
-
-      const name = document.createElement("span");
-      name.textContent = tab.name + (tab.path ? "" : " *");
-      const dot = document.createElement("span");
-      dot.className = "tab-dirty";
-      dot.textContent = tab.dirty ? "●" : "";
-      const close = document.createElement("button");
-      close.className = "tab-close";
-      close.textContent = "×";
-
-      el.onclick = () => this.mgr.activateInPane(this, tab);
-      close.onclick = (e) => {
-        e.stopPropagation();
-        void this.mgr.requestClose(this, tab);
-      };
-      el.append(name, dot, close);
       this.tabsEl.append(el);
     }
   }
@@ -1641,6 +1646,7 @@ export class EditorManager {
   }
 
   closePreview(pane: Pane): void {
+    if (pane.previewSource) pane.previewSource.previewMode = false;
     pane.hidePreview();
     if (this.panes[1] === pane && pane.tabs.length === 0) {
       void this.closeSplit(); // empty pane — no prompt possible
