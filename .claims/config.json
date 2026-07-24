@@ -1,0 +1,41 @@
+{
+  "timeout_cap": 600,
+  "default_timeout": 120,
+  "default_retries": 1,
+  "lint": {
+    "breadth_max": 0.25,
+    "ignore": [
+      "package.json",
+      "src-tauri/Cargo.toml",
+      "src-tauri/tauri.conf.json",
+      "CLAUDE.md",
+      "src/about-modal.ts"
+    ],
+    "denylist": [
+      "true",
+      ":",
+      "exit",
+      "echo"
+    ]
+  },
+  "staleness": {
+    "global_paths": [
+      "package-lock.json",
+      "Cargo.lock",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "bun.lockb"
+    ]
+  },
+  "replay": {
+    "env_allowlist": []
+  },
+  "evidence": {
+    "commit_max_bytes": 262144,
+    "retention_days": 30
+  },
+  "gate": {
+    "ci_commit_verdicts": false,
+    "ci_commit_refutations": true
+  }
+}
